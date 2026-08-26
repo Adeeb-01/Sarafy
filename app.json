@@ -1,0 +1,57 @@
+{
+  "expo": {
+    "name": "Sarafy",
+    "slug": "sarafy",
+    "version": "1.1.0",
+    "orientation": "portrait",
+    "platforms": [
+      "android",
+      "web"
+    ],
+    "icon": "./assets/icon.png",
+    "backgroundColor": "#EFF3F8",
+    "userInterfaceStyle": "automatic",
+    "plugins": [
+      "expo-sqlite",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "السماح لصرافي باختيار صور المنتجات",
+          "microphonePermission": false
+        }
+      ],
+      "expo-font",
+      "expo-sharing",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#EFF3F8",
+          "image": "./assets/adaptive-icon.png",
+          "imageWidth": 96,
+          "resizeMode": "contain",
+          "dark": {
+            "backgroundColor": "#0F1420",
+            "image": "./assets/adaptive-icon.png"
+          }
+        }
+      ]
+    ],
+    "android": {
+      "package": "com.sarafy.catalog",
+      "allowBackup": false,
+      "icon": "./assets/icon.png",
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#EFF3F8"
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "09f74e41-de62-46e7-b03f-8abe2d62892a"
+      }
+    }
+  }
+}

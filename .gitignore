@@ -1,0 +1,23 @@
+# انسخ محتويات .gitignore أولاً
+
+node_modules/
+.expo/
+.expo-*/
+dist/
+.git/
+.vscode/
+.idea/
+coverage/
+docs/
+*.log
+*.tmp
+*.bak
+*.apk
+*.aab
+*.sarafy
+*.xlsx
+*.xls
+
+# ملفات شخصية غير لازمة للبناء
+SAFE_IMPORT_TEST_PLAN.md
+README*.md
