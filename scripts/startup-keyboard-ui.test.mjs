@@ -74,7 +74,7 @@ test('native splash uses the Sarafy launcher icon, theme backgrounds, and post-s
   assert.match(colors, /activityBackground">#EFF3F8/);
   assert.match(nightColors, /splashscreen_background">#0F1420/);
   assert.match(nightColors, /activityBackground">#0F1420/);
-  assert.match(packageJson, /"expo-splash-screen": "~56\.0\.14"/);
+  assert.match(packageJson, /"expo-splash-screen": "~57\.0\.8"/);
   assert.match(appConfig, /"imageWidth": 96/);
   assert.match(appConfig, /"backgroundColor": "#0F1420"/);
   assert.match(appConfig, /"package": "com\.sarafy\.catalog"/);
