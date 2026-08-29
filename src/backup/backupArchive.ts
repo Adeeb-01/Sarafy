@@ -1,6 +1,7 @@
 import { File, FileMode, Paths } from 'expo-file-system';
 import { Product } from '@/types';
-import { isStoredProductImagePath } from '@/media/productImageStorage';
+import { isStoredProductImagePath, validateProductImageContent } from '@/media/productImageStorage';
+import { assertAvailableDiskSpace } from '@/utils/storageSafety';
 
 const MAGIC = 'SARAFY2\n';
 const LENGTH_WIDTH = 12;
@@ -65,6 +66,7 @@ export async function writeSarafyArchive<T>(
   const backupChecksum = checksumBytes(new TextEncoder().encode(backupJson));
   const headerBytes = new TextEncoder().encode(JSON.stringify({ backupJson, backupChecksum, images } satisfies ArchiveHeader));
   if (headerBytes.length > 999_999_999_999) throw new Error('BACKUP_METADATA_TOO_LARGE');
+  assertAvailableDiskSpace(MAGIC.length + LENGTH_WIDTH + headerBytes.length + images.reduce((sum, image) => sum + image.size, 0));
   if (!destination.exists) throw new Error('BACKUP_TEMP_FILE_NOT_CREATED');
   const output = destination.open(FileMode.Truncate);
   try {
@@ -137,6 +139,8 @@ export async function readSarafyArchive<T>(
     }
     if (sourceFile.size !== expectedSize) throw new Error('ARCHIVE_SIZE_MISMATCH');
     if (!extractImages) return { backup, extractedImages: 0 };
+    assertAvailableDiskSpace(images.reduce((sum, image) =>
+      allowedImagePaths && !allowedImagePaths.has(image.relativePath) ? sum : sum + image.size, 0));
     let extractedImages = 0;
     const replaced: Array<{ final: File; previous: File | null }> = [];
     try {
@@ -156,19 +160,25 @@ export async function readSarafyArchive<T>(
         const destinationUri = new File(Paths.document, 'sarafy', image.relativePath).uri;
         const temporary = new File(`${destinationUri}.importing`);
         temporary.create({ overwrite: true, intermediates: true });
-        const output = temporary.open(FileMode.Truncate);
         try {
-          let remaining = image.size;
-          let checksum = 0x811c9dc5;
-          while (remaining > 0) {
-            const bytes = source.readBytes(Math.min(CHUNK_SIZE, remaining));
-            if (!bytes.length) throw new Error('UNEXPECTED_ARCHIVE_EOF');
-            output.writeBytes(bytes);
-            checksum = updateChecksum(checksum, bytes);
-            remaining -= bytes.length;
-          }
-          if (!isLegacyHeader && checksum.toString(16).padStart(8, '0') !== image.checksum) throw new Error('IMAGE_CHECKSUM_MISMATCH');
-        } finally { output.close(); }
+          const output = temporary.open(FileMode.Truncate);
+          try {
+            let remaining = image.size;
+            let checksum = 0x811c9dc5;
+            while (remaining > 0) {
+              const bytes = source.readBytes(Math.min(CHUNK_SIZE, remaining));
+              if (!bytes.length) throw new Error('UNEXPECTED_ARCHIVE_EOF');
+              output.writeBytes(bytes);
+              checksum = updateChecksum(checksum, bytes);
+              remaining -= bytes.length;
+            }
+            if (!isLegacyHeader && checksum.toString(16).padStart(8, '0') !== image.checksum) throw new Error('IMAGE_CHECKSUM_MISMATCH');
+          } finally { output.close(); }
+          validateProductImageContent(temporary.uri);
+        } catch (error) {
+          if (temporary.exists) temporary.delete();
+          throw error;
+        }
         const final = new File(destinationUri);
         const previous = final.exists ? new File(`${destinationUri}.previous`) : null;
         if (previous) {

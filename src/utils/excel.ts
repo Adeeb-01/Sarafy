@@ -5,6 +5,7 @@ import * as XLSX from 'xlsx';
 import { Expense, Product, Sale, Settings } from '@/types';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
+import { assertAvailableDiskSpace } from '@/utils/storageSafety';
 
 const PRODUCTS_SHEET = 'Products';
 const CATEGORIES_SHEET = 'Categories';
@@ -112,6 +113,7 @@ export async function exportExcel(
   const filename = `sarafy-products-${new Date().toISOString().slice(0, 10)}.xlsx`;
   const uri = `${FileSystem.cacheDirectory}${filename}`;
   const base64 = XLSX.write(workbook, { bookType: 'xlsx', type: 'base64' });
+  assertAvailableDiskSpace(Math.ceil(base64.length * 0.75));
   await FileSystem.writeAsStringAsync(uri, base64, {
     encoding: FileSystem.EncodingType.Base64,
   });

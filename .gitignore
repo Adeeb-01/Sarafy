@@ -12,11 +12,25 @@ docs/
 *.log
 *.tmp
 *.bak
+*.writing
+*.importing
+*.previous
 *.apk
 *.aab
 *.sarafy
 *.xlsx
 *.xls
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+.DS_Store
+Thumbs.db
 
 # ملفات شخصية غير لازمة للبناء
 SAFE_IMPORT_TEST_PLAN.md

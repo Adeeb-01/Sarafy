@@ -190,7 +190,9 @@ export async function deleteProduct(id: number) {
     'SELECT COUNT(*) AS count FROM products WHERE image_uri=?', imageUri,
   );
   if ((references?.count ?? 0) === 0) {
-    await deleteProductImage(imageUri).catch(error => console.error('[ProductImageCleanupFailed]', error));
+    await deleteProductImage(imageUri).catch(error => {
+      if (__DEV__) console.error('[ProductImageCleanupFailed]', error);
+    });
   }
 }
 
@@ -229,7 +231,7 @@ export async function loadSettings(defaults: Settings): Promise<Settings> {
         settings.language = value;
       }
     } catch (error) {
-      console.error('[InvalidStoredSetting]', { key: row.key, error });
+      if (__DEV__) console.error('[InvalidStoredSetting]', { key: row.key, error });
     }
   }
   return settings;

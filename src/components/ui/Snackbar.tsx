@@ -1,4 +1,4 @@
-import { createContext, PropsWithChildren, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import { createContext, PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import Animated, { FadeInDown, FadeOutDown, ReduceMotion } from 'react-native-reanimated';
@@ -12,8 +12,13 @@ const SnackbarContext = createContext<SnackbarApi | null>(null);
 
 export function SnackbarProvider({ children, bottomInset }: PropsWithChildren<{ bottomInset?: number }>) {
   const { colors } = useAppTheme(); const insets = useSafeAreaInsets(); const [message, setMessage] = useState<Message | null>(null); const timeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const dismiss = useCallback(() => { if (timeout.current) clearTimeout(timeout.current); setMessage(null); }, []);
-  const show = useCallback((next: Message) => { if (timeout.current) clearTimeout(timeout.current); setMessage(next); timeout.current = setTimeout(() => setMessage(null), next.duration ?? 3600); }, []);
+  const dismiss = useCallback(() => { if (timeout.current) clearTimeout(timeout.current); timeout.current = null; setMessage(null); }, []);
+  const show = useCallback((next: Message) => {
+    if (timeout.current) clearTimeout(timeout.current);
+    setMessage(next);
+    timeout.current = setTimeout(() => { timeout.current = null; setMessage(null); }, next.duration ?? 3600);
+  }, []);
+  useEffect(() => () => { if (timeout.current) clearTimeout(timeout.current); }, []);
   const value = useMemo(() => ({ show, dismiss }), [show, dismiss]);
   const toneColor = message?.tone === 'error' ? colors.danger : message?.tone === 'success' ? colors.success : colors.primary;
   const toneSoft = message?.tone === 'error' ? colors.dangerSoft : message?.tone === 'success' ? colors.successSoft : colors.primarySoft;

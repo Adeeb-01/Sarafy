@@ -138,17 +138,19 @@ async function writeBackup(type: BackupManifest['backupType'], reason: string) {
     const backupDirectory = getBackupDirectory();
     const temporaryFile = temporaryUri ? new File(temporaryUri) : null;
     const failedFinalFile = finalUri ? new File(finalUri) : null;
-    console.error('[SarafyBackupWriteFailed]', {
-      stage,
-      uri: temporaryUri ?? finalUri,
-      backupDirectoryUri: backupDirectory.uri,
-      backupDirectoryExists: backupDirectory.exists,
-      temporaryFileExists: temporaryFile?.exists ?? false,
-      temporaryFileSize: temporaryFile?.size ?? 0,
-      finalFileExists: failedFinalFile?.exists ?? false,
-      finalFileSize: failedFinalFile?.size ?? 0,
-      originalError: error,
-    });
+    if (__DEV__) {
+      console.error('[SarafyBackupWriteFailed]', {
+        stage,
+        uri: temporaryUri ?? finalUri,
+        backupDirectoryUri: backupDirectory.uri,
+        backupDirectoryExists: backupDirectory.exists,
+        temporaryFileExists: temporaryFile?.exists ?? false,
+        temporaryFileSize: temporaryFile?.size ?? 0,
+        finalFileExists: failedFinalFile?.exists ?? false,
+        finalFileSize: failedFinalFile?.size ?? 0,
+        originalError: error,
+      });
+    }
     if (temporaryFile?.exists) temporaryFile.delete();
     // This file was created by the failed operation, never an older backup.
     if (finalWasPublished && failedFinalFile?.exists) failedFinalFile.delete();

@@ -16,6 +16,9 @@ android/app/.cxx/
 *.log
 *.tmp
 *.bak
+*.writing
+*.importing
+*.previous
 *.sarafy
 *.xlsx
 *.xls
@@ -24,6 +27,17 @@ android/app/.cxx/
 *.7z
 *.apk
 *.aab
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+.DS_Store
+Thumbs.db
 
 README*.md
 SAFE_IMPORT_TEST_PLAN.md

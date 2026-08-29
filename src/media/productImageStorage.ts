@@ -1,4 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { File, FileMode } from 'expo-file-system';
+import { assertAvailableDiskSpace } from '@/utils/storageSafety';
 
 const ROOT = `${FileSystem.documentDirectory}sarafy/media/products/`;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
@@ -13,11 +15,19 @@ async function ensureDirectory() {
   if (!info.exists) await FileSystem.makeDirectoryAsync(ROOT, { intermediates: true });
 }
 
-function extensionOf(uri: string) {
-  const clean = uri.split(/[?#]/)[0] ?? '';
-  const match = clean.match(/\.([a-zA-Z0-9]{2,5})$/);
-  const extension = match?.[1]?.toLowerCase();
-  return extension && ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(extension) ? extension : 'jpg';
+export function validateProductImageContent(uri: string) {
+  const file = new File(uri);
+  const handle = file.open(FileMode.ReadOnly);
+  let bytes: Uint8Array;
+  try { bytes = handle.readBytes(16); }
+  finally { handle.close(); }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'jpg';
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+      bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'png';
+  const ascii = String.fromCharCode(...bytes);
+  if (ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a')) return 'gif';
+  if (ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP') return 'webp';
+  throw new Error('INVALID_IMAGE_CONTENT');
 }
 
 export function resolveProductImageUri(path: string | null): string | null {
@@ -34,16 +44,18 @@ export async function validateProductImage(uri: string) {
 }
 
 export async function saveProductImage(sourceUri: string, productUuid: string): Promise<string> {
-  await validateProductImage(sourceUri);
+  const source = await validateProductImage(sourceUri);
+  assertAvailableDiskSpace('size' in source ? source.size : 0);
   await ensureDirectory();
-  const extension = extensionOf(sourceUri);
   const nonce = `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
-  const relative = `media/products/product-${productUuid}-${nonce}.${extension}`;
-  const destination = `${FileSystem.documentDirectory}sarafy/${relative}`;
-  const temporary = `${destination}.tmp`;
+  const basename = `product-${productUuid}-${nonce}`;
+  const temporary = `${ROOT}${basename}.tmp`;
   try {
     await FileSystem.copyAsync({ from: sourceUri, to: temporary });
     await validateProductImage(temporary);
+    const extension = validateProductImageContent(temporary);
+    const relative = `media/products/${basename}.${extension}`;
+    const destination = `${FileSystem.documentDirectory}sarafy/${relative}`;
     await FileSystem.moveAsync({ from: temporary, to: destination });
     return relative;
   } catch (error) {
