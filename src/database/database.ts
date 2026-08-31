@@ -2,6 +2,7 @@ import * as SQLite from 'expo-sqlite';
 import { Expense, Product, ProductInput, Sale, SaleItem, SaleItemInput, Settings } from '@/types';
 import { createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
+import { normalizeBarcode } from '@/utils/barcode';
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
@@ -129,6 +130,20 @@ export async function getProducts() {
   return db.getAllAsync<Product>('SELECT * FROM products ORDER BY created_at DESC');
 }
 
+export class ProductBarcodeConflictError extends Error {
+  constructor(public readonly productName: string) {
+    super('DUPLICATE_BARCODE');
+    this.name = 'ProductBarcodeConflictError';
+  }
+}
+
+export async function getProductByBarcode(barcodeValue: string) {
+  const barcode = normalizeBarcode(barcodeValue);
+  if (!barcode) return null;
+  const db = await dbPromise;
+  return db.getFirstAsync<Product>('SELECT * FROM products WHERE barcode = ? LIMIT 1', barcode);
+}
+
 export async function addProduct(input: ProductInput) {
   const db = await dbPromise;
   const now = new Date().toISOString();
@@ -137,14 +152,22 @@ export async function addProduct(input: ProductInput) {
     ? await saveProductImage(input.image_uri, uuid)
     : input.image_uri;
   try {
-    const result = await db.runAsync(
-      `INSERT INTO products (uuid,name,category,price_usd,cost_usd,image_uri,barcode,created_at,updated_at,is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-      uuid,
-      input.name.trim(), input.category.trim(), input.price_usd, input.cost_usd,
-      imageUri, input.barcode?.trim() || null, now, now,
-    );
-    return result.lastInsertRowId;
+    const barcode = normalizeBarcode(input.barcode);
+    let productId = 0;
+    await db.withExclusiveTransactionAsync(async transaction => {
+      if (barcode) {
+        const duplicate = await transaction.getFirstAsync<{ name: string }>('SELECT name FROM products WHERE barcode = ? LIMIT 1', barcode);
+        if (duplicate) throw new ProductBarcodeConflictError(duplicate.name);
+      }
+      const result = await transaction.runAsync(
+        `INSERT INTO products (uuid,name,category,price_usd,cost_usd,image_uri,barcode,created_at,updated_at,is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        uuid, input.name.trim(), input.category.trim(), input.price_usd, input.cost_usd,
+        imageUri, barcode, now, now,
+      );
+      productId = result.lastInsertRowId;
+    });
+    return productId;
   } catch (error) {
     if (imageUri !== input.image_uri) await deleteProductImage(imageUri);
     throw error;
@@ -161,11 +184,18 @@ export async function updateProduct(id: number, input: ProductInput) {
     ? await saveProductImage(input.image_uri, current.uuid)
     : input.image_uri;
   try {
-    await db.runAsync(
-      `UPDATE products SET name=?, category=?, price_usd=?, cost_usd=?, image_uri=?, barcode=?, updated_at=? WHERE id=?`,
-      input.name.trim(), input.category.trim(), input.price_usd, input.cost_usd,
-      imageUri, input.barcode?.trim() || null, new Date().toISOString(), id,
-    );
+    const barcode = normalizeBarcode(input.barcode);
+    await db.withExclusiveTransactionAsync(async transaction => {
+      if (barcode) {
+        const duplicate = await transaction.getFirstAsync<{ name: string }>('SELECT name FROM products WHERE barcode = ? AND id <> ? LIMIT 1', barcode, id);
+        if (duplicate) throw new ProductBarcodeConflictError(duplicate.name);
+      }
+      await transaction.runAsync(
+        `UPDATE products SET name=?, category=?, price_usd=?, cost_usd=?, image_uri=?, barcode=?, updated_at=? WHERE id=?`,
+        input.name.trim(), input.category.trim(), input.price_usd, input.cost_usd,
+        imageUri, barcode, new Date().toISOString(), id,
+      );
+    });
   } catch (error) {
     if (imageUri !== current.image_uri) await deleteProductImage(imageUri);
     throw error;

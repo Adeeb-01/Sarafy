@@ -16,6 +16,7 @@
     "test:startup-keyboard-ui": "node --test scripts/startup-keyboard-ui.test.mjs",
     "test:xlsx": "node --test scripts/xlsx-smoke.test.mjs",
     "test:release-hardening": "node --test scripts/release-hardening.test.mjs",
+    "test:barcode": "node --test scripts/barcode-ui.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
     "@expo/vector-icons": "^15.0.3",
     "babel-preset-expo": "~57.0.0",
     "expo": "~57.0.18",
+    "expo-camera": "~57.0.4",
     "expo-dev-client": "~57.0.16",
     "expo-document-picker": "~57.0.1",
     "expo-file-system": "~57.0.5",

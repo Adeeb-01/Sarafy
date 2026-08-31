@@ -3,6 +3,7 @@ import { createPreImportBackup } from '@/backup/backupManager';
 import { ImportOptions, ImportPayload, ImportPreview, ImportResult } from './importTypes';
 import { isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
+import { normalizeBarcode } from '@/utils/barcode';
 
 const SETTING_KEYS = ['exchangeRate', 'isRoundingEnabled', 'roundingTarget', 'language'] as const;
 
@@ -56,24 +57,25 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
     const localProductByImportedId = new Map<number, number>();
     if (options.entities.includes('products')) {
       for (const item of payload.products) {
+        const barcode = normalizeBarcode(item.barcode);
         importedProductIds.set(item.id, item.uuid);
         const local = await transaction.getFirstAsync<{ id: number; uuid: string; updated_at: string }>(
           'SELECT id,uuid,updated_at FROM products WHERE uuid=? OR (barcode IS NOT NULL AND barcode=?) LIMIT 1',
-          item.uuid, item.barcode,
+          item.uuid, barcode,
         );
         if (!local) {
           const result = await transaction.runAsync(
             `INSERT INTO products(uuid,name,category,price_usd,cost_usd,image_uri,barcode,created_at,updated_at,is_active)
              VALUES(?,?,?,?,?,?,?,?,?,?)`,
             item.uuid, item.name, item.category, item.price_usd, item.cost_usd, item.image_uri,
-            item.barcode, item.created_at, item.updated_at, item.is_active ?? 1,
+            barcode, item.created_at, item.updated_at, item.is_active ?? 1,
           );
           localProductByImportedId.set(item.id, result.lastInsertRowId);
           inserted += 1;
         } else if (shouldUseImported(local.updated_at, item.updated_at, options)) {
           await transaction.runAsync(
             `UPDATE products SET name=?,category=?,price_usd=?,cost_usd=?,barcode=?,updated_at=?,is_active=? WHERE uuid=?`,
-            item.name, item.category, item.price_usd, item.cost_usd, item.barcode,
+            item.name, item.category, item.price_usd, item.cost_usd, barcode,
             item.updated_at, item.is_active ?? 1, local.uuid,
           );
           localProductByImportedId.set(item.id, local.id);
@@ -189,7 +191,8 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
         !product.name.trim() || typeof product.category !== 'string' || !product.category.trim() ||
         !finite(product.price_usd) || product.price_usd < 0 || !finite(product.cost_usd) || product.cost_usd < 0 ||
         !validDate(product.created_at) || !validDate(product.updated_at) ||
-        (product.image_uri !== null && !isStoredProductImagePath(product.image_uri))) {
+        (product.image_uri !== null && !isStoredProductImagePath(product.image_uri)) ||
+        (product.barcode !== null && typeof product.barcode !== 'string')) {
       throw new Error('INVALID_PRODUCT');
     }
   }

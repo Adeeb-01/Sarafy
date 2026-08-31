@@ -59,7 +59,7 @@ test('raw modals are limited to shared sheet infrastructure and full-screen work
   const modalFiles = [];
   for (const file of files) if (/\bModal\b/.test(await read(file))) modalFiles.push(file);
   assert.deepEqual(modalFiles.sort(), [
-    'src/components/ProductFormModal.tsx',
+    'src/components/ProductFormModal.tsx', 'src/components/barcode/BarcodeScannerScreen.tsx',
     'src/components/sales/SalesViews.tsx',
     'src/components/ui/BottomSheet.tsx',
   ]);

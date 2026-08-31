@@ -12,16 +12,20 @@ import { radius, spacing, typography, useAppTheme } from '@/theme';
 import { resolveProductImageUri } from '@/media/productImageStorage';
 import { haptics } from '@/utils/haptics';
 import { uiText } from '@/i18n';
+import { BarcodeScannerScreen } from '@/components/barcode/BarcodeScannerScreen';
+import { ProductBarcodeConflictError } from '@/database/database';
+import { findBarcodeConflict, normalizeBarcode } from '@/utils/barcode';
 
 type FormMode = 'create' | 'edit' | 'duplicate';
 type SectionKey = 'details' | 'pricing' | 'identity' | 'image';
 type Errors = Partial<Record<'name' | 'category' | 'price' | 'cost' | 'barcode', string>>;
 
-export function ProductFormModal({ visible, product, mode, initialSection = 'details', onClose, onSaved }: {
+export function ProductFormModal({ visible, product, mode, initialSection = 'details', initialBarcode, onClose, onSaved }: {
   visible: boolean;
   product: Product | null;
   mode?: FormMode;
   initialSection?: SectionKey;
+  initialBarcode?: string;
   onClose: () => void;
   onSaved?: () => void;
 }) {
@@ -48,6 +52,7 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
   const [stickyActionHeight, setStickyActionHeight] = useState(0);
   const [removeImageConfirmOpen, setRemoveImageConfirmOpen] = useState(false);
   const [errors, setErrors] = useState<Errors>({});
+  const [scannerOpen, setScannerOpen] = useState(false);
 
   useEffect(() => {
     const duplicate = resolvedMode === 'duplicate';
@@ -55,7 +60,7 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
     setCategory(product?.category ?? '');
     setPrice(product ? String(product.price_usd) : '');
     setCost(product ? String(product.cost_usd ?? 0) : '');
-    setBarcode(duplicate ? '' : (product?.barcode ?? ''));
+    setBarcode(initialBarcode ?? (duplicate ? '' : (product?.barcode ?? '')));
     setImageUri(product?.image_uri ?? null);
     setImageLoading(Boolean(product?.image_uri));
     setImageFailed(false);
@@ -65,11 +70,18 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
       const timer = setTimeout(() => scrollToSection(initialSection), 260);
       return () => clearTimeout(timer);
     }
-  }, [copy.productForm.copySuffix, initialSection, product, resolvedMode, visible]);
+  }, [copy.productForm.copySuffix, initialBarcode, initialSection, product, resolvedMode, visible]);
 
   const setSectionOffset = (section: SectionKey) => (event: LayoutChangeEvent) => { sectionOffsets.current[section] = event.nativeEvent.layout.y; };
   const scrollToSection = (section: SectionKey) => scrollRef.current?.scrollTo({ y: Math.max(0, (sectionOffsets.current[section] ?? 0) - spacing.sm), animated: true });
   const clearError = (key: keyof Errors) => setErrors(current => current[key] ? { ...current, [key]: undefined } : current);
+  const updateBarcode = (value: string) => {
+    setBarcode(value);
+    const normalized = normalizeBarcode(value);
+    const editId = resolvedMode === 'edit' ? product?.id : undefined;
+    const duplicate = findBarcodeConflict(products, normalized, editId);
+    setErrors(current => ({ ...current, barcode: duplicate ? copy.productForm.duplicateBarcodeNamed(duplicate.name) : undefined }));
+  };
 
   const chooseImage = async () => {
     try {
@@ -95,7 +107,8 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
     if (!Number.isFinite(numericCost) || numericCost < 0) next.cost = copy.productForm.invalidCost;
     const normalizedBarcode = barcode.trim();
     const editId = resolvedMode === 'edit' ? product?.id : undefined;
-    if (normalizedBarcode && products.some(item => item.id !== editId && item.barcode?.trim() === normalizedBarcode)) next.barcode = copy.productForm.duplicateBarcode;
+    const duplicate = findBarcodeConflict(products, normalizedBarcode, editId);
+    if (duplicate) next.barcode = copy.productForm.duplicateBarcodeNamed(duplicate.name);
     setErrors(next);
     const first = (['name', 'category', 'price', 'cost', 'barcode'] as const).find(key => next[key]);
     if (first) {
@@ -126,6 +139,11 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
     } catch (error) {
       if (__DEV__) console.error('[ProductSaveFailed]', error);
       haptics.error();
+      if (error instanceof ProductBarcodeConflictError || (error instanceof Error && error.message === 'DUPLICATE_BARCODE')) {
+        setErrors(current => ({ ...current, barcode: error instanceof ProductBarcodeConflictError ? copy.productForm.duplicateBarcodeNamed(error.productName) : copy.productForm.duplicateBarcode }));
+        scrollToSection('identity');
+        return;
+      }
       const imageError = error instanceof Error && (error.message === 'IMAGE_TOO_LARGE' || error.message === 'IMAGE_NOT_FOUND');
       snackbar.show({ text: imageError ? copy.productForm.imageSaveFailed : copy.productForm.saveFailed, tone: 'error' });
     } finally { savingRef.current = false; setSaving(false); }
@@ -167,7 +185,7 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
           </FormSection>
 
           <FormSection title={copy.productForm.identification} icon="hash" rtl={rtl} onLayout={setSectionOffset('identity')}>
-            <AppInput label={copy.productForm.barcode} value={barcode} onChangeText={value => { setBarcode(value); clearError('barcode'); }} error={errors.barcode} helper={copy.productForm.barcodeHelper} helperVisibility="focus" placeholder={copy.productForm.barcodePlaceholder} keyboardType="numeric" accessibilityLabel={copy.productForm.barcode} rtl={rtl} style={styles.technicalInput} />
+            <AppInput label={copy.productForm.barcode} value={barcode} onChangeText={updateBarcode} error={errors.barcode} helper={copy.productForm.barcodeHelper} helperVisibility="focus" placeholder={copy.productForm.barcodePlaceholder} accessibilityLabel={copy.productForm.barcode} rtl={rtl} style={styles.technicalInput} trailing={<IconButton icon="camera" label={copy.scanner.scanBarcode} onPress={() => setScannerOpen(true)} style={styles.scanButton} />} />
           </FormSection>
 
           <FormSection title={copy.productForm.image} icon="image" rtl={rtl} onLayout={setSectionOffset('image')}>
@@ -190,6 +208,7 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
       </KeyboardAvoidingView>
       <CategoryPickerSheet visible={categoryOpen} onClose={() => setCategoryOpen(false)} value={category} onSelect={value => { setCategory(value); clearError('category'); }} />
       <ConfirmSheet visible={removeImageConfirmOpen} onClose={() => setRemoveImageConfirmOpen(false)} onConfirm={removeImage} title={copy.productForm.removeImageTitle} description={copy.productForm.removeImageDescription} confirmLabel={copy.productForm.removeImage} cancelLabel={copy.common.cancel} isDestructive rtl={rtl} />
+      <BarcodeScannerScreen visible={scannerOpen} mode="product-input" language={language} onClose={() => setScannerOpen(false)} onScan={scannedBarcode => { updateBarcode(scannedBarcode); setScannerOpen(false); return { kind: 'success', title: scannedBarcode }; }} />
     </SafeAreaView>
   </Modal>;
 }
@@ -218,6 +237,7 @@ const styles = StyleSheet.create({
   section: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.lg, gap: spacing.sm }, sectionHeader: { alignItems: 'center', gap: spacing.xs }, fieldGroup: { gap: spacing.xxs },
   select: { minHeight: 48, paddingHorizontal: spacing.sm, borderWidth: 1, borderRadius: radius.md, alignItems: 'center', gap: spacing.xs },
   technicalInput: { writingDirection: 'ltr' },
+  scanButton: { backgroundColor: 'transparent' },
   imageFrame: { height: 156, borderWidth: 1, borderStyle: 'dashed', borderRadius: radius.md, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }, imagePlaceholder: { alignItems: 'center', gap: spacing.xs },
   imageActions: { gap: spacing.xs }, flexButton: { flex: 1 }, removeButton: { minWidth: 104 },
   footer: { position: 'absolute', left: 0, right: 0, bottom: 0, borderTopWidth: StyleSheet.hairlineWidth }, footerAction: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs }, saveButton: { width: '100%', maxWidth: 688, alignSelf: 'center', minHeight: 50 },

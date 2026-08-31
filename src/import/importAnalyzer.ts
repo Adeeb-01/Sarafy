@@ -1,6 +1,7 @@
 import { getDatabase } from '@/database/database';
 import { ImportIssue, ImportOptions, ImportPayload, ImportPreview } from './importTypes';
 import { isUuid } from '@/utils/uuid';
+import { normalizeBarcode } from '@/utils/barcode';
 
 const emptySummary = () => ({
   newRecords: 0, updatedRecords: 0, unchangedRecords: 0, conflicts: 0,
@@ -50,7 +51,7 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
   if (options.entities.includes('products')) {
     const localProducts = await db.getAllAsync<Record<string, unknown> & { uuid: string; barcode: string | null; updated_at: string }>('SELECT * FROM products');
     const byUuid = new Map(localProducts.map(row => [row.uuid, row]));
-    const byBarcode = new Map(localProducts.filter(row => !!row.barcode).map(row => [row.barcode as string, row]));
+    const byBarcode = new Map(localProducts.flatMap(row => { const barcode = normalizeBarcode(row.barcode); return barcode ? [[barcode, row] as const] : []; }));
     const seen = new Set<string>();
     payload.products.forEach((product, index) => {
       if (!isUuid(product.uuid)) {
@@ -64,7 +65,15 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
         return;
       }
       seen.add(product.uuid);
-      const existing = byUuid.get(product.uuid) ?? (product.barcode ? byBarcode.get(product.barcode) : undefined);
+      const barcode = normalizeBarcode(product.barcode);
+      const existingByUuid = byUuid.get(product.uuid);
+      const existingByBarcode = barcode ? byBarcode.get(barcode) : undefined;
+      if (existingByUuid && existingByBarcode && existingByUuid.uuid !== existingByBarcode.uuid) {
+        summary.conflicts += 1;
+        issues.push({ entity: 'products', row: index + 1, field: 'barcode', value: barcode ?? '', code: 'DUPLICATE_BARCODE', action: 'review' });
+        return;
+      }
+      const existing = existingByUuid ?? existingByBarcode;
       if (!existing) summary.newRecords += 1;
       else if (comparable(existing) === comparable(product)) summary.unchangedRecords += 1;
       else if (options.conflictStrategy === 'manual' ||
@@ -75,13 +84,13 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
       } else summary.updatedRecords += 1;
     });
   }
-  const barcodeRows = payload.products.filter(product => !!product.barcode);
+  const barcodeRows = payload.products.map((product, index) => ({ product, index, barcode: normalizeBarcode(product.barcode) })).filter(row => !!row.barcode);
   const barcodeCounts = new Map<string, number>();
-  barcodeRows.forEach(product => barcodeCounts.set(product.barcode ?? '', (barcodeCounts.get(product.barcode ?? '') ?? 0) + 1));
-  barcodeRows.forEach((product, index) => {
-    if ((barcodeCounts.get(product.barcode ?? '') ?? 0) > 1) {
+  barcodeRows.forEach(row => barcodeCounts.set(row.barcode ?? '', (barcodeCounts.get(row.barcode ?? '') ?? 0) + 1));
+  barcodeRows.forEach(row => {
+    if ((barcodeCounts.get(row.barcode ?? '') ?? 0) > 1) {
       summary.conflicts += 1;
-      issues.push({ entity: 'products', row: index + 1, field: 'barcode', value: product.barcode ?? '', code: 'DUPLICATE_BARCODE', action: 'review' });
+      issues.push({ entity: 'products', row: row.index + 1, field: 'barcode', value: row.barcode ?? '', code: 'DUPLICATE_BARCODE', action: 'review' });
     }
   });
   await analyze('sales', payload.sales);

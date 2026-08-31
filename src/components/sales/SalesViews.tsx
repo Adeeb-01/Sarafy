@@ -27,9 +27,10 @@ type NewSaleProps = {
   onReviewCart: () => void;
   onNewSale: () => void;
   onShare: (sale: Sale) => void;
+  onOpenScanner: () => void;
 };
 
-export function NewSaleView({ products, settings, cart, completedSale, bottomNavigationInset, sharing, onAdd, onQuantityChange, onQuantityDelta, onReviewCart, onNewSale, onShare }: NewSaleProps) {
+export function NewSaleView({ products, settings, cart, completedSale, bottomNavigationInset, sharing, onAdd, onQuantityChange, onQuantityDelta, onReviewCart, onNewSale, onShare, onOpenScanner }: NewSaleProps) {
   const { colors } = useAppTheme();
   const rtl = settings.language === 'ar';
   const copy = uiText(settings.language);
@@ -50,7 +51,7 @@ export function NewSaleView({ products, settings, cart, completedSale, bottomNav
 
   return <View style={styles.flex}>
     <View style={[styles.searchSurface, { backgroundColor: colors.surfaceSecondary }]}>
-      <AppInput value={search} onChangeText={setSearch} placeholder={copy.sales.search} accessibilityLabel={copy.sales.searchAccessibility} rtl={rtl} leadingIcon="search" subtleFocus autoCorrect={false} returnKeyType="search" />
+      <View style={[styles.cashierSearchRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><AppInput value={search} onChangeText={setSearch} placeholder={copy.sales.search} accessibilityLabel={copy.sales.searchAccessibility} rtl={rtl} leadingIcon="search" subtleFocus autoCorrect={false} returnKeyType="search" containerStyle={styles.cashierSearchInput} /><IconButton icon="camera" label={copy.scanner.scanBarcode} tone="primary" onPress={onOpenScanner} /></View>
       <View style={[styles.resultCaption, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><Feather name="package" size={13} color={colors.textMuted} /><Text style={[typography.caption, { color: colors.textMuted }]}>{copy.sales.productCount(String(visibleProducts.length))}</Text></View>
     </View>
     <FlatList style={styles.flex} data={visibleProducts} keyExtractor={item => String(item.id)} renderItem={renderItem} ItemSeparatorComponent={CashierRowSeparator} contentContainerStyle={[contentStyle, visibleProducts.length === 0 && styles.grow]} keyboardShouldPersistTaps="handled" initialNumToRender={14} maxToRenderPerBatch={14} updateCellsBatchingPeriod={40} windowSize={7} removeClippedSubviews getItemLayout={(_, index) => ({ length: CASHIER_PRODUCT_ROW_HEIGHT + CASHIER_PRODUCT_ROW_GAP, offset: (CASHIER_PRODUCT_ROW_HEIGHT + CASHIER_PRODUCT_ROW_GAP) * index, index })} ListEmptyComponent={<EmptyState icon="search" title={copy.sales.noProducts} description={copy.sales.noProductsDescription} />} />
@@ -168,7 +169,7 @@ function formatInvoiceDate(value: string, language: Settings['language'], full =
 
 const styles = StyleSheet.create({
   flex: { flex: 1 }, grow: { flexGrow: 1, justifyContent: 'center' }, pressed: { opacity: 0.76, transform: [{ scale: 0.99 }] }, fullButton: { width: '100%' },
-  searchSurface: { paddingHorizontal: spacing.md, paddingTop: spacing.xs, paddingBottom: spacing.xs, gap: spacing.xxs }, resultCaption: { alignItems: 'center', gap: spacing.xxs },
+  searchSurface: { paddingHorizontal: spacing.md, paddingTop: spacing.xs, paddingBottom: spacing.xs, gap: spacing.xxs }, cashierSearchRow: { alignItems: 'flex-end', gap: spacing.xs }, cashierSearchInput: { minWidth: 0, flex: 1 }, resultCaption: { alignItems: 'center', gap: spacing.xxs },
   cartSummary: { position: 'absolute', left: 0, right: 0, minHeight: 70, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderTopWidth: StyleSheet.hairlineWidth, alignItems: 'center', gap: spacing.sm }, cartSummaryCopy: { minWidth: 0, flex: 1 }, summaryMoney: { justifyContent: 'flex-start' }, summaryMoneyText: { ...typography.titleLarge, fontSize: 20, lineHeight: 26 }, reviewButton: { minWidth: 132 },
   reviewPage: { flex: 1 }, reviewHeader: { minHeight: 66, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderBottomWidth: StyleSheet.hairlineWidth, alignItems: 'center', gap: spacing.sm }, reviewFooter: { position: 'absolute', left: 0, right: 0, bottom: 0, borderTopWidth: StyleSheet.hairlineWidth }, reviewFooterAction: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs },
   cartLine: { height: CART_LINE_HEIGHT, paddingVertical: spacing.xxs, alignItems: 'center', gap: spacing.sm }, cartLineCopy: { minWidth: 0, flex: 1 }, cartLineActions: { alignItems: 'center', gap: spacing.xxs }, removeCartLine: { backgroundColor: 'transparent' }, lineMoney: { justifyContent: 'flex-start' }, lineMoneyText: { ...typography.numericEmphasis }, lineSeparator: { height: StyleSheet.hairlineWidth },

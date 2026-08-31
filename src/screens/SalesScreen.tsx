@@ -11,8 +11,11 @@ import { calculateSypPrice } from '@/utils/priceCalculator';
 import { formatNumber } from '@/utils/formatters';
 import { shareInvoicePdf } from '@/utils/invoice';
 import { haptics } from '@/utils/haptics';
-import { calculateCartSubtotal, changeCartLineQuantity, clampCartDiscount, parseLocalizedNumber, setCartLineQuantity } from '@/utils/salesUiState';
+import { addCartLine, calculateCartSubtotal, changeCartLineQuantity, clampCartDiscount, parseLocalizedNumber, setCartLineQuantity } from '@/utils/salesUiState';
 import { uiText } from '@/i18n';
+import { BarcodeScannerScreen } from '@/components/barcode/BarcodeScannerScreen';
+import { ProductFormModal } from '@/components/ProductFormModal';
+import { createProductBarcodeMap, findProductByExactBarcode } from '@/utils/barcode';
 
 type SalesSection = 'sale' | 'invoices' | 'expenses' | 'analytics';
 
@@ -31,6 +34,8 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const [completedSale, setCompletedSale] = useState<Sale | null>(null);
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
   const [sharingSaleId, setSharingSaleId] = useState<number | null>(null);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [unknownProductBarcode, setUnknownProductBarcode] = useState<string | null>(null);
   const savingRef = useRef(false);
   const sharingRef = useRef(false);
   const expenseSavingRef = useRef(false);
@@ -41,6 +46,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const appliedDiscount = clampCartDiscount(parsedDiscount, subtotal);
   const total = subtotal - appliedDiscount;
   const cartItemCount = useMemo(() => cart.reduce((sum, line) => sum + line.quantity, 0), [cart]);
+  const productsByBarcode = useMemo(() => createProductBarcodeMap(state.products), [state.products]);
   const discountError = useMemo(() => {
     if (!discount.trim()) return undefined;
     if (!Number.isFinite(parsedDiscount)) return copy.sales.invalidDiscount;
@@ -52,17 +58,13 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const addProduct = useCallback((product: Product) => {
     haptics.tap();
     setCompletedSale(null);
-    setCart(current => {
-      const found = current.find(line => line.productId === product.id);
-      if (found) return current.map(line => line.productId === product.id ? { ...line, quantity: Math.min(999, line.quantity + 1) } : line);
-      return [...current, {
+    setCart(current => addCartLine(current, {
         productId: product.id,
         productName: product.name,
         quantity: 1,
         unitPriceSyp: calculateSypPrice({ priceUsd: product.price_usd, exchangeRate: settings.exchangeRate, isRoundingEnabled: settings.isRoundingEnabled, roundingTarget: settings.roundingTarget }),
         unitCostSyp: product.cost_usd * settings.exchangeRate,
-      }];
-    });
+      }));
   }, [settings.exchangeRate, settings.isRoundingEnabled, settings.roundingTarget]);
 
   const setQuantity = useCallback((productId: number, quantity: number) => {
@@ -141,7 +143,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     <View style={styles.page}>
       <View style={[styles.header, { backgroundColor: colors.surfaceSecondary }]}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.subtitle}</Text><SegmentedControl value={section} onChange={setSection} options={sectionOptions} rtl={rtl} subtle compactLabels accessibilityLabel={copy.sales.sections} /></View>
       <Animated.View key={section} entering={FadeIn.duration(170).reduceMotion(ReduceMotion.System)} style={styles.content}>
-        {section === 'sale' && <NewSaleView products={state.products} settings={settings} cart={cart} completedSale={completedSale} bottomNavigationInset={bottomNavigationInset} sharing={completedSale?.id === sharingSaleId} onAdd={addProduct} onQuantityChange={setQuantity} onQuantityDelta={changeQuantity} onReviewCart={() => setReviewOpen(true)} onNewSale={() => setCompletedSale(null)} onShare={sale => void shareSale(sale)} />}
+        {section === 'sale' && <NewSaleView products={state.products} settings={settings} cart={cart} completedSale={completedSale} bottomNavigationInset={bottomNavigationInset} sharing={completedSale?.id === sharingSaleId} onAdd={addProduct} onQuantityChange={setQuantity} onQuantityDelta={changeQuantity} onReviewCart={() => setReviewOpen(true)} onNewSale={() => setCompletedSale(null)} onShare={sale => void shareSale(sale)} onOpenScanner={() => setScannerOpen(true)} />}
         {section === 'invoices' && <InvoiceHistory sales={state.sales} language={state.language} bottomNavigationInset={bottomNavigationInset} selectedSale={selectedSale} sharingSaleId={sharingSaleId} onSelect={setSelectedSale} onCloseDetails={() => setSelectedSale(null)} onShare={sale => void shareSale(sale)} />}
         {section === 'expenses' && <ExpensesView expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} onCreateExpense={createExpense} />}
         {section === 'analytics' && <AnalyticsDashboard sales={state.sales} expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} />}
@@ -149,6 +151,16 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     </View>
     <CartReviewModal visible={reviewOpen} cart={cart} discount={discount} discountError={discountError} subtotal={subtotal} appliedDiscount={appliedDiscount} total={total} language={state.language} saving={saving} onClose={() => setReviewOpen(false)} onDiscountChange={setDiscount} onQuantityChange={setQuantity} onQuantityDelta={changeQuantity} onRequestComplete={requestComplete} />
     <ConfirmSheet visible={confirmOpen} onClose={() => setConfirmOpen(false)} onConfirm={() => void completeSale()} title={copy.sales.completeTitle} description={copy.sales.itemsLabel(formatNumber(cartItemCount, state.language))} confirmLabel={copy.sales.completeSale} cancelLabel={copy.sales.review} loading={saving} rtl={rtl} icon="check-circle" tone="success"><MonetaryValue value={total} language={state.language} currencyLabel={copy.common.syp} compact={false} /></ConfirmSheet>
+    <BarcodeScannerScreen visible={scannerOpen} mode="cashier" language={state.language} onClose={() => setScannerOpen(false)} cartItemCount={formatNumber(cartItemCount, state.language)} cartTotal={total} onAddUnknown={barcode => { setScannerOpen(false); setUnknownProductBarcode(barcode); }} onScan={barcode => {
+      const product = findProductByExactBarcode(productsByBarcode, barcode);
+      if (!product) return { kind: 'unknown', barcode };
+      if (product.is_active === 0) return { kind: 'inactive', title: product.name };
+      const nextQuantity = Math.min(999, (cart.find(line => line.productId === product.id)?.quantity ?? 0) + 1);
+      const amount = calculateSypPrice({ priceUsd: product.price_usd, exchangeRate: settings.exchangeRate, isRoundingEnabled: settings.isRoundingEnabled, roundingTarget: settings.roundingTarget });
+      addProduct(product);
+      return { kind: 'success', title: product.name, quantity: formatNumber(nextQuantity, state.language), amount };
+    }} />
+    <ProductFormModal visible={unknownProductBarcode !== null} product={null} mode="create" initialSection="identity" initialBarcode={unknownProductBarcode ?? undefined} onClose={() => setUnknownProductBarcode(null)} />
   </ScreenContainer>;
 }
 

@@ -14,6 +14,15 @@
     "plugins": [
       "expo-sqlite",
       [
+        "expo-camera",
+        {
+          "cameraPermission": "السماح لصرافي باستخدام الكاميرا لمسح الباركود",
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": true
+        }
+      ],
+      [
         "expo-image-picker",
         {
           "photosPermission": "السماح لصرافي باختيار صور المنتجات",

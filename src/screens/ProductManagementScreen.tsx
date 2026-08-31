@@ -5,21 +5,24 @@ import { ProductFormModal } from '@/components/ProductFormModal';
 import { CategoryPickerSheet } from '@/components/CategoryPickerSheet';
 import { PRODUCT_ROW_GAP, PRODUCT_ROW_HEIGHT, ProductListRow } from '@/components/ProductListRow';
 import { EMPTY_PRODUCT_FILTERS, ProductFilters, ProductFiltersSheet, ProductSort, ProductSortSheet } from '@/components/ProductControlSheets';
-import { ActionSheet, AppButton, ConfirmSheet, EmptyState, FilterChip, ListItem, ScreenContainer, SearchInput, StatusChip, useSnackbar } from '@/components/ui';
+import { ActionSheet, AppButton, ConfirmSheet, EmptyState, FilterChip, IconButton, ListItem, ScreenContainer, SearchInput, StatusChip, useSnackbar } from '@/components/ui';
 import { useAppStore } from '@/store/useAppStore';
 import { Product } from '@/types';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
 import { haptics } from '@/utils/haptics';
 import { uiText } from '@/i18n';
+import { BarcodeScannerScreen } from '@/components/barcode/BarcodeScannerScreen';
+import { createProductBarcodeMap, findProductByExactBarcode } from '@/utils/barcode';
 
 type QuickFilter = 'all' | 'active' | 'no_image' | 'custom';
-type FormState = { open: boolean; product: Product | null; mode: 'create' | 'edit' | 'duplicate'; initialSection: 'details' | 'image' };
+type FormState = { open: boolean; product: Product | null; mode: 'create' | 'edit' | 'duplicate'; initialSection: 'details' | 'identity' | 'image'; initialBarcode?: string };
 
 export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomNavigationInset?: number }) {
   const state = useAppStore(); const { colors } = useAppTheme(); const snackbar = useSnackbar();
   const rtl = state.language === 'ar';
   const copy = uiText(state.language);
   const [query, setQuery] = useState('');
+  const [exactScanBarcode, setExactScanBarcode] = useState<string | null>(null);
   const deferredQuery = useDeferredValue(query);
   const [filters, setFilters] = useState<ProductFilters>(EMPTY_PRODUCT_FILTERS);
   const [sort, setSort] = useState<ProductSort>('newest');
@@ -32,6 +35,8 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
   const [deleting, setDeleting] = useState(false);
   const deletingRef = useRef(false);
   const [form, setForm] = useState<FormState>({ open: false, product: null, mode: 'create', initialSection: 'details' });
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const productsByBarcode = useMemo(() => createProductBarcodeMap(state.products), [state.products]);
 
   const quickFilter: QuickFilter = useMemo(() => {
     if (filters.category !== 'all' || filters.price !== 'all') return 'custom';
@@ -45,7 +50,9 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
   const visibleProducts = useMemo(() => {
     const normalized = deferredQuery.trim().toLocaleLowerCase();
     const filtered = state.products.filter(product => {
-      const matchesSearch = !normalized || product.name.toLocaleLowerCase().includes(normalized) || product.category.toLocaleLowerCase().includes(normalized) || product.barcode?.toLocaleLowerCase().includes(normalized);
+      const matchesSearch = exactScanBarcode !== null
+        ? product.barcode === exactScanBarcode
+        : !normalized || product.name.toLocaleLowerCase().includes(normalized) || product.category.toLocaleLowerCase().includes(normalized) || product.barcode?.toLocaleLowerCase().includes(normalized);
       const matchesCategory = filters.category === 'all' || product.category === filters.category;
       const matchesStatus = filters.status === 'all' || (filters.status === 'active' ? product.is_active !== 0 : product.is_active === 0);
       const matchesImage = filters.image === 'all' || (filters.image === 'with' ? Boolean(product.image_uri) : !product.image_uri);
@@ -59,7 +66,7 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
       if (sort === 'category') return a.category.localeCompare(b.category, state.language) || a.name.localeCompare(b.name, state.language);
       return b.created_at.localeCompare(a.created_at);
     });
-  }, [deferredQuery, filters, sort, state.language, state.products]);
+  }, [deferredQuery, exactScanBarcode, filters, sort, state.language, state.products]);
 
   const openCreate = useCallback(() => setForm({ open: true, product: null, mode: 'create', initialSection: 'details' }), []);
   const openEdit = useCallback((product: Product) => setForm({ open: true, product, mode: 'edit', initialSection: 'details' }), []);
@@ -70,7 +77,7 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
     else if (value === 'active') setFilters({ ...EMPTY_PRODUCT_FILTERS, status: 'active' });
     else setFilters({ ...EMPTY_PRODUCT_FILTERS, image: 'without' });
   };
-  const clearCriteria = () => { setQuery(''); setFilters(EMPTY_PRODUCT_FILTERS); };
+  const clearCriteria = () => { setQuery(''); setExactScanBarcode(null); setFilters(EMPTY_PRODUCT_FILTERS); };
 
   const performDelete = async () => {
     if (!deleteProduct || deletingRef.current) return;
@@ -103,7 +110,7 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
         <Pressable accessibilityRole="button" accessibilityLabel={copy.products.manageCategories} accessibilityHint={copy.products.manageCategoriesHint} onPress={() => { haptics.tap(); setCategoryManagerOpen(true); }} style={({ pressed }) => [styles.categoryButton, { backgroundColor: colors.surface, borderColor: colors.border, flexDirection: rtl ? 'row-reverse' : 'row' }, pressed && styles.pressed]}><Feather name="tag" size={18} color={colors.textSecondary} /><Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8} maxFontSizeMultiplier={1.2} style={[typography.label, { color: colors.textSecondary }]}>{copy.products.categories}</Text></Pressable>
         <AppButton label={copy.common.add} icon="plus" onPress={openCreate} style={styles.addButton} />
       </View>
-      <SearchInput value={query} onChangeText={setQuery} placeholder={copy.products.search} clearLabel={copy.common.clearSearch} rtl={rtl} />
+      <View style={[styles.searchRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={styles.searchInput}><SearchInput value={query} onChangeText={value => { setQuery(value); setExactScanBarcode(null); }} placeholder={copy.products.search} clearLabel={copy.common.clearSearch} rtl={rtl} /></View><IconButton icon="camera" label={copy.scanner.scanBarcode} tone="primary" onPress={() => setScannerOpen(true)} /></View>
       <View style={[styles.toolRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}>
         <Pressable accessibilityRole="button" accessibilityLabel={copy.products.openFilters} onPress={() => { haptics.tap(); setFiltersOpen(true); }} style={({ pressed }) => [styles.toolButton, { backgroundColor: activeFilterCount ? colors.primarySoft : colors.surfaceSecondary, borderColor: activeFilterCount ? colors.primary : colors.border, flexDirection: rtl ? 'row-reverse' : 'row' }, pressed && styles.pressed]}><Feather name="filter" size={17} color={activeFilterCount ? colors.primary : colors.textSecondary} /><Text style={[typography.label, { color: activeFilterCount ? colors.primary : colors.textSecondary }]}>{copy.products.filter}</Text>{activeFilterCount > 0 && <StatusChip label={String(activeFilterCount)} tone="info" />}</Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={copy.products.openSort} onPress={() => { haptics.tap(); setSortOpen(true); }} style={({ pressed }) => [styles.toolButton, { backgroundColor: colors.surfaceSecondary, borderColor: colors.border, flexDirection: rtl ? 'row-reverse' : 'row' }, pressed && styles.pressed]}><Feather name="sliders" size={17} color={colors.textSecondary} /><Text style={[typography.label, { color: colors.textSecondary }]}>{copy.products.sort}</Text></Pressable>
@@ -133,12 +140,24 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
     </ActionSheet>
 
     <ConfirmSheet visible={Boolean(deleteProduct)} onClose={() => setDeleteProduct(null)} onConfirm={() => void performDelete()} title={copy.products.deleteTitle} description={copy.products.deleteWarning(deleteProduct?.name ?? '')} confirmLabel={copy.products.deleteConfirm} cancelLabel={copy.common.cancel} isDestructive loading={deleting} rtl={rtl} />
-    <ProductFormModal visible={form.open} product={form.product} mode={form.mode} initialSection={form.initialSection} onClose={closeForm} />
+    <ProductFormModal visible={form.open} product={form.product} mode={form.mode} initialSection={form.initialSection} initialBarcode={form.initialBarcode} onClose={closeForm} />
+    <BarcodeScannerScreen visible={scannerOpen} mode="product-search" language={state.language} onClose={() => setScannerOpen(false)} onAddUnknown={barcode => { setScannerOpen(false); setForm({ open: true, product: null, mode: 'create', initialSection: 'identity', initialBarcode: barcode }); }} onScan={barcode => {
+      const product = findProductByExactBarcode(productsByBarcode, barcode);
+      if (!product) return { kind: 'unknown', barcode };
+      setQuery(barcode);
+      setExactScanBarcode(barcode);
+      setFilters(EMPTY_PRODUCT_FILTERS);
+      setScannerOpen(false);
+      haptics.success();
+      snackbar.show({ text: copy.scanner.found, tone: 'success' });
+      return { kind: 'success', title: product.name };
+    }} />
   </ScreenContainer>;
 }
 
 const styles = StyleSheet.create({
   header: { paddingHorizontal: spacing.md, paddingTop: spacing.xs, paddingBottom: spacing.sm, gap: spacing.xs },
+  searchRow: { alignItems: 'flex-end', gap: spacing.xs }, searchInput: { minWidth: 0, flex: 1 },
   titleRow: { minHeight: 48, alignItems: 'center', gap: spacing.xs }, titleCopy: { minWidth: 0, flex: 1 },
   categoryButton: { minWidth: 44, minHeight: 44, paddingHorizontal: spacing.sm, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', gap: spacing.xxs }, addButton: { minWidth: 88 },
   toolRow: { minHeight: 44, alignItems: 'center', gap: spacing.xs }, toolButton: { minHeight: 44, paddingHorizontal: spacing.sm, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', gap: spacing.xxs }, resultCount: { minWidth: 0, flex: 1, alignItems: 'center', gap: spacing.xxs }, resultContext: { minWidth: 0, flexShrink: 1 },

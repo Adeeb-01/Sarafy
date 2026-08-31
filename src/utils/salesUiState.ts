@@ -1,5 +1,11 @@
 export type QuantityLine = { productId: number; quantity: number; unitPriceSyp: number };
 
+export function addCartLine<T extends QuantityLine>(cart: T[], line: T) {
+  const existing = cart.some(item => item.productId === line.productId);
+  if (existing) return cart.map(item => item.productId === line.productId ? { ...item, quantity: Math.min(999, item.quantity + 1) } : item);
+  return [...cart, { ...line, quantity: 1 }];
+}
+
 export function setCartLineQuantity<T extends QuantityLine>(cart: T[], productId: number, quantity: number) {
   const nextQuantity = Math.max(0, Math.min(999, quantity));
   return cart.map(line => line.productId === productId ? { ...line, quantity: nextQuantity } : line).filter(line => line.quantity > 0);
