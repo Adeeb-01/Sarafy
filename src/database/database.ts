@@ -1,12 +1,13 @@
 import * as SQLite from 'expo-sqlite';
-import { Expense, InvoiceQuery, Product, ProductInput, Sale, SaleItem, SaleItemInput, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
+import { Expense, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
 import { createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
+import { deriveReturnStatus, previewReturn, returnedQuantities } from '@/utils/returns';
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 async function migratePortableIdentity() {
   const db = await dbPromise;
@@ -94,6 +95,42 @@ async function migrateSalesV9() {
   });
 }
 
+async function migrateReturnsV10() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 10) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    await transaction.execAsync(`
+      CREATE TABLE sale_returns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE RESTRICT,
+        refund_total_syp INTEGER NOT NULL CHECK(refund_total_syp >= 0),
+        returned_cost_syp INTEGER NOT NULL CHECK(returned_cost_syp >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE sale_return_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        return_id INTEGER NOT NULL REFERENCES sale_returns(id) ON DELETE CASCADE,
+        sale_item_id INTEGER NOT NULL REFERENCES sale_items(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK(quantity > 0),
+        refund_amount_syp INTEGER NOT NULL CHECK(refund_amount_syp >= 0),
+        cost_reversal_syp INTEGER NOT NULL CHECK(cost_reversal_syp >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_sale_returns_sale_id ON sale_returns(sale_id);
+      CREATE INDEX idx_sale_returns_created_at ON sale_returns(created_at);
+      CREATE INDEX idx_sale_return_items_return_id ON sale_return_items(return_id);
+      CREATE INDEX idx_sale_return_items_sale_item_id ON sale_return_items(sale_item_id);
+      PRAGMA user_version = 10;
+    `);
+  });
+}
+
 export async function initializeDatabase() {
   const db = await dbPromise;
   await db.execAsync(`
@@ -160,6 +197,7 @@ export async function initializeDatabase() {
   }
   await migratePortableIdentity();
   await migrateSalesV9();
+  await migrateReturnsV10();
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
   if (integrity?.integrity_check !== 'ok') throw new Error('DATABASE_INTEGRITY_CHECK_FAILED');
   const foreignKeys = await db.getAllAsync<{ table: string; rowid: number }>('PRAGMA foreign_key_check');
@@ -337,7 +375,62 @@ export async function getSales(): Promise<Sale[]> {
   const items = await db.getAllAsync<SaleItem>('SELECT * FROM sale_items ORDER BY id');
   const bySale = new Map<number, SaleItem[]>();
   items.forEach(item => bySale.set(item.sale_id, [...(bySale.get(item.sale_id) ?? []), item]));
-  return sales.map(sale => ({ ...sale, items: bySale.get(sale.id) ?? [] }));
+  return attachReturns(sales.map(sale => ({ ...sale, items: bySale.get(sale.id) ?? [] })));
+}
+
+export async function getReturns(saleId?: number): Promise<SaleReturn[]> {
+  const db = await dbPromise;
+  const headers = await db.getAllAsync<Omit<SaleReturn, 'items'>>(
+    `SELECT * FROM sale_returns${saleId == null ? '' : ' WHERE sale_id=?'} ORDER BY created_at DESC,id DESC`,
+    ...(saleId == null ? [] : [saleId]),
+  );
+  if (!headers.length) return [];
+  const items: SaleReturnItem[] = [];
+  for (let offset = 0; offset < headers.length; offset += 800) {
+    const ids = headers.slice(offset, offset + 800).map(header => header.id);
+    items.push(...await db.getAllAsync<SaleReturnItem>(`SELECT ri.*,si.product_name,si.barcode_snapshot
+      FROM sale_return_items ri JOIN sale_items si ON si.id=ri.sale_item_id
+      WHERE ri.return_id IN (${ids.map(() => '?').join(',')}) ORDER BY ri.id`, ...ids));
+  }
+  const byReturn = new Map<number, SaleReturnItem[]>();
+  for (const item of items) byReturn.set(item.return_id, [...(byReturn.get(item.return_id) ?? []), item]);
+  return headers.map(header => ({ ...header, items: byReturn.get(header.id) ?? [] }));
+}
+
+async function attachReturns(sales: Sale[]): Promise<Sale[]> {
+  if (!sales.length) return [];
+  const all: SaleReturn[] = [];
+  for (let offset = 0; offset < sales.length; offset += 800) {
+    const ids = sales.slice(offset, offset + 800).map(sale => sale.id);
+    const db = await dbPromise;
+    const headers = await db.getAllAsync<Omit<SaleReturn, 'items'>>(
+      `SELECT * FROM sale_returns WHERE sale_id IN (${ids.map(() => '?').join(',')}) ORDER BY created_at DESC,id DESC`, ...ids,
+    );
+    if (!headers.length) continue;
+    const returnItems: SaleReturnItem[] = [];
+    for (let returnOffset = 0; returnOffset < headers.length; returnOffset += 800) {
+      const returnIds = headers.slice(returnOffset, returnOffset + 800).map(header => header.id);
+      returnItems.push(...await db.getAllAsync<SaleReturnItem>(`SELECT ri.*,si.product_name,si.barcode_snapshot
+        FROM sale_return_items ri JOIN sale_items si ON si.id=ri.sale_item_id
+        WHERE ri.return_id IN (${returnIds.map(() => '?').join(',')}) ORDER BY ri.id`, ...returnIds));
+    }
+    const byReturn = new Map<number, SaleReturnItem[]>();
+    for (const item of returnItems) byReturn.set(item.return_id, [...(byReturn.get(item.return_id) ?? []), item]);
+    all.push(...headers.map(header => ({ ...header, items: byReturn.get(header.id) ?? [] })));
+  }
+  const bySale = new Map<number, SaleReturn[]>();
+  for (const record of all) bySale.set(record.sale_id, [...(bySale.get(record.sale_id) ?? []), record]);
+  return sales.map(sale => {
+    const returns = bySale.get(sale.id) ?? [];
+    const quantities = returnedQuantities(returns);
+    return { ...sale, returns, return_summary: {
+      refund_total_syp: returns.reduce((sum, record) => sum + record.refund_total_syp, 0),
+      returned_cost_syp: returns.reduce((sum, record) => sum + record.returned_cost_syp, 0),
+      returned_quantity: sale.items.reduce((sum, item) => sum + (quantities.get(item.id) ?? 0), 0),
+      sold_quantity: sale.items.reduce((sum, item) => sum + item.quantity, 0),
+      status: deriveReturnStatus(sale.items, returns),
+    } };
+  });
 }
 
 function invoiceDateStart(period: InvoiceQuery['period']) {
@@ -368,7 +461,7 @@ async function attachSaleItems(sales: Omit<Sale, 'items'>[]): Promise<Sale[]> {
     const group = bySale.get(item.sale_id);
     if (group) group.push(item); else bySale.set(item.sale_id, [item]);
   }
-  return sales.map(sale => ({ ...sale, items: bySale.get(sale.id) ?? [] }));
+  return attachReturns(sales.map(sale => ({ ...sale, items: bySale.get(sale.id) ?? [] })));
 }
 
 export async function queryInvoices(query: InvoiceQuery): Promise<Sale[]> {
@@ -407,16 +500,18 @@ export async function createSale(
   draftId?: number,
 ) {
   if (!items.length) throw new Error('EMPTY_SALE');
-  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0 || items.some(item => !Number.isFinite(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.unitPriceSyp) || item.unitPriceSyp < 0 || !Number.isFinite(item.unitCostSyp) || item.unitCostSyp < 0)) {
+  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0 || items.some(item => !Number.isSafeInteger(item.quantity) || item.quantity <= 0 || !Number.isSafeInteger(item.unitPriceSyp) || item.unitPriceSyp < 0 || !Number.isFinite(item.unitCostSyp) || item.unitCostSyp < 0)) {
     throw new Error('INVALID_SALE_DATA');
   }
   const db = await dbPromise;
   const subtotal = items.reduce((sum, item) => sum + item.unitPriceSyp * item.quantity, 0);
-  const cost = items.reduce((sum, item) => sum + item.unitCostSyp * item.quantity, 0);
+  const lineCosts = items.map(item => Math.round(item.unitCostSyp * item.quantity));
+  const cost = lineCosts.reduce((sum, value) => sum + value, 0);
+  if (![subtotal, cost, discountSyp].every(Number.isSafeInteger)) throw new Error('INVALID_SALE_DATA');
   const discount = Math.max(0, Math.min(discountSyp, subtotal));
   const net = subtotal - discount;
   const paid = amountPaidSyp ?? net;
-  if (!Number.isFinite(paid) || paid < net || paid < 0) throw new Error('INSUFFICIENT_PAYMENT');
+  if (!Number.isSafeInteger(paid) || paid < net || paid < 0) throw new Error('INSUFFICIENT_PAYMENT');
   const change = paid - net;
   const profit = net - cost;
   const createdAt = new Date().toISOString();
@@ -441,14 +536,14 @@ export async function createSale(
       createUuid(), invoiceNumber, exchangeRate, subtotal, discount, net, cost, profit, paid, change, createdAt, createdAt,
     );
     saleId = result.lastInsertRowId;
-    for (const item of items) {
+    for (const [index, item] of items.entries()) {
       await transaction.runAsync(
         `INSERT INTO sale_items
          (uuid,sale_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,line_total_syp,line_cost_syp,created_at,updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         createUuid(), saleId, item.productId, item.productName, item.barcodeSnapshot, item.quantity,
         item.unitPriceSyp, item.unitCostSyp,
-        item.unitPriceSyp * item.quantity, item.unitCostSyp * item.quantity, createdAt, createdAt,
+        item.unitPriceSyp * item.quantity, lineCosts[index] ?? 0, createdAt, createdAt,
       );
     }
     if (draftId != null) await transaction.runAsync('DELETE FROM sale_drafts WHERE id=?', draftId);
@@ -457,6 +552,44 @@ export async function createSale(
   const sale = sales.find(item => item.id === saleId);
   if (!sale) throw new Error('SALE_NOT_FOUND');
   return sale;
+}
+
+export async function createSaleReturn(saleId: number, selections: ReturnSelection[]): Promise<SaleReturn> {
+  if (!Number.isSafeInteger(saleId) || saleId <= 0 || !selections.length) throw new Error('INVALID_RETURN');
+  const db = await dbPromise;
+  let returnId = 0;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const header = await transaction.getFirstAsync<Omit<Sale, 'items'>>('SELECT * FROM sales WHERE id=?', saleId);
+    if (!header) throw new Error('SALE_NOT_FOUND');
+    const saleItems = await transaction.getAllAsync<SaleItem>('SELECT * FROM sale_items WHERE sale_id=? ORDER BY id', saleId);
+    const returnHeaders = await transaction.getAllAsync<Omit<SaleReturn, 'items'>>('SELECT * FROM sale_returns WHERE sale_id=? ORDER BY id', saleId);
+    const priorItems: SaleReturnItem[] = [];
+    for (let offset = 0; offset < returnHeaders.length; offset += 800) {
+      const ids = returnHeaders.slice(offset, offset + 800).map(record => record.id);
+      priorItems.push(...await transaction.getAllAsync<SaleReturnItem>(
+        `SELECT ri.*,si.product_name,si.barcode_snapshot FROM sale_return_items ri JOIN sale_items si ON si.id=ri.sale_item_id
+         WHERE ri.return_id IN (${ids.map(() => '?').join(',')}) ORDER BY ri.id`, ...ids,
+      ));
+    }
+    const byReturn = new Map<number, SaleReturnItem[]>();
+    for (const item of priorItems) byReturn.set(item.return_id, [...(byReturn.get(item.return_id) ?? []), item]);
+    const sale: Sale = { ...header, items: saleItems, returns: returnHeaders.map(record => ({ ...record, items: byReturn.get(record.id) ?? [] })) };
+    const preview = previewReturn(sale, selections, sale.returns);
+    if (!preview.items.length) throw new Error('EMPTY_RETURN');
+    const now = new Date().toISOString();
+    const inserted = await transaction.runAsync(
+      'INSERT INTO sale_returns(uuid,sale_id,refund_total_syp,returned_cost_syp,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+      createUuid(), saleId, preview.refundTotalSyp, preview.returnedCostSyp, now, now,
+    );
+    returnId = inserted.lastInsertRowId;
+    for (const item of preview.items) await transaction.runAsync(
+      `INSERT INTO sale_return_items(uuid,return_id,sale_item_id,quantity,refund_amount_syp,cost_reversal_syp,created_at,updated_at)
+       VALUES(?,?,?,?,?,?,?,?)`, createUuid(), returnId, item.saleItemId, item.quantity, item.refundAmountSyp, item.costReversalSyp, now, now,
+    );
+  });
+  const record = (await getReturns()).find(item => item.id === returnId);
+  if (!record) throw new Error('RETURN_NOT_FOUND');
+  return record;
 }
 
 export async function suspendSale(items: SaleItemInput[], exchangeRate: number, discountSyp = 0, replaceDraftId?: number) {

@@ -24,7 +24,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({ sales, expe
   const opacity = useSharedValue(1);
   const translateY = useSharedValue(0);
   const analytics = useMemo(() => buildAnalytics(sales, expenses, period), [expenses, period, sales]);
-  const trend = useMemo(() => dailyRevenueSeries(analytics.sales, period), [analytics.sales, period]);
+  const trend = useMemo(() => dailyRevenueSeries(sales, period), [period, sales]);
   const visibleTopProducts = analytics.topProducts;
   const periodLabel = analyticsPeriodLabel(period, language);
   const currencyLabel = copy.common.syp;
@@ -70,7 +70,7 @@ export const AnalyticsDashboard = memo(function AnalyticsDashboard({ sales, expe
 
         <View style={[styles.sectionDivider, { backgroundColor: colors.border }]} />
         <AnalyticsSectionTitle title={copy.analytics.trend} subtitle={periodLabel} rtl={rtl} />
-        {analytics.invoiceCount > 0 ? <SalesTrendChart points={trend} period={period} language={language} /> : <View style={[styles.compactEmpty, { backgroundColor: colors.surfaceSecondary }]}><EmptyState icon="bar-chart-2" title={copy.analytics.noSales} description={copy.analytics.noSalesDescription} /></View>}
+        {analytics.hasActivity ? <SalesTrendChart points={trend} period={period} language={language} /> : <View style={[styles.compactEmpty, { backgroundColor: colors.surfaceSecondary }]}><EmptyState icon="bar-chart-2" title={copy.analytics.noSales} description={copy.analytics.noSalesDescription} /></View>}
 
         <AnalyticsSectionTitle title={copy.analytics.summary} rtl={rtl} />
         <View style={[styles.summaryBand, { backgroundColor: colors.surfaceSecondary, flexDirection: rtl ? 'row-reverse' : 'row' }]}>

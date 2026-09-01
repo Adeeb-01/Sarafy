@@ -37,19 +37,23 @@ export const SalesTrendChart = memo(function SalesTrendChart({ points, period, l
   const plotLeft = Y_AXIS_WIDTH + POINT_INSET;
   const plotRight = Math.max(plotLeft + 1, width - POINT_INSET);
   const plotWidth = Math.max(1, plotRight - plotLeft);
-  const maximum = useMemo(() => Math.max(0, ...points.map(point => Number.isFinite(point.value) ? point.value : 0)), [points]);
-  const scaleMaximum = Math.max(1, maximum);
+  const bounds = useMemo(() => ({
+    maximum: Math.max(0, ...points.map(point => Number.isFinite(point.value) ? point.value : 0)),
+    minimum: Math.min(0, ...points.map(point => Number.isFinite(point.value) ? point.value : 0)),
+  }), [points]);
+  const range = Math.max(1, bounds.maximum - bounds.minimum);
+  const zeroY = PLOT_TOP + bounds.maximum / range * plotHeight;
   const chartPoints = useMemo<ChartPoint[]>(() => points.map((point, index) => {
     const physicalIndex = rtl ? points.length - 1 - index : index;
     const x = singlePoint ? plotLeft + plotWidth / 2 : plotLeft + physicalIndex * plotWidth / (points.length - 1);
-    const y = singlePoint ? PLOT_TOP + plotHeight / 2 : PLOT_TOP + plotHeight - Math.max(0, point.value) / scaleMaximum * plotHeight;
+    const y = singlePoint ? PLOT_TOP + plotHeight / 2 : PLOT_TOP + (bounds.maximum - point.value) / range * plotHeight;
     return { ...point, x, y };
-  }), [plotHeight, plotLeft, plotWidth, points, rtl, scaleMaximum, singlePoint]);
+  }), [bounds.maximum, plotHeight, plotLeft, plotWidth, points, range, rtl, singlePoint]);
   const areaLinePath = useMemo(() => chartPoints.length > 1 ? chartPoints.map((point, index) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' ') : '', [chartPoints]);
   const areaPath = useMemo(() => {
     const first = chartPoints[0]; const last = chartPoints.at(-1);
-    return first && last && chartPoints.length > 1 ? `${areaLinePath} L ${last.x} ${PLOT_TOP + plotHeight} L ${first.x} ${PLOT_TOP + plotHeight} Z` : '';
-  }, [areaLinePath, chartPoints, plotHeight]);
+    return first && last && chartPoints.length > 1 ? `${areaLinePath} L ${last.x} ${zeroY} L ${first.x} ${zeroY} Z` : '';
+  }, [areaLinePath, chartPoints, zeroY]);
   const selected = selectedIndex === null ? null : chartPoints[selectedIndex];
   const tooltipLeft = selected
     ? selected.x >= width / 2
@@ -63,8 +67,8 @@ export const SalesTrendChart = memo(function SalesTrendChart({ points, period, l
       { key: 'value', y: PLOT_TOP + plotHeight / 2, value: points[0].value, showLabel: true },
       { key: 'zero', y: PLOT_TOP + plotHeight, value: 0, showLabel: points[0].value !== 0 },
     ];
-    return [0, 0.5, 1].map(ratio => ({ key: String(ratio), y: PLOT_TOP + plotHeight * ratio, value: maximum * (1 - ratio), showLabel: true }));
-  }, [maximum, plotHeight, points, singlePoint]);
+    return [0, 0.5, 1].map(ratio => ({ key: String(ratio), y: PLOT_TOP + plotHeight * ratio, value: bounds.maximum - range * ratio, showLabel: true }));
+  }, [bounds.maximum, plotHeight, points, range, singlePoint]);
 
   useEffect(() => {
     const initialIndex = points.length === 1 ? 0 : null;

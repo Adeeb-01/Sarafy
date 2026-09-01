@@ -2,7 +2,17 @@ import { Expense, Product, Sale, Settings, SuspendedSale } from '@/types';
 
 export type ImportMode = 'safe_merge' | 'selective' | 'full_restore';
 export type ConflictStrategy = 'newest' | 'keep_local' | 'use_imported' | 'manual';
-export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'expenses' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
+export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
+
+export interface PortableSaleReturnItem {
+  uuid: string; sale_item_uuid: string; quantity: number; refund_amount_syp: number;
+  cost_reversal_syp: number; created_at: string; updated_at: string;
+}
+
+export interface PortableSaleReturn {
+  uuid: string; sale_uuid: string; refund_total_syp: number; returned_cost_syp: number;
+  created_at: string; updated_at: string; items: PortableSaleReturnItem[];
+}
 
 export interface PortableCategory {
   id?: number;
@@ -21,6 +31,7 @@ export interface ImportPayload {
   sales: Sale[];
   expenses: Expense[];
   drafts?: SuspendedSale[];
+  returns?: PortableSaleReturn[];
 }
 
 export interface ImportOptions {

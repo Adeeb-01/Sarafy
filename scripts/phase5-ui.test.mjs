@@ -45,7 +45,7 @@ test('legacy UI wrappers and compatibility tokens are absent', async () => {
 test('runtime UI uses centralized color and copy systems', async () => {
   const files = await sourceFiles('src');
   for (const file of files) {
-    if (file === 'src/theme/colors.ts' || file === 'src/theme/shadows.ts' || file === 'src/utils/invoice.ts' || file.startsWith('src/i18n/')) continue;
+    if (file === 'src/theme/colors.ts' || file === 'src/theme/shadows.ts' || file === 'src/utils/invoice.ts' || file === 'src/utils/returnReceipt.ts' || file.startsWith('src/i18n/')) continue;
     const source = await read(file);
     assert.doesNotMatch(source, /#[0-9a-f]{3,8}\b|rgba?\(/i, `${file} contains a raw color`);
     assert.doesNotMatch(source, /[ء-ي]/, `${file} contains user-facing Arabic outside i18n`);
@@ -60,6 +60,7 @@ test('raw modals are limited to shared sheet infrastructure and full-screen work
   for (const file of files) if (/\bModal\b/.test(await read(file))) modalFiles.push(file);
   assert.deepEqual(modalFiles.sort(), [
     'src/components/ProductFormModal.tsx', 'src/components/barcode/BarcodeScannerScreen.tsx',
+    'src/components/sales/ReturnFlowScreen.tsx',
     'src/components/sales/SalesViews.tsx',
     'src/components/ui/BottomSheet.tsx',
   ]);

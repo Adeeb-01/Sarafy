@@ -19,6 +19,7 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
   assertImportPayload(preview.payload);
   if (preview.summary.invalidRecords || preview.summary.duplicates ||
       preview.issues.some(issue => issue.code === 'DUPLICATE_BARCODE') ||
+      preview.issues.some(issue => issue.code === 'RETURN_PARENT_MISSING' || issue.code === 'RETURN_ITEM_PARENT_MISSING') ||
       (preview.options.conflictStrategy === 'manual' && preview.summary.conflicts)) {
     throw new Error('IMPORT_REQUIRES_REVIEW');
   }
@@ -31,6 +32,8 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
   const { payload, options } = preview;
   await db.withExclusiveTransactionAsync(async transaction => {
     if (options.mode === 'full_restore') {
+      await transaction.runAsync('DELETE FROM sale_return_items');
+      await transaction.runAsync('DELETE FROM sale_returns');
       await transaction.runAsync('DELETE FROM sale_draft_items');
       await transaction.runAsync('DELETE FROM sale_drafts');
       await transaction.runAsync('DELETE FROM sale_items');
@@ -128,6 +131,41 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
         }
       }
     }
+    if (options.entities.includes('sale_returns')) {
+      for (const record of payload.returns ?? []) {
+        const duplicate = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_returns WHERE uuid=?', record.uuid);
+        if (duplicate) { skipped += 1; continue; }
+        const sale = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sales WHERE uuid=?', record.sale_uuid);
+        if (!sale) throw new Error('RETURN_PARENT_MISSING');
+        const resolved: Array<{ id: number; item: typeof record.items[number] }> = [];
+        for (const item of record.items) {
+          const localItem = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_items WHERE uuid=? AND sale_id=?', item.sale_item_uuid, sale.id);
+          if (!localItem) throw new Error('RETURN_ITEM_PARENT_MISSING');
+          resolved.push({ id: localItem.id, item });
+        }
+        if (record.items.reduce((sum, item) => sum + item.refund_amount_syp, 0) !== record.refund_total_syp ||
+            record.items.reduce((sum, item) => sum + item.cost_reversal_syp, 0) !== record.returned_cost_syp) throw new Error('INVALID_RETURN_TOTAL');
+        const requestedByItem = new Map<number, number>();
+        for (const entry of resolved) requestedByItem.set(entry.id, (requestedByItem.get(entry.id) ?? 0) + entry.item.quantity);
+        for (const [itemId, requestedQuantity] of requestedByItem) {
+          const quantities = await transaction.getFirstAsync<{ sold: number; returned: number }>(`SELECT si.quantity AS sold,
+            COALESCE((SELECT SUM(ri.quantity) FROM sale_return_items ri WHERE ri.sale_item_id=si.id),0) AS returned
+            FROM sale_items si WHERE si.id=?`, itemId);
+          if (!quantities || quantities.returned + requestedQuantity > quantities.sold) throw new Error('RETURN_QUANTITY_EXCEEDED');
+        }
+        const insertedReturn = await transaction.runAsync(
+          'INSERT INTO sale_returns(uuid,sale_id,refund_total_syp,returned_cost_syp,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+          record.uuid, sale.id, record.refund_total_syp, record.returned_cost_syp, record.created_at, record.updated_at,
+        );
+        inserted += 1;
+        if (!options.entities.includes('sale_return_items')) continue;
+        for (const entry of resolved) {
+          await transaction.runAsync(`INSERT INTO sale_return_items(uuid,return_id,sale_item_id,quantity,refund_amount_syp,cost_reversal_syp,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)`, entry.item.uuid, insertedReturn.lastInsertRowId, entry.id, entry.item.quantity, entry.item.refund_amount_syp, entry.item.cost_reversal_syp, entry.item.created_at, entry.item.updated_at);
+          inserted += 1;
+        }
+      }
+    }
     if (options.mode === 'full_restore' && options.entities.includes('sale_drafts')) {
       for (const draft of payload.drafts ?? []) {
         const result = await transaction.runAsync(
@@ -195,8 +233,8 @@ export function defaultImportOptions(mode: ImportOptions['mode'] = 'safe_merge')
     mode,
     conflictStrategy: 'newest',
     entities: mode === 'full_restore'
-      ? ['products', 'categories', 'settings', 'sales', 'sale_items', 'expenses', 'product_images', 'sale_drafts', 'sale_draft_items']
-      : ['products', 'categories', 'sales', 'sale_items', 'expenses', 'product_images'],
+      ? ['products', 'categories', 'settings', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expenses', 'product_images', 'sale_drafts', 'sale_draft_items']
+      : ['products', 'categories', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expenses', 'product_images'],
     importSettings: mode === 'full_restore',
   };
 }
@@ -255,6 +293,18 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
           !validDate(item.created_at) || !validDate(item.updated_at)) {
         throw new Error('INVALID_SALE_DRAFT_ITEM');
       }
+    }
+  }
+  for (const record of payload.returns ?? []) {
+    if (!isRecord(record) || !isUuid(record.uuid) || !isUuid(record.sale_uuid) || !Number.isSafeInteger(record.refund_total_syp) || record.refund_total_syp < 0 ||
+        !Number.isSafeInteger(record.returned_cost_syp) || record.returned_cost_syp < 0 || !validDate(record.created_at) || !validDate(record.updated_at) || !Array.isArray(record.items)) throw new Error('INVALID_RETURN');
+    const seenReturnItems = new Set<string>(); const seenParentItems = new Set<string>();
+    for (const item of record.items) {
+      if (!isRecord(item) || !isUuid(item.uuid) || !isUuid(item.sale_item_uuid) || !Number.isSafeInteger(item.quantity) || item.quantity <= 0 ||
+          !Number.isSafeInteger(item.refund_amount_syp) || item.refund_amount_syp < 0 || !Number.isSafeInteger(item.cost_reversal_syp) || item.cost_reversal_syp < 0 ||
+          !validDate(item.created_at) || !validDate(item.updated_at)) throw new Error('INVALID_RETURN_ITEM');
+      if (seenReturnItems.has(item.uuid) || seenParentItems.has(item.sale_item_uuid)) throw new Error('DUPLICATE_RETURN_ITEM');
+      seenReturnItems.add(item.uuid); seenParentItems.add(item.sale_item_uuid);
     }
   }
   for (const expense of payload.expenses) {

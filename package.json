@@ -18,6 +18,7 @@
     "test:release-hardening": "node --test scripts/release-hardening.test.mjs",
     "test:barcode": "node --test scripts/barcode-ui.test.mjs",
     "test:phase9": "node --test scripts/phase9-sales.test.mjs",
+    "test:phase10": "node --test scripts/phase10-returns.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

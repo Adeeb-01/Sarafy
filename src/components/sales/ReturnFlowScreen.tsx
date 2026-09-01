@@ -1,0 +1,40 @@
+import { useMemo, useRef, useState } from 'react';
+import { Modal, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Feather } from '@expo/vector-icons';
+import { AppButton, ConfirmSheet, IconButton, MonetaryValue, QuantityStepper } from '@/components/ui';
+import type { Language, ReturnSelection, Sale, SaleReturn } from '@/types';
+import { radius, spacing, typography, useAppTheme } from '@/theme';
+import { formatNumber } from '@/utils/formatters';
+import { previewReturn, returnedQuantities } from '@/utils/returns';
+import { uiText } from '@/i18n';
+
+export function ReturnFlowScreen({ sale, language, onClose, onCreate, onShare }: { sale: Sale | null; language: Language; onClose: () => void; onCreate: (saleId: number, selections: ReturnSelection[]) => Promise<SaleReturn>; onShare: (record: SaleReturn, sale: Sale) => Promise<void> }) {
+  const { colors } = useAppTheme(); const rtl = language === 'ar'; const copy = uiText(language);
+  const [quantities, setQuantities] = useState<Record<number, number>>({}); const [confirming, setConfirming] = useState(false);
+  const [saving, setSaving] = useState(false); const [created, setCreated] = useState<SaleReturn | null>(null); const savingRef = useRef(false);
+  const previous = useMemo(() => returnedQuantities(sale?.returns ?? []), [sale]);
+  const selections = useMemo(() => Object.entries(quantities).map(([id, quantity]) => ({ saleItemId: Number(id), quantity })).filter(item => item.quantity > 0), [quantities]);
+  const preview = useMemo(() => sale ? previewReturn(sale, selections) : { items: [], refundTotalSyp: 0, returnedCostSyp: 0 }, [sale, selections]);
+  if (!sale) return null;
+  const submit = async () => {
+    if (savingRef.current || !selections.length) return; savingRef.current = true; setSaving(true);
+    try { const result = await onCreate(sale.id, selections); setCreated(result); setConfirming(false); }
+    finally { savingRef.current = false; setSaving(false); }
+  };
+  return <Modal visible animationType="slide" onRequestClose={saving ? () => undefined : onClose}>
+    <SafeAreaView style={[styles.page, { backgroundColor: colors.background }]}>
+      <View style={[styles.header, { borderBottomColor: colors.border, flexDirection: rtl ? 'row-reverse' : 'row' }]}><IconButton icon="x" label={copy.common.close} onPress={onClose} disabled={saving} /><View style={styles.headerCopy}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{created ? copy.sales.returnRecorded : copy.sales.returnProducts}</Text><Text selectable style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left', writingDirection: 'ltr' }]}>#{sale.invoice_number}</Text></View></View>
+      {created ? <View style={styles.success}><View style={[styles.successIcon, { backgroundColor: colors.successSoft }]}><Feather name="check" size={30} color={colors.success} /></View><Text style={[typography.titleLarge, { color: colors.textPrimary }]}>{copy.sales.returnRecorded}</Text><Text style={[typography.caption, { color: colors.textMuted }]}>{copy.sales.refundValue}</Text><MonetaryValue value={created.refund_total_syp} language={language} currencyLabel={copy.common.syp} compact={false} /><Text selectable style={[typography.caption, { color: colors.textMuted, writingDirection: 'ltr' }]}>{copy.sales.returnId}: {created.uuid}</Text><View style={styles.actions}><AppButton label={copy.sales.shareReturnReceipt} icon="share-2" variant="secondary" onPress={() => void onShare(created, sale)} /><AppButton label={copy.sales.viewDetails} icon="file-text" variant="secondary" onPress={onClose} /><AppButton label={copy.common.done} icon="check" onPress={onClose} /></View></View> : <>
+        <ScrollView contentContainerStyle={styles.content}>{sale.items.map(item => {
+          const returned = previous.get(item.id) ?? 0; const remaining = item.quantity - returned; const value = quantities[item.id] ?? 0;
+          return <View key={item.id} style={[styles.item, { backgroundColor: colors.surface, borderColor: colors.border }]}><View style={[styles.line, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={styles.itemCopy}><Text style={[typography.bodyMedium, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{item.product_name}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.available}: {formatNumber(remaining, language)} · {copy.sales.returnedQuantity}: {formatNumber(returned, language)}</Text></View>{remaining > 0 ? <QuantityStepper value={value} min={0} max={remaining} onChange={next => setQuantities(current => ({ ...current, [item.id]: next }))} label={`${item.product_name}، ${copy.sales.available} ${formatNumber(remaining, language)}`} increaseLabel={copy.sales.increase(item.product_name)} decreaseLabel={copy.sales.decrease(item.product_name)} compact /> : <Text style={[typography.label, { color: colors.textMuted }]}>{copy.sales.fullReturn}</Text>}</View></View>;
+        })}</ScrollView>
+        <View style={[styles.footer, { backgroundColor: colors.surface, borderTopColor: colors.border }]}><View style={[styles.refund, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><Text style={[typography.bodyMedium, { color: colors.textPrimary }]}>{copy.sales.refundValue}</Text><MonetaryValue value={preview.refundTotalSyp} language={language} currencyLabel={copy.common.syp} inline /></View><AppButton label={copy.sales.confirmReturn} icon="rotate-ccw" onPress={() => setConfirming(true)} disabled={!selections.length || saving} loading={saving} /></View>
+      </>}
+      <ConfirmSheet visible={confirming} onClose={() => setConfirming(false)} onConfirm={() => void submit()} title={copy.sales.confirmReturnTitle} description={copy.sales.returnImmutable} confirmLabel={copy.sales.confirmReturn} cancelLabel={copy.common.cancel} loading={saving} rtl={rtl} tone="warning"><MonetaryValue value={preview.refundTotalSyp} language={language} currencyLabel={copy.common.syp} compact={false} /></ConfirmSheet>
+    </SafeAreaView>
+  </Modal>;
+}
+
+const styles = StyleSheet.create({ page: { flex: 1 }, header: { minHeight: 68, borderBottomWidth: StyleSheet.hairlineWidth, alignItems: 'center', paddingHorizontal: spacing.sm, gap: spacing.sm }, headerCopy: { minWidth: 0, flex: 1 }, content: { padding: spacing.md, gap: spacing.xs, paddingBottom: 130 }, item: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.md, padding: spacing.sm }, line: { alignItems: 'center', gap: spacing.sm }, itemCopy: { minWidth: 0, flex: 1 }, footer: { position: 'absolute', left: 0, right: 0, bottom: 0, borderTopWidth: StyleSheet.hairlineWidth, padding: spacing.md, gap: spacing.xs }, refund: { alignItems: 'center', justifyContent: 'space-between' }, success: { flex: 1, padding: spacing.xl, alignItems: 'center', justifyContent: 'center', gap: spacing.sm }, successIcon: { width: 64, height: 64, borderRadius: radius.lg, alignItems: 'center', justifyContent: 'center' }, actions: { width: '100%', gap: spacing.xs, marginTop: spacing.lg } });

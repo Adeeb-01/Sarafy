@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Expense, InvoiceQuery, Product, ProductInput, Sale, SaleItemInput, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
+import { Expense, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
 import * as database from '@/database/database';
 
 const defaults: Settings = {
@@ -38,6 +38,7 @@ interface AppState extends Settings {
   updateSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => Promise<void>;
   refreshSales: () => Promise<void>;
   completeSale: (items: SaleItemInput[], discountSyp?: number, amountPaidSyp?: number, exchangeRate?: number, draftId?: number) => Promise<Sale>;
+  createReturn: (saleId: number, selections: ReturnSelection[]) => Promise<SaleReturn>;
   suspendSale: (items: SaleItemInput[], discountSyp: number, exchangeRate: number, replaceDraftId?: number) => Promise<number>;
   getSuspendedSale: (id: number) => Promise<SuspendedSale | null>;
   deleteSuspendedSale: (id: number) => Promise<void>;
@@ -90,6 +91,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sale = await database.createSale(items, exchangeRate, discountSyp, amountPaidSyp, draftId);
     set({ sales: [sale, ...get().sales], suspendedSales: draftId == null ? get().suspendedSales : get().suspendedSales.filter(draft => draft.id !== draftId) });
     return sale;
+  },
+  createReturn: async (saleId, selections) => {
+    const record = await database.createSaleReturn(saleId, selections);
+    set({ sales: await database.getSales() });
+    return record;
   },
   suspendSale: async (items, discountSyp, exchangeRate, replaceDraftId) => {
     const id = await database.suspendSale(items, exchangeRate, discountSyp, replaceDraftId);

@@ -39,6 +39,41 @@ export interface SaleItem {
   updated_at: string;
 }
 
+export type ReturnStatus = 'none' | 'partial' | 'full';
+
+export interface SaleReturnItem {
+  id: number;
+  uuid: string;
+  return_id: number;
+  sale_item_id: number;
+  quantity: number;
+  refund_amount_syp: number;
+  cost_reversal_syp: number;
+  created_at: string;
+  updated_at: string;
+  product_name: string;
+  barcode_snapshot: string | null;
+}
+
+export interface SaleReturn {
+  id: number;
+  uuid: string;
+  sale_id: number;
+  refund_total_syp: number;
+  returned_cost_syp: number;
+  created_at: string;
+  updated_at: string;
+  items: SaleReturnItem[];
+}
+
+export interface SaleReturnSummary {
+  refund_total_syp: number;
+  returned_cost_syp: number;
+  returned_quantity: number;
+  sold_quantity: number;
+  status: ReturnStatus;
+}
+
 export interface Sale {
   id: number;
   uuid: string;
@@ -54,6 +89,24 @@ export interface Sale {
   created_at: string;
   updated_at: string;
   items: SaleItem[];
+  returns?: SaleReturn[];
+  return_summary?: SaleReturnSummary;
+}
+
+export interface ReturnableSaleItem extends SaleItem {
+  soldQuantity: number;
+  returnedQuantity: number;
+  remainingReturnableQuantity: number;
+  lineNetRefundableSyp: number;
+  previewRefundSyp: number;
+}
+
+export interface ReturnSelection { saleItemId: number; quantity: number }
+
+export interface ReturnPreview {
+  items: Array<{ saleItemId: number; quantity: number; refundAmountSyp: number; costReversalSyp: number }>;
+  refundTotalSyp: number;
+  returnedCostSyp: number;
 }
 
 export interface SaleItemInput {

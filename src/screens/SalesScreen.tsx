@@ -18,6 +18,8 @@ import { BarcodeScannerScreen } from '@/components/barcode/BarcodeScannerScreen'
 import { ProductFormModal } from '@/components/ProductFormModal';
 import { createProductBarcodeMap, findProductByExactBarcode } from '@/utils/barcode';
 import { buildRepeatedSaleCart } from '@/utils/repeatSale';
+import { ReturnFlowScreen } from '@/components/sales/ReturnFlowScreen';
+import { shareReturnReceiptPdf } from '@/utils/returnReceipt';
 
 type SalesSection = 'sale' | 'suspended' | 'invoices' | 'expenses' | 'analytics';
 
@@ -45,6 +47,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const [completedSale, setCompletedSale] = useState<Sale | null>(null);
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
   const [sharingSaleId, setSharingSaleId] = useState<number | null>(null);
+  const [returnSale, setReturnSale] = useState<Sale | null>(null);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [unknownProductBarcode, setUnknownProductBarcode] = useState<string | null>(null);
   const savingRef = useRef(false);
@@ -207,6 +210,16 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     } finally { expenseSavingRef.current = false; }
   }, [copy.sales.expenseFailed, copy.sales.expenseRecorded, snackbar, state]);
 
+  const createReturn = useCallback(async (saleId: number, selections: import('@/types').ReturnSelection[]) => {
+    try { const record = await state.createReturn(saleId, selections); haptics.success(); snackbar.show({ text: copy.sales.returnRecorded, tone: 'success' }); return record; }
+    catch (error) { if (__DEV__) console.error('[ReturnCreationFailed]', error); haptics.error(); snackbar.show({ text: copy.sales.returnFailed, tone: 'error' }); throw error; }
+  }, [copy.sales.returnFailed, copy.sales.returnRecorded, snackbar, state]);
+
+  const shareReturn = useCallback(async (record: import('@/types').SaleReturn, sale: Sale) => {
+    try { await shareReturnReceiptPdf(record, sale, state.language); snackbar.show({ text: copy.sales.returnPrepared, tone: 'success' }); }
+    catch (error) { if (__DEV__) console.error('[ReturnReceiptFailed]', error); snackbar.show({ text: copy.sales.returnPrepareFailed, tone: 'error' }); }
+  }, [copy.sales.returnPrepareFailed, copy.sales.returnPrepared, snackbar, state.language]);
+
   const sectionOptions = [{ value: 'sale' as const, label: copy.sales.newSale }, { value: 'invoices' as const, label: copy.sales.invoices }, { value: 'expenses' as const, label: copy.sales.expenses }, { value: 'analytics' as const, label: copy.sales.analytics }];
 
   return <ScreenContainer>
@@ -215,7 +228,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       <Animated.View key={section} entering={FadeIn.duration(170).reduceMotion(ReduceMotion.System)} style={styles.content}>
         {section === 'sale' && <NewSaleView products={state.products} settings={settings} cart={cart} completedSale={completedSale} bottomNavigationInset={bottomNavigationInset} sharing={completedSale?.id === sharingSaleId} onAdd={addProduct} onQuantityChange={(id, quantity) => setQuantity(id, quantity)} onQuantityDelta={(id, delta) => changeQuantity(id, delta)} onReviewCart={() => setReviewOpen(true)} onNewSale={() => setCompletedSale(null)} onShare={sale => void shareSale(sale)} onViewDetails={sale => { setSelectedSale(sale); setSection('invoices'); }} onOpenScanner={() => setScannerOpen(true)} />}
         {section === 'suspended' && <SuspendedSalesView drafts={visibleSuspendedSales} language={state.language} bottomNavigationInset={bottomNavigationInset} busyId={draftBusyId} onResume={draft => { if (cart.length) setDraftToResume(draft); else void loadDraftIntoCart(draft, false); }} onDelete={setDraftToDelete} />}
-        {section === 'invoices' && <InvoiceHistory language={state.language} bottomNavigationInset={bottomNavigationInset} selectedSale={selectedSale} sharingSaleId={sharingSaleId} queryInvoices={state.queryInvoices} onSelect={setSelectedSale} onCloseDetails={() => setSelectedSale(null)} onShare={sale => void shareSale(sale)} onRepeat={sale => { if (cart.length) setSaleToRepeat(sale); else repeatSale(sale); }} />}
+        {section === 'invoices' && <InvoiceHistory language={state.language} bottomNavigationInset={bottomNavigationInset} selectedSale={selectedSale} sharingSaleId={sharingSaleId} revision={state.sales.reduce((sum, sale) => sum + (sale.returns?.length ?? 0), 0)} queryInvoices={state.queryInvoices} onSelect={setSelectedSale} onCloseDetails={() => setSelectedSale(null)} onShare={sale => void shareSale(sale)} onReturn={sale => { setSelectedSale(null); setReturnSale(sale); }} onRepeat={sale => { if (cart.length) setSaleToRepeat(sale); else repeatSale(sale); }} />}
         {section === 'expenses' && <ExpensesView expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} onCreateExpense={createExpense} />}
         {section === 'analytics' && <AnalyticsDashboard sales={state.sales} expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} />}
       </Animated.View>
@@ -237,6 +250,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       return { kind: 'success', title: product.name, quantity: formatNumber(nextQuantity, state.language), amount };
     }} />
     <ProductFormModal visible={unknownProductBarcode !== null} product={null} mode="create" initialSection="identity" initialBarcode={unknownProductBarcode ?? undefined} onClose={() => setUnknownProductBarcode(null)} />
+    <ReturnFlowScreen sale={returnSale} language={state.language} onClose={() => setReturnSale(null)} onCreate={createReturn} onShare={shareReturn} />
   </ScreenContainer>;
 }
 

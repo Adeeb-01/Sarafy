@@ -105,6 +105,19 @@ export async function exportExcel(
   }))));
   saleItemsSheet['!cols'] = [{ wch: 24 }, { wch: 30 }, { wch: 22 }, { wch: 12 }, { wch: 17 }, { wch: 17 }, { wch: 17 }, { wch: 17 }];
   XLSX.utils.book_append_sheet(workbook, saleItemsSheet, 'Sale Items');
+  const returns = sales.flatMap(sale => (sale.returns ?? []).map(record => ({ sale, record })));
+  const returnsSheet = XLSX.utils.json_to_sheet(returns.map(({ sale, record }) => ({
+    return_uuid: record.uuid, original_invoice_number: sale.invoice_number, return_date: record.created_at,
+    refund_total_syp: record.refund_total_syp, returned_cost_syp: record.returned_cost_syp,
+  })));
+  returnsSheet['!cols'] = [{ wch: 38 }, { wch: 25 }, { wch: 24 }, { wch: 20 }, { wch: 20 }];
+  XLSX.utils.book_append_sheet(workbook, returnsSheet, 'Returns');
+  const returnItemsSheet = XLSX.utils.json_to_sheet(returns.flatMap(({ sale, record }) => record.items.map(item => ({
+    return_uuid: record.uuid, original_invoice_number: sale.invoice_number, product_name: item.product_name,
+    barcode_snapshot: item.barcode_snapshot, quantity: item.quantity, refund_amount_syp: item.refund_amount_syp,
+  }))));
+  returnItemsSheet['!cols'] = [{ wch: 38 }, { wch: 25 }, { wch: 30 }, { wch: 22 }, { wch: 12 }, { wch: 20 }];
+  XLSX.utils.book_append_sheet(workbook, returnItemsSheet, 'Return Items');
   const expensesSheet = XLSX.utils.json_to_sheet(expenses.map(expense => ({
     description: expense.description,
     amount_syp: expense.amount_syp,

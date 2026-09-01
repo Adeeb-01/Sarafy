@@ -3,7 +3,7 @@ import { File, Paths } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { getDatabase } from '@/database/database';
-import { Expense, Product, Sale, SaleItem, Settings, SuspendedSale, SuspendedSaleItem } from '@/types';
+import { Expense, Product, Sale, SaleItem, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem } from '@/types';
 import { ImportPayload, PortableCategory } from '@/import/importTypes';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { readSarafyArchive, writeSarafyArchive } from './backupArchive';
@@ -11,7 +11,7 @@ import { assertReadableNonEmptyFile, ensureBackupDirectory, getBackupDirectory }
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 
 const BACKUP_VERSION = 4;
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 const APPLICATION_ID = 'com.sarafy.catalog';
 const ROOT = getBackupDirectory().uri;
 const PRE_IMPORT_LIMIT = 5;
@@ -26,7 +26,7 @@ export interface BackupManifest {
   backupType: 'manual' | 'pre-import';
   reason: string;
   includes: { dataJson: true; productImages: boolean; drafts?: boolean };
-  counts: { products: number; categories: number; sales: number; saleItems: number; expenses: number; images: number; drafts?: number; draftItems?: number };
+  counts: { products: number; categories: number; sales: number; saleItems: number; expenses: number; images: number; drafts?: number; draftItems?: number; returns?: number; returnItems?: number };
 }
 
 export interface SarafyBackup {
@@ -37,7 +37,7 @@ export interface SarafyBackup {
 
 export async function collectPortableData(): Promise<ImportPayload> {
   const db = await getDatabase();
-  const [products, categories, settingsRows, salesRows, saleItems, expenses, draftRows, draftItems] = await Promise.all([
+  const [products, categories, settingsRows, salesRows, saleItems, expenses, draftRows, draftItems, returnRows, returnItems] = await Promise.all([
     db.getAllAsync<Product>('SELECT * FROM products ORDER BY id'),
     db.getAllAsync<PortableCategory>('SELECT id,uuid,name,created_at,updated_at FROM categories ORDER BY id'),
     db.getAllAsync<{ key: string; value: string }>('SELECT key,value FROM settings'),
@@ -46,6 +46,8 @@ export async function collectPortableData(): Promise<ImportPayload> {
     db.getAllAsync<Expense>('SELECT * FROM expenses ORDER BY id'),
     db.getAllAsync<Omit<SuspendedSale, 'items'>>('SELECT * FROM sale_drafts ORDER BY id'),
     db.getAllAsync<SuspendedSaleItem>('SELECT * FROM sale_draft_items ORDER BY id'),
+    db.getAllAsync<Omit<SaleReturn, 'items'>>('SELECT * FROM sale_returns ORDER BY id'),
+    db.getAllAsync<SaleReturnItem>('SELECT ri.*,si.product_name,si.barcode_snapshot FROM sale_return_items ri JOIN sale_items si ON si.id=ri.sale_item_id ORDER BY ri.id'),
   ]);
   const stored = Object.fromEntries(settingsRows.map(row => [row.key, JSON.parse(row.value)])) as Partial<Settings>;
   const settings: Settings = {
@@ -65,6 +67,10 @@ export async function collectPortableData(): Promise<ImportPayload> {
     const items = itemsByDraft.get(item.draft_id);
     if (items) items.push(item); else itemsByDraft.set(item.draft_id, [item]);
   }
+  const saleUuidById = new Map(salesRows.map(sale => [sale.id, sale.uuid]));
+  const saleItemUuidById = new Map(saleItems.map(item => [item.id, item.uuid]));
+  const returnItemsByReturn = new Map<number, SaleReturnItem[]>();
+  for (const item of returnItems) returnItemsByReturn.set(item.return_id, [...(returnItemsByReturn.get(item.return_id) ?? []), item]);
   return {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
@@ -72,6 +78,11 @@ export async function collectPortableData(): Promise<ImportPayload> {
     sales: salesRows.map(sale => ({ ...sale, items: saleItemsBySale.get(sale.id) ?? [] })),
     expenses,
     drafts: draftRows.map(draft => ({ ...draft, items: itemsByDraft.get(draft.id) ?? [] })),
+    returns: returnRows.map(record => ({
+      uuid: record.uuid, sale_uuid: saleUuidById.get(record.sale_id) ?? '', refund_total_syp: record.refund_total_syp,
+      returned_cost_syp: record.returned_cost_syp, created_at: record.created_at, updated_at: record.updated_at,
+      items: (returnItemsByReturn.get(record.id) ?? []).map(item => ({ uuid: item.uuid, sale_item_uuid: saleItemUuidById.get(item.sale_item_id) ?? '', quantity: item.quantity, refund_amount_syp: item.refund_amount_syp, cost_reversal_syp: item.cost_reversal_syp, created_at: item.created_at, updated_at: item.updated_at })),
+    })),
   };
 }
 
@@ -96,6 +107,8 @@ async function buildBackup(type: BackupManifest['backupType'], reason: string): 
         expenses: data.expenses.length, images: imageCount,
         drafts: data.drafts?.length ?? 0,
         draftItems: data.drafts?.reduce((sum, draft) => sum + draft.items.length, 0) ?? 0,
+        returns: data.returns?.length ?? 0,
+        returnItems: data.returns?.reduce((sum, record) => sum + record.items.length, 0) ?? 0,
       },
     },
     data,
@@ -232,7 +245,9 @@ export async function pickSarafyBackup(): Promise<SarafyBackup | null> {
       candidate.manifest.counts.saleItems !== saleItemCount ||
       candidate.manifest.counts.expenses !== candidate.data.expenses.length ||
       (candidate.manifest.counts.drafts != null && candidate.manifest.counts.drafts !== (candidate.data.drafts?.length ?? 0)) ||
-      (candidate.manifest.counts.draftItems != null && candidate.manifest.counts.draftItems !== (candidate.data.drafts?.reduce((sum, draft) => sum + draft.items.length, 0) ?? 0))) {
+      (candidate.manifest.counts.draftItems != null && candidate.manifest.counts.draftItems !== (candidate.data.drafts?.reduce((sum, draft) => sum + draft.items.length, 0) ?? 0)) ||
+      (candidate.manifest.counts.returns != null && candidate.manifest.counts.returns !== (candidate.data.returns?.length ?? 0)) ||
+      (candidate.manifest.counts.returnItems != null && candidate.manifest.counts.returnItems !== (candidate.data.returns?.reduce((sum, record) => sum + record.items.length, 0) ?? 0))) {
     throw new Error('BACKUP_COUNT_MISMATCH');
   }
   return candidate as SarafyBackup;
