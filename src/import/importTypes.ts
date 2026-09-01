@@ -1,8 +1,8 @@
-import { Expense, Product, Sale, Settings } from '@/types';
+import { Expense, Product, Sale, Settings, SuspendedSale } from '@/types';
 
 export type ImportMode = 'safe_merge' | 'selective' | 'full_restore';
 export type ConflictStrategy = 'newest' | 'keep_local' | 'use_imported' | 'manual';
-export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'expenses' | 'product_images';
+export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'expenses' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
 
 export interface PortableCategory {
   id?: number;
@@ -20,6 +20,7 @@ export interface ImportPayload {
   settings: Settings;
   sales: Sale[];
   expenses: Expense[];
+  drafts?: SuspendedSale[];
 }
 
 export interface ImportOptions {

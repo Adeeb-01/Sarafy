@@ -21,16 +21,16 @@ export function StatusChip({ label, tone = 'info', icon }: { label: string; tone
 
 export function SegmentedControl<T extends string | number>({ options, value, onChange, rtl = false, accessibilityLabel, subtle = false, compactLabels = false }: { options: { value: T; label: string }[]; value: T; onChange: (value: T) => void; rtl?: boolean; accessibilityLabel?: string; subtle?: boolean; compactLabels?: boolean }) {
   const { colors, isDark } = useAppTheme(); const [width, setWidth] = useState(0);
-  const selectedIndex = Math.max(0, options.findIndex(option => option.value === value));
-  const physicalIndex = rtl ? options.length - 1 - selectedIndex : selectedIndex;
+  const selectedIndex = options.findIndex(option => option.value === value);
+  const physicalIndex = selectedIndex < 0 ? -1 : rtl ? options.length - 1 - selectedIndex : selectedIndex;
   const itemWidth = options.length > 0 ? (width - spacing.xs - spacing.xxs * (options.length - 1)) / options.length : 0;
   const translate = useSharedValue(0);
-  useEffect(() => { translate.value = withTiming(physicalIndex * (itemWidth + spacing.xxs), { duration: motion.duration.normal, easing: motion.easing, reduceMotion: ReduceMotion.System }); }, [itemWidth, physicalIndex, translate]);
+  useEffect(() => { if (physicalIndex >= 0) translate.value = withTiming(physicalIndex * (itemWidth + spacing.xxs), { duration: motion.duration.normal, easing: motion.easing, reduceMotion: ReduceMotion.System }); }, [itemWidth, physicalIndex, translate]);
   const indicatorStyle = useAnimatedStyle(() => ({ width: itemWidth, transform: [{ translateX: translate.value }] }));
   const onLayout = (event: LayoutChangeEvent) => setWidth(event.nativeEvent.layout.width);
 
   return <View onLayout={onLayout} accessibilityRole="radiogroup" accessibilityLabel={accessibilityLabel} style={[styles.segment, { backgroundColor: colors.surfaceSecondary, flexDirection: rtl ? 'row-reverse' : 'row' }]}>
-    {itemWidth > 0 && <Animated.View pointerEvents="none" style={[styles.segmentIndicator, { backgroundColor: colors.primarySoft, opacity: subtle ? (isDark ? 0.68 : 0.84) : 1 }, indicatorStyle]} />}
+    {itemWidth > 0 && selectedIndex >= 0 && <Animated.View pointerEvents="none" style={[styles.segmentIndicator, { backgroundColor: colors.primarySoft, opacity: subtle ? (isDark ? 0.68 : 0.84) : 1 }, indicatorStyle]} />}
     {options.map(option => { const active = option.value === value; return <Pressable key={String(option.value)} accessibilityRole="radio" accessibilityState={{ checked: active }} onPress={() => { if (!active) { haptics.selection(); onChange(option.value); } }} style={({ pressed }) => [styles.segmentItem, compactLabels && styles.segmentItemCompact, pressed && styles.pressed]}><Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={compactLabels ? 0.75 : 0.82} maxFontSizeMultiplier={1.2} style={[typography.label, compactLabels && styles.segmentLabelCompact, { color: active ? colors.primary : colors.textSecondary }]}>{option.label}</Text></Pressable>; })}
   </View>;
 }

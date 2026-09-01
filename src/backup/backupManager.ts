@@ -3,7 +3,7 @@ import { File, Paths } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { getDatabase } from '@/database/database';
-import { Expense, Product, Sale, SaleItem, Settings } from '@/types';
+import { Expense, Product, Sale, SaleItem, Settings, SuspendedSale, SuspendedSaleItem } from '@/types';
 import { ImportPayload, PortableCategory } from '@/import/importTypes';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { readSarafyArchive, writeSarafyArchive } from './backupArchive';
@@ -11,7 +11,7 @@ import { assertReadableNonEmptyFile, ensureBackupDirectory, getBackupDirectory }
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 
 const BACKUP_VERSION = 4;
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 const APPLICATION_ID = 'com.sarafy.catalog';
 const ROOT = getBackupDirectory().uri;
 const PRE_IMPORT_LIMIT = 5;
@@ -25,8 +25,8 @@ export interface BackupManifest {
   createdAt: string;
   backupType: 'manual' | 'pre-import';
   reason: string;
-  includes: { dataJson: true; productImages: boolean };
-  counts: { products: number; categories: number; sales: number; saleItems: number; expenses: number; images: number };
+  includes: { dataJson: true; productImages: boolean; drafts?: boolean };
+  counts: { products: number; categories: number; sales: number; saleItems: number; expenses: number; images: number; drafts?: number; draftItems?: number };
 }
 
 export interface SarafyBackup {
@@ -37,13 +37,15 @@ export interface SarafyBackup {
 
 export async function collectPortableData(): Promise<ImportPayload> {
   const db = await getDatabase();
-  const [products, categories, settingsRows, salesRows, saleItems, expenses] = await Promise.all([
+  const [products, categories, settingsRows, salesRows, saleItems, expenses, draftRows, draftItems] = await Promise.all([
     db.getAllAsync<Product>('SELECT * FROM products ORDER BY id'),
     db.getAllAsync<PortableCategory>('SELECT id,uuid,name,created_at,updated_at FROM categories ORDER BY id'),
     db.getAllAsync<{ key: string; value: string }>('SELECT key,value FROM settings'),
     db.getAllAsync<Omit<Sale, 'items'>>('SELECT * FROM sales ORDER BY id'),
     db.getAllAsync<SaleItem>('SELECT * FROM sale_items ORDER BY id'),
     db.getAllAsync<Expense>('SELECT * FROM expenses ORDER BY id'),
+    db.getAllAsync<Omit<SuspendedSale, 'items'>>('SELECT * FROM sale_drafts ORDER BY id'),
+    db.getAllAsync<SuspendedSaleItem>('SELECT * FROM sale_draft_items ORDER BY id'),
   ]);
   const stored = Object.fromEntries(settingsRows.map(row => [row.key, JSON.parse(row.value)])) as Partial<Settings>;
   const settings: Settings = {
@@ -58,12 +60,18 @@ export async function collectPortableData(): Promise<ImportPayload> {
     if (items) items.push(item);
     else saleItemsBySale.set(item.sale_id, [item]);
   }
+  const itemsByDraft = new Map<number, SuspendedSaleItem[]>();
+  for (const item of draftItems) {
+    const items = itemsByDraft.get(item.draft_id);
+    if (items) items.push(item); else itemsByDraft.set(item.draft_id, [item]);
+  }
   return {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
     products, categories, settings,
     sales: salesRows.map(sale => ({ ...sale, items: saleItemsBySale.get(sale.id) ?? [] })),
     expenses,
+    drafts: draftRows.map(draft => ({ ...draft, items: itemsByDraft.get(draft.id) ?? [] })),
   };
 }
 
@@ -81,11 +89,13 @@ async function buildBackup(type: BackupManifest['backupType'], reason: string): 
     manifest: {
       format: 'sarafy-backup', backupVersion: BACKUP_VERSION, schemaVersion: SCHEMA_VERSION,
       applicationId: APPLICATION_ID, appVersion: '1.0.0', createdAt: data.exportedAt,
-      backupType: type, reason, includes: { dataJson: true, productImages: imageCount > 0 },
+      backupType: type, reason, includes: { dataJson: true, productImages: imageCount > 0, drafts: true },
       counts: {
         products: data.products.length, categories: data.categories.length, sales: data.sales.length,
         saleItems: data.sales.reduce((sum, sale) => sum + sale.items.length, 0),
         expenses: data.expenses.length, images: imageCount,
+        drafts: data.drafts?.length ?? 0,
+        draftItems: data.drafts?.reduce((sum, draft) => sum + draft.items.length, 0) ?? 0,
       },
     },
     data,
@@ -220,7 +230,9 @@ export async function pickSarafyBackup(): Promise<SarafyBackup | null> {
       candidate.manifest.counts.categories !== candidate.data.categories.length ||
       candidate.manifest.counts.sales !== candidate.data.sales.length ||
       candidate.manifest.counts.saleItems !== saleItemCount ||
-      candidate.manifest.counts.expenses !== candidate.data.expenses.length) {
+      candidate.manifest.counts.expenses !== candidate.data.expenses.length ||
+      (candidate.manifest.counts.drafts != null && candidate.manifest.counts.drafts !== (candidate.data.drafts?.length ?? 0)) ||
+      (candidate.manifest.counts.draftItems != null && candidate.manifest.counts.draftItems !== (candidate.data.drafts?.reduce((sum, draft) => sum + draft.items.length, 0) ?? 0))) {
     throw new Error('BACKUP_COUNT_MISMATCH');
   }
   return candidate as SarafyBackup;
@@ -286,7 +298,8 @@ function migrateLegacyJsonBackup(value: Record<string, unknown>): SarafyBackup {
         id: typeof item.id === 'number' ? item.id : itemIndex + 1,
         uuid: isUuid(item.uuid) ? item.uuid : createDeterministicUuid(`legacy:item:${row.invoice_number}:${itemIndex}`),
         sale_id: id, product_id: typeof item.product_id === 'number' ? item.product_id : null,
-        product_name: String(item.product_name ?? ''), quantity: Number(item.quantity ?? 0),
+        product_name: String(item.product_name ?? ''), barcode_snapshot: typeof item.barcode_snapshot === 'string' ? item.barcode_snapshot : null,
+        quantity: Number(item.quantity ?? 0),
         unit_price_syp: Number(item.unit_price_syp ?? 0), unit_cost_syp: Number(item.unit_cost_syp ?? 0),
         line_total_syp: Number(item.line_total_syp ?? 0), line_cost_syp: Number(item.line_cost_syp ?? 0),
         created_at: row.created_at as string,
@@ -299,6 +312,8 @@ function migrateLegacyJsonBackup(value: Record<string, unknown>): SarafyBackup {
       subtotal_syp: Number(row.subtotal_syp ?? 0), discount_syp: Number(row.discount_syp ?? 0),
       net_total_syp: Number(row.net_total_syp ?? 0), cost_syp: Number(row.cost_syp ?? 0),
       profit_syp: Number(row.profit_syp ?? 0), created_at: row.created_at,
+      amount_paid_syp: typeof row.amount_paid_syp === 'number' ? row.amount_paid_syp : null,
+      change_syp: typeof row.change_syp === 'number' ? row.change_syp : null,
       updated_at: typeof row.updated_at === 'string' ? row.updated_at : row.created_at, items,
     }];
   });

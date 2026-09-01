@@ -31,6 +31,8 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
   const { payload, options } = preview;
   await db.withExclusiveTransactionAsync(async transaction => {
     if (options.mode === 'full_restore') {
+      await transaction.runAsync('DELETE FROM sale_draft_items');
+      await transaction.runAsync('DELETE FROM sale_drafts');
       await transaction.runAsync('DELETE FROM sale_items');
       await transaction.runAsync('DELETE FROM sales');
       await transaction.runAsync('DELETE FROM expenses');
@@ -102,10 +104,11 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
             ? `${sale.invoice_number}-${sale.uuid.slice(0, 8)}`
             : sale.invoice_number;
           const result = await transaction.runAsync(
-            `INSERT INTO sales(uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,created_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?)`,
+            `INSERT INTO sales(uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,amount_paid_syp,change_syp,created_at,updated_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
             sale.uuid, invoiceNumber, sale.exchange_rate, sale.subtotal_syp, sale.discount_syp,
-            sale.net_total_syp, sale.cost_syp, sale.profit_syp, sale.created_at, sale.updated_at,
+            sale.net_total_syp, sale.cost_syp, sale.profit_syp, sale.amount_paid_syp ?? null,
+            sale.change_syp ?? null, sale.created_at, sale.updated_at,
           );
           saleId = result.lastInsertRowId; saleWasInserted = true; inserted += 1;
         } else skipped += 1; // Completed invoices are immutable snapshots.
@@ -114,14 +117,35 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
             const exists = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_items WHERE uuid=?', item.uuid);
             if (exists) { skipped += 1; continue; }
             await transaction.runAsync(
-              `INSERT INTO sale_items(uuid,sale_id,product_id,product_name,quantity,unit_price_syp,unit_cost_syp,line_total_syp,line_cost_syp,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+              `INSERT INTO sale_items(uuid,sale_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,line_total_syp,line_cost_syp,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
               item.uuid, saleId, item.product_id ? localProductByImportedId.get(item.product_id) ?? null : null,
-              item.product_name, item.quantity, item.unit_price_syp, item.unit_cost_syp,
+              item.product_name, item.barcode_snapshot ?? null, item.quantity, item.unit_price_syp, item.unit_cost_syp,
               item.line_total_syp, item.line_cost_syp, item.created_at, item.updated_at,
             );
             inserted += 1;
           }
+        }
+      }
+    }
+    if (options.mode === 'full_restore' && options.entities.includes('sale_drafts')) {
+      for (const draft of payload.drafts ?? []) {
+        const result = await transaction.runAsync(
+          'INSERT INTO sale_drafts(uuid,exchange_rate,discount_syp,created_at,updated_at) VALUES(?,?,?,?,?)',
+          draft.uuid, draft.exchange_rate, draft.discount_syp, draft.created_at, draft.updated_at,
+        );
+        inserted += 1;
+        if (!options.entities.includes('sale_draft_items')) continue;
+        for (const item of draft.items) {
+          await transaction.runAsync(
+            `INSERT INTO sale_draft_items(uuid,draft_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,created_at,updated_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?)`,
+            item.uuid, result.lastInsertRowId,
+            item.product_id ? localProductByImportedId.get(item.product_id) ?? null : null,
+            item.product_name, item.barcode_snapshot ?? null, item.quantity,
+            item.unit_price_syp, item.unit_cost_syp, item.created_at, item.updated_at,
+          );
+          inserted += 1;
         }
       }
     }
@@ -171,7 +195,7 @@ export function defaultImportOptions(mode: ImportOptions['mode'] = 'safe_merge')
     mode,
     conflictStrategy: 'newest',
     entities: mode === 'full_restore'
-      ? ['products', 'categories', 'settings', 'sales', 'sale_items', 'expenses', 'product_images']
+      ? ['products', 'categories', 'settings', 'sales', 'sale_items', 'expenses', 'product_images', 'sale_drafts', 'sale_draft_items']
       : ['products', 'categories', 'sales', 'sale_items', 'expenses', 'product_images'],
     importSettings: mode === 'full_restore',
   };
@@ -205,14 +229,32 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
   for (const sale of payload.sales) {
     if (!sale || !isRecord(sale) || !isUuid(sale.uuid) || typeof sale.invoice_number !== 'string' ||
         !sale.invoice_number.trim() || !validDate(sale.created_at) || !validDate(sale.updated_at) ||
-        !finite(sale.exchange_rate) || sale.exchange_rate <= 0 || !Array.isArray(sale.items)) {
+        !finite(sale.exchange_rate) || sale.exchange_rate <= 0 || !finite(sale.subtotal_syp) || !finite(sale.discount_syp) ||
+        !finite(sale.net_total_syp) || !finite(sale.cost_syp) || !finite(sale.profit_syp) || !Array.isArray(sale.items) ||
+        (sale.amount_paid_syp != null && (!finite(sale.amount_paid_syp) || sale.amount_paid_syp < sale.net_total_syp)) ||
+        (sale.change_syp != null && (!finite(sale.change_syp) || sale.change_syp < 0))) {
       throw new Error('INVALID_SALE');
     }
     for (const item of sale.items) {
       if (!item || !isRecord(item) || !isUuid(item.uuid) || typeof item.product_name !== 'string' ||
           !finite(item.quantity) || item.quantity <= 0 || !finite(item.unit_price_syp) ||
           !finite(item.unit_cost_syp) || !finite(item.line_total_syp) || !finite(item.line_cost_syp) ||
+          (item.barcode_snapshot != null && typeof item.barcode_snapshot !== 'string') ||
           !validDate(item.created_at) || !validDate(item.updated_at)) throw new Error('INVALID_SALE_ITEM');
+    }
+  }
+  for (const draft of payload.drafts ?? []) {
+    if (!draft || !isRecord(draft) || !isUuid(draft.uuid) || !validDate(draft.created_at) || !validDate(draft.updated_at) ||
+        !finite(draft.exchange_rate) || draft.exchange_rate <= 0 || !finite(draft.discount_syp) || draft.discount_syp < 0 || !Array.isArray(draft.items)) {
+      throw new Error('INVALID_SALE_DRAFT');
+    }
+    for (const item of draft.items) {
+      if (!item || !isRecord(item) || !isUuid(item.uuid) || typeof item.product_name !== 'string' ||
+          !finite(item.quantity) || item.quantity <= 0 || !finite(item.unit_price_syp) || item.unit_price_syp < 0 ||
+          !finite(item.unit_cost_syp) || item.unit_cost_syp < 0 || (item.barcode_snapshot != null && typeof item.barcode_snapshot !== 'string') ||
+          !validDate(item.created_at) || !validDate(item.updated_at)) {
+        throw new Error('INVALID_SALE_DRAFT_ITEM');
+      }
     }
   }
   for (const expense of payload.expenses) {

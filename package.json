@@ -17,6 +17,7 @@
     "test:xlsx": "node --test scripts/xlsx-smoke.test.mjs",
     "test:release-hardening": "node --test scripts/release-hardening.test.mjs",
     "test:barcode": "node --test scripts/barcode-ui.test.mjs",
+    "test:phase9": "node --test scripts/phase9-sales.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

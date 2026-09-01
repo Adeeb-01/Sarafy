@@ -36,7 +36,7 @@ test('completed invoice UI uses persisted snapshots and sale creation remains tr
     readFile(new URL('../src/components/sales/SalesViews.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/utils/invoice.ts', import.meta.url), 'utf8'),
   ]);
-  assert.match(database, /withTransactionAsync/);
+  assert.match(database, /with(?:Exclusive)?TransactionAsync/);
   assert.match(database, /INSERT INTO sale_items/);
   assert.match(database, /item\.productName/);
   assert.match(database, /item\.unitPriceSyp/);

@@ -19,6 +19,9 @@ export async function shareInvoicePdf(sale: Sale, language: Language) {
       <td>${money(item.unit_price_syp)}</td>
       <td>${money(item.line_total_syp)}</td>
     </tr>`).join('');
+  const paymentRows = sale.amount_paid_syp == null ? '' : `
+    <div class="payment"><div class="line"><span>${rtl ? 'المدفوع' : 'Paid'}</span><b>${money(sale.amount_paid_syp)}</b></div>
+    <div class="line"><span>${rtl ? 'الباقي' : 'Change'}</span><b>${money(sale.change_syp ?? 0)}</b></div></div>`;
   const html = `<!doctype html><html dir="${rtl ? 'rtl' : 'ltr'}"><head><meta charset="utf-8">
     <style>
       body{font-family:Arial,sans-serif;color:#151b2b;padding:32px}
@@ -27,14 +30,14 @@ export async function shareInvoicePdf(sale: Sale, language: Language) {
       table{width:100%;border-collapse:collapse;margin-top:24px} th{background:#151b2b;color:#fff}
       th,td{padding:11px;text-align:${rtl ? 'right' : 'left'};border-bottom:1px solid #dce4ee}
       .totals{margin-top:24px;margin-${rtl ? 'right' : 'left'}:auto;width:280px}
-      .line{display:flex;justify-content:space-between;padding:7px 0}.net{font-size:20px;font-weight:bold;color:#08796d;border-top:2px solid #08796d}
+      .line{display:flex;justify-content:space-between;padding:7px 0}.net{font-size:20px;font-weight:bold;color:#08796d;border-top:2px solid #08796d}.payment{margin-top:12px;padding-top:8px;border-top:1px solid #dce4ee}
     </style></head><body>
     <header><div><h1>${rtl ? 'فاتورة مبيعات' : 'Sales invoice'}</h1><div class="muted">Sarafy · ${escapeHtml(sale.invoice_number)}</div></div>
     <div class="muted">${new Date(sale.created_at).toLocaleString(locale)}</div></header>
     <table><thead><tr><th>${rtl ? 'المنتج' : 'Product'}</th><th>${rtl ? 'الكمية' : 'Qty'}</th><th>${rtl ? 'السعر' : 'Price'}</th><th>${rtl ? 'الإجمالي' : 'Total'}</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="totals"><div class="line"><span>${rtl ? 'المجموع' : 'Subtotal'}</span><b>${money(sale.subtotal_syp)}</b></div>
     <div class="line"><span>${rtl ? 'الحسم' : 'Discount'}</span><b>${money(sale.discount_syp)}</b></div>
-    <div class="line net"><span>${rtl ? 'الإجمالي الصافي' : 'Net total'}</span><span>${money(sale.net_total_syp)}</span></div></div>
+    <div class="line net"><span>${rtl ? 'الإجمالي الصافي' : 'Net total'}</span><span>${money(sale.net_total_syp)}</span></div>${paymentRows}</div>
     </body></html>`;
   const result = await Print.printToFileAsync({ html });
   if (await Sharing.isAvailableAsync()) {

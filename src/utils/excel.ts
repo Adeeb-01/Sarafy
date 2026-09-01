@@ -86,21 +86,24 @@ export async function exportExcel(
     subtotal_syp: sale.subtotal_syp,
     discount_syp: sale.discount_syp,
     net_total_syp: sale.net_total_syp,
+    amount_paid_syp: sale.amount_paid_syp,
+    change_syp: sale.change_syp,
     cost_syp: sale.cost_syp,
     gross_profit_syp: sale.profit_syp,
   })));
-  salesSheet['!cols'] = [{ wch: 24 }, { wch: 24 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 18 }];
+  salesSheet['!cols'] = [{ wch: 24 }, { wch: 24 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 18 }, { wch: 16 }, { wch: 16 }, { wch: 18 }];
   XLSX.utils.book_append_sheet(workbook, salesSheet, 'Sales');
   const saleItemsSheet = XLSX.utils.json_to_sheet(sales.flatMap(sale => sale.items.map(item => ({
     invoice_number: sale.invoice_number,
     product_name: item.product_name,
+    barcode_snapshot: item.barcode_snapshot,
     quantity: item.quantity,
     unit_price_syp: item.unit_price_syp,
     line_total_syp: item.line_total_syp,
     unit_cost_syp: item.unit_cost_syp,
     line_cost_syp: item.line_cost_syp,
   }))));
-  saleItemsSheet['!cols'] = [{ wch: 24 }, { wch: 30 }, { wch: 12 }, { wch: 17 }, { wch: 17 }, { wch: 17 }, { wch: 17 }];
+  saleItemsSheet['!cols'] = [{ wch: 24 }, { wch: 30 }, { wch: 22 }, { wch: 12 }, { wch: 17 }, { wch: 17 }, { wch: 17 }, { wch: 17 }];
   XLSX.utils.book_append_sheet(workbook, saleItemsSheet, 'Sale Items');
   const expensesSheet = XLSX.utils.json_to_sheet(expenses.map(expense => ({
     description: expense.description,

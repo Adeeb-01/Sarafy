@@ -29,6 +29,7 @@ export interface SaleItem {
   sale_id: number;
   product_id: number | null;
   product_name: string;
+  barcode_snapshot: string | null;
   quantity: number;
   unit_price_syp: number;
   unit_cost_syp: number;
@@ -48,17 +49,68 @@ export interface Sale {
   net_total_syp: number;
   cost_syp: number;
   profit_syp: number;
+  amount_paid_syp: number | null;
+  change_syp: number | null;
   created_at: string;
   updated_at: string;
   items: SaleItem[];
 }
 
 export interface SaleItemInput {
-  productId: number;
+  productId: number | null;
   productName: string;
+  barcodeSnapshot: string | null;
   quantity: number;
   unitPriceSyp: number;
   unitCostSyp: number;
+}
+
+export interface PaymentInfo {
+  amountPaidSyp: number;
+  changeSyp: number;
+}
+
+export interface SuspendedSaleItem {
+  id: number;
+  uuid: string;
+  draft_id: number;
+  product_id: number | null;
+  product_name: string;
+  barcode_snapshot: string | null;
+  quantity: number;
+  unit_price_syp: number;
+  unit_cost_syp: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SuspendedSale {
+  id: number;
+  uuid: string;
+  exchange_rate: number;
+  discount_syp: number;
+  created_at: string;
+  updated_at: string;
+  items: SuspendedSaleItem[];
+}
+
+export interface SuspendedSaleSummary extends Omit<SuspendedSale, 'items'> {
+  item_count: number;
+  line_count: number;
+  subtotal_syp: number;
+  net_total_syp: number;
+  item_preview: string;
+}
+
+export type InvoicePeriod = 'all' | 'today' | 'week' | 'month';
+export type InvoiceSort = 'newest' | 'oldest' | 'highest' | 'lowest';
+
+export interface InvoiceQuery {
+  search?: string;
+  period?: InvoicePeriod;
+  minAmount?: number | null;
+  maxAmount?: number | null;
+  sort?: InvoiceSort;
 }
 
 export interface Expense {

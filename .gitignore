@@ -4,6 +4,7 @@ node_modules/
 .expo/
 .expo-*/
 dist/
+dist-*/
 .git/
 .vscode/
 .idea/
