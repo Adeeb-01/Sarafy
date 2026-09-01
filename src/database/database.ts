@@ -464,6 +464,49 @@ async function attachSaleItems(sales: Omit<Sale, 'items'>[]): Promise<Sale[]> {
   return attachReturns(sales.map(sale => ({ ...sale, items: bySale.get(sale.id) ?? [] })));
 }
 
+async function attachInvoiceSummaries(sales: Omit<Sale, 'items'>[]): Promise<Sale[]> {
+  if (!sales.length) return [];
+  const db = await dbPromise;
+  const idsJson = JSON.stringify(sales.map(sale => sale.id));
+  const [itemSummaries, returnSummaries] = await Promise.all([
+    db.getAllAsync<{ sale_id: number; line_count: number; sold_quantity: number }>(`SELECT sale_id,COUNT(*) AS line_count,SUM(quantity) AS sold_quantity
+      FROM sale_items WHERE sale_id IN (SELECT value FROM json_each(?)) GROUP BY sale_id`, idsJson),
+    db.getAllAsync<{ sale_id: number; refund_total_syp: number; returned_cost_syp: number; returned_quantity: number }>(`WITH headers AS (
+        SELECT sale_id,SUM(refund_total_syp) AS refund_total_syp,SUM(returned_cost_syp) AS returned_cost_syp
+        FROM sale_returns WHERE sale_id IN (SELECT value FROM json_each(?)) GROUP BY sale_id
+      ), quantities AS (
+        SELECT sr.sale_id,SUM(ri.quantity) AS returned_quantity FROM sale_returns sr
+        JOIN sale_return_items ri ON ri.return_id=sr.id
+        WHERE sr.sale_id IN (SELECT value FROM json_each(?)) GROUP BY sr.sale_id
+      )
+      SELECT h.sale_id,h.refund_total_syp,h.returned_cost_syp,COALESCE(q.returned_quantity,0) AS returned_quantity
+      FROM headers h LEFT JOIN quantities q ON q.sale_id=h.sale_id`, idsJson, idsJson),
+  ]);
+  const itemsBySale = new Map(itemSummaries.map(row => [row.sale_id, row]));
+  const returnsBySale = new Map(returnSummaries.map(row => [row.sale_id, row]));
+  return sales.map(sale => {
+    const itemSummary = itemsBySale.get(sale.id);
+    const returnSummary = returnsBySale.get(sale.id);
+    const sold = itemSummary?.sold_quantity ?? 0;
+    const returned = returnSummary?.returned_quantity ?? 0;
+    return { ...sale, items: [], returns: [], item_count: sold, line_count: itemSummary?.line_count ?? 0, return_summary: {
+      refund_total_syp: returnSummary?.refund_total_syp ?? 0,
+      returned_cost_syp: returnSummary?.returned_cost_syp ?? 0,
+      returned_quantity: returned,
+      sold_quantity: sold,
+      status: returned === 0 ? 'none' : returned === sold ? 'full' : 'partial',
+    } };
+  });
+}
+
+export async function getInvoiceDetails(saleId: number): Promise<Sale | null> {
+  if (!Number.isSafeInteger(saleId) || saleId <= 0) return null;
+  const db = await dbPromise;
+  const sale = await db.getFirstAsync<Omit<Sale, 'items'>>('SELECT * FROM sales WHERE id=?', saleId);
+  if (!sale) return null;
+  return (await attachSaleItems([sale]))[0] ?? null;
+}
+
 export async function queryInvoices(query: InvoiceQuery): Promise<Sale[]> {
   const db = await dbPromise;
   const where: string[] = [];
@@ -471,9 +514,11 @@ export async function queryInvoices(query: InvoiceQuery): Promise<Sale[]> {
   const search = query.search?.trim() ?? '';
   if (search) {
     const like = `%${search}%`;
-    where.push(`(s.invoice_number LIKE ? OR EXISTS (
-      SELECT 1 FROM sale_items si LEFT JOIN products p ON p.id=si.product_id
-      WHERE si.sale_id=s.id AND (si.product_name LIKE ? COLLATE NOCASE OR si.barcode_snapshot=? OR p.barcode=?)
+    where.push(`(s.invoice_number LIKE ? OR s.id IN (
+      SELECT si.sale_id FROM sale_items si
+      WHERE si.product_name LIKE ? COLLATE NOCASE OR si.barcode_snapshot=? OR si.product_id IN (
+        SELECT p.id FROM products p WHERE p.barcode=?
+      )
     ))`);
     parameters.push(like, like, search, search);
   }
@@ -489,7 +534,7 @@ export async function queryInvoices(query: InvoiceQuery): Promise<Sale[]> {
     `SELECT s.* FROM sales s${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${orderBy[query.sort ?? 'newest']}`,
     ...parameters,
   );
-  return attachSaleItems(rows);
+  return attachInvoiceSummaries(rows);
 }
 
 export async function createSale(

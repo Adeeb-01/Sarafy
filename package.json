@@ -19,6 +19,7 @@
     "test:barcode": "node --test scripts/barcode-ui.test.mjs",
     "test:phase9": "node --test scripts/phase9-sales.test.mjs",
     "test:phase10": "node --test scripts/phase10-returns.test.mjs",
+    "test:phase10.5": "node --test scripts/phase10_5-invoice-performance.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

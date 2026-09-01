@@ -89,6 +89,8 @@ export interface Sale {
   created_at: string;
   updated_at: string;
   items: SaleItem[];
+  item_count?: number;
+  line_count?: number;
   returns?: SaleReturn[];
   return_summary?: SaleReturnSummary;
 }

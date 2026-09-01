@@ -52,6 +52,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const [unknownProductBarcode, setUnknownProductBarcode] = useState<string | null>(null);
   const savingRef = useRef(false);
   const sharingRef = useRef(false);
+  const invoiceOpeningRef = useRef(false);
   const expenseSavingRef = useRef(false);
 
   const settings = useMemo(() => ({ exchangeRate: state.exchangeRate, isRoundingEnabled: state.isRoundingEnabled, roundingTarget: state.roundingTarget, language: state.language }), [state.exchangeRate, state.isRoundingEnabled, state.language, state.roundingTarget]);
@@ -195,6 +196,19 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     }
   }, [copy.sales.invoicePrepareFailed, copy.sales.invoicePrepared, snackbar, state.language]);
 
+  const openInvoice = useCallback(async (sale: Sale) => {
+    if (invoiceOpeningRef.current) return;
+    invoiceOpeningRef.current = true;
+    try {
+      const details = await state.getInvoiceDetails(sale.id);
+      if (!details) throw new Error('SALE_NOT_FOUND');
+      setSelectedSale(details);
+    } catch (error) {
+      if (__DEV__) console.error('[InvoiceDetailsLoadFailed]', error);
+      snackbar.show({ text: copy.sales.invoiceLoadFailed, tone: 'error' });
+    } finally { invoiceOpeningRef.current = false; }
+  }, [copy.sales.invoiceLoadFailed, snackbar, state]);
+
   const createExpense = useCallback(async (description: string, amount: number) => {
     if (expenseSavingRef.current) return;
     expenseSavingRef.current = true;
@@ -228,7 +242,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       <Animated.View key={section} entering={FadeIn.duration(170).reduceMotion(ReduceMotion.System)} style={styles.content}>
         {section === 'sale' && <NewSaleView products={state.products} settings={settings} cart={cart} completedSale={completedSale} bottomNavigationInset={bottomNavigationInset} sharing={completedSale?.id === sharingSaleId} onAdd={addProduct} onQuantityChange={(id, quantity) => setQuantity(id, quantity)} onQuantityDelta={(id, delta) => changeQuantity(id, delta)} onReviewCart={() => setReviewOpen(true)} onNewSale={() => setCompletedSale(null)} onShare={sale => void shareSale(sale)} onViewDetails={sale => { setSelectedSale(sale); setSection('invoices'); }} onOpenScanner={() => setScannerOpen(true)} />}
         {section === 'suspended' && <SuspendedSalesView drafts={visibleSuspendedSales} language={state.language} bottomNavigationInset={bottomNavigationInset} busyId={draftBusyId} onResume={draft => { if (cart.length) setDraftToResume(draft); else void loadDraftIntoCart(draft, false); }} onDelete={setDraftToDelete} />}
-        {section === 'invoices' && <InvoiceHistory language={state.language} bottomNavigationInset={bottomNavigationInset} selectedSale={selectedSale} sharingSaleId={sharingSaleId} revision={state.sales.reduce((sum, sale) => sum + (sale.returns?.length ?? 0), 0)} queryInvoices={state.queryInvoices} onSelect={setSelectedSale} onCloseDetails={() => setSelectedSale(null)} onShare={sale => void shareSale(sale)} onReturn={sale => { setSelectedSale(null); setReturnSale(sale); }} onRepeat={sale => { if (cart.length) setSaleToRepeat(sale); else repeatSale(sale); }} />}
+        {section === 'invoices' && <InvoiceHistory language={state.language} bottomNavigationInset={bottomNavigationInset} selectedSale={selectedSale} sharingSaleId={sharingSaleId} revision={state.sales.reduce((sum, sale) => sum + (sale.returns?.length ?? 0), 0)} queryInvoices={state.queryInvoices} onSelect={sale => void openInvoice(sale)} onCloseDetails={() => setSelectedSale(null)} onShare={sale => void shareSale(sale)} onReturn={sale => { setSelectedSale(null); setReturnSale(sale); }} onRepeat={sale => { if (cart.length) setSaleToRepeat(sale); else repeatSale(sale); }} />}
         {section === 'expenses' && <ExpensesView expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} onCreateExpense={createExpense} />}
         {section === 'analytics' && <AnalyticsDashboard sales={state.sales} expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} />}
       </Animated.View>

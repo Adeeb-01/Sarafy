@@ -44,6 +44,7 @@ interface AppState extends Settings {
   deleteSuspendedSale: (id: number) => Promise<void>;
   refreshSuspendedSales: () => Promise<void>;
   queryInvoices: (query: InvoiceQuery) => Promise<Sale[]>;
+  getInvoiceDetails: (saleId: number) => Promise<Sale | null>;
   createExpense: (description: string, amountSyp: number) => Promise<void>;
 }
 
@@ -109,6 +110,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   refreshSuspendedSales: async () => set({ suspendedSales: await database.getSuspendedSaleSummaries() }),
   queryInvoices: database.queryInvoices,
+  getInvoiceDetails: database.getInvoiceDetails,
   createExpense: async (description, amountSyp) => {
     await database.addExpense(description, amountSyp);
     set({ expenses: await database.getExpenses() });
