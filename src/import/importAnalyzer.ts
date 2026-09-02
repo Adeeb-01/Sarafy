@@ -1,4 +1,4 @@
-import { getDatabase } from '@/database/database';
+import { getDatabase, OTHER_EXPENSE_CATEGORY_UUID } from '@/database/database';
 import { ImportIssue, ImportOptions, ImportPayload, ImportPreview } from './importTypes';
 import { isUuid } from '@/utils/uuid';
 import { normalizeBarcode } from '@/utils/barcode';
@@ -111,7 +111,49 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
       }
     }
   }
-  await analyze('expenses', payload.expenses);
+  if (options.entities.includes('expenses')) {
+    const localExpenses = await db.getAllAsync<{ uuid: string; description: string; amount_syp: number; note: string | null; category_uuid: string; updated_at: string }>(`SELECT e.uuid,e.description,e.amount_syp,e.note,c.uuid AS category_uuid,e.updated_at
+      FROM expenses e JOIN expense_categories c ON c.id=e.category_id`);
+    const byUuid = new Map(localExpenses.map(row => [row.uuid, row])); const seen = new Set<string>();
+    payload.expenses.forEach((expense, index) => {
+      if (seen.has(expense.uuid)) { summary.duplicates += 1; issues.push({ entity: 'expenses', row: index + 1, code: 'DUPLICATE_UUID', action: 'rejected' }); return; }
+      seen.add(expense.uuid); const existing = byUuid.get(expense.uuid);
+      if (!existing) { summary.newRecords += 1; return; }
+      const unchanged = existing.description === expense.description && existing.amount_syp === expense.amount_syp &&
+        (existing.note ?? null) === (expense.note ?? null) && existing.category_uuid === (expense.category_uuid ?? OTHER_EXPENSE_CATEGORY_UUID);
+      if (unchanged) summary.unchangedRecords += 1;
+      else if (options.conflictStrategy === 'manual') { summary.conflicts += 1; issues.push({ entity: 'expenses', row: index + 1, code: 'REVIEW_REQUIRED', action: 'review' }); }
+      else summary.updatedRecords += 1;
+    });
+  }
+  if (options.entities.includes('expense_categories')) {
+    const local = new Map((await db.getAllAsync<{ uuid: string; updated_at: string }>('SELECT uuid,updated_at FROM expense_categories')).map(row => [row.uuid, row]));
+    const seen = new Set<string>();
+    for (const [index, category] of (payload.expenseCategories ?? []).entries()) {
+      if (seen.has(category.uuid)) { summary.duplicates += 1; issues.push({ entity: 'expense_categories', row: index + 1, code: 'DUPLICATE_UUID', action: 'rejected' }); continue; }
+      seen.add(category.uuid); const existing = local.get(category.uuid);
+      if (!existing) summary.newRecords += 1; else if (Date.parse(category.updated_at) > Date.parse(existing.updated_at)) summary.updatedRecords += 1; else summary.unchangedRecords += 1;
+    }
+  }
+  if (options.entities.includes('expenses')) {
+    const knownCategories = new Set((await db.getAllAsync<{ uuid: string }>('SELECT uuid FROM expense_categories')).map(row => row.uuid));
+    for (const category of payload.expenseCategories ?? []) knownCategories.add(category.uuid);
+    payload.expenses.forEach((expense, index) => {
+      if (expense.category_uuid && !knownCategories.has(expense.category_uuid)) {
+        summary.conflicts += 1; issues.push({ entity: 'expenses', row: index + 1, field: 'category_uuid', value: expense.category_uuid, code: 'EXPENSE_CATEGORY_PARENT_MISSING', action: 'review' });
+      }
+    });
+  }
+  if (options.entities.includes('exchange_rate_history')) {
+    const local = new Set((await db.getAllAsync<{ uuid: string }>('SELECT uuid FROM exchange_rate_history')).map(row => row.uuid));
+    const seen = new Set<string>();
+    (payload.exchangeRateHistory ?? []).forEach((entry, index) => {
+      if (seen.has(entry.uuid)) { summary.duplicates += 1; issues.push({ entity: 'exchange_rate_history', row: index + 1, code: 'DUPLICATE_UUID', action: 'rejected' }); }
+      else if (local.has(entry.uuid)) summary.unchangedRecords += 1;
+      else summary.newRecords += 1;
+      seen.add(entry.uuid);
+    });
+  }
   if (options.entities.includes('sale_returns')) {
     const localReturns = new Set((await db.getAllAsync<{ uuid: string }>('SELECT uuid FROM sale_returns')).map(row => row.uuid));
     const localSales = new Set((await db.getAllAsync<{ uuid: string }>('SELECT uuid FROM sales')).map(row => row.uuid));

@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
-import { CartReviewModal, CartLine, ExpensesView, InvoiceHistory, NewSaleView } from '@/components/sales/SalesViews';
+import { CartReviewModal, CartLine, InvoiceHistory, NewSaleView } from '@/components/sales/SalesViews';
+import { ExpensesView } from '@/components/expenses/ExpensesView';
 import { SuspendedSalesView } from '@/components/sales/SuspendedSalesView';
 import { AnalyticsDashboard } from '@/components/analytics/AnalyticsDashboard';
 import { AppButton, ConfirmSheet, MonetaryValue, ScreenContainer, SegmentedControl, useSnackbar } from '@/components/ui';
@@ -53,7 +54,6 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const savingRef = useRef(false);
   const sharingRef = useRef(false);
   const invoiceOpeningRef = useRef(false);
-  const expenseSavingRef = useRef(false);
 
   const settings = useMemo(() => ({ exchangeRate: state.exchangeRate, isRoundingEnabled: state.isRoundingEnabled, roundingTarget: state.roundingTarget, language: state.language }), [state.exchangeRate, state.isRoundingEnabled, state.language, state.roundingTarget]);
   const subtotal = useMemo(() => calculateCartSubtotal(cart), [cart]);
@@ -209,21 +209,6 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     } finally { invoiceOpeningRef.current = false; }
   }, [copy.sales.invoiceLoadFailed, snackbar, state]);
 
-  const createExpense = useCallback(async (description: string, amount: number) => {
-    if (expenseSavingRef.current) return;
-    expenseSavingRef.current = true;
-    try {
-      await state.createExpense(description, amount);
-      haptics.success();
-      snackbar.show({ text: copy.sales.expenseRecorded, tone: 'success' });
-    } catch (error) {
-      if (__DEV__) console.error('[ExpenseCreationFailed]', error);
-      haptics.error();
-      snackbar.show({ text: copy.sales.expenseFailed, tone: 'error' });
-      throw error;
-    } finally { expenseSavingRef.current = false; }
-  }, [copy.sales.expenseFailed, copy.sales.expenseRecorded, snackbar, state]);
-
   const createReturn = useCallback(async (saleId: number, selections: import('@/types').ReturnSelection[]) => {
     try { const record = await state.createReturn(saleId, selections); haptics.success(); snackbar.show({ text: copy.sales.returnRecorded, tone: 'success' }); return record; }
     catch (error) { if (__DEV__) console.error('[ReturnCreationFailed]', error); haptics.error(); snackbar.show({ text: copy.sales.returnFailed, tone: 'error' }); throw error; }
@@ -243,7 +228,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
         {section === 'sale' && <NewSaleView products={state.products} settings={settings} cart={cart} completedSale={completedSale} bottomNavigationInset={bottomNavigationInset} sharing={completedSale?.id === sharingSaleId} onAdd={addProduct} onQuantityChange={(id, quantity) => setQuantity(id, quantity)} onQuantityDelta={(id, delta) => changeQuantity(id, delta)} onReviewCart={() => setReviewOpen(true)} onNewSale={() => setCompletedSale(null)} onShare={sale => void shareSale(sale)} onViewDetails={sale => { setSelectedSale(sale); setSection('invoices'); }} onOpenScanner={() => setScannerOpen(true)} />}
         {section === 'suspended' && <SuspendedSalesView drafts={visibleSuspendedSales} language={state.language} bottomNavigationInset={bottomNavigationInset} busyId={draftBusyId} onResume={draft => { if (cart.length) setDraftToResume(draft); else void loadDraftIntoCart(draft, false); }} onDelete={setDraftToDelete} />}
         {section === 'invoices' && <InvoiceHistory language={state.language} bottomNavigationInset={bottomNavigationInset} selectedSale={selectedSale} sharingSaleId={sharingSaleId} revision={state.sales.reduce((sum, sale) => sum + (sale.returns?.length ?? 0), 0)} queryInvoices={state.queryInvoices} onSelect={sale => void openInvoice(sale)} onCloseDetails={() => setSelectedSale(null)} onShare={sale => void shareSale(sale)} onReturn={sale => { setSelectedSale(null); setReturnSale(sale); }} onRepeat={sale => { if (cart.length) setSaleToRepeat(sale); else repeatSale(sale); }} />}
-        {section === 'expenses' && <ExpensesView expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} onCreateExpense={createExpense} />}
+        {section === 'expenses' && <ExpensesView language={state.language} bottomNavigationInset={bottomNavigationInset} />}
         {section === 'analytics' && <AnalyticsDashboard sales={state.sales} expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} />}
       </Animated.View>
     </View>

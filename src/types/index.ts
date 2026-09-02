@@ -173,6 +173,50 @@ export interface Expense {
   uuid: string;
   description: string;
   amount_syp: number;
+  category_id?: number | null;
+  category_uuid?: string | null;
+  category_name_ar?: string;
+  category_name_en?: string | null;
+  note?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ExpenseCategory {
+  id: number;
+  uuid: string;
+  name_ar: string;
+  name_en: string | null;
+  is_system: number;
+  is_active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ExpensePeriod = 'all' | 'today' | 'week' | 'month';
+export type ExpenseSort = 'newest' | 'oldest' | 'highest' | 'lowest';
+
+export interface ExpenseQuery {
+  search?: string;
+  period?: ExpensePeriod;
+  categoryUuid?: string | null;
+  minAmount?: number | null;
+  maxAmount?: number | null;
+  sort?: ExpenseSort;
+}
+
+export interface ExpenseCategoryTotal {
+  categoryId: number;
+  categoryUuid: string;
+  nameAr: string;
+  nameEn: string | null;
+  totalSyp: number;
+}
+
+export interface ExchangeRateHistoryEntry {
+  id: number;
+  uuid: string;
+  old_rate: number;
+  new_rate: number;
+  created_at: string;
 }

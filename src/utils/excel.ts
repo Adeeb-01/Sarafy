@@ -2,7 +2,8 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as XLSX from 'xlsx';
-import { Expense, Product, Sale, Settings } from '@/types';
+import { ExchangeRateHistoryEntry, Expense, ExpenseCategory, Product, Sale, Settings } from '@/types';
+import { exchangeRateChangePercent } from '@/utils/exchangeRate';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 import { assertAvailableDiskSpace } from '@/utils/storageSafety';
@@ -37,6 +38,8 @@ export async function exportExcel(
   settings: Settings,
   sales: Sale[] = [],
   expenses: Expense[] = [],
+  expenseCategories: ExpenseCategory[] = [],
+  exchangeRateHistory: ExchangeRateHistoryEntry[] = [],
 ) {
   const workbook = XLSX.utils.book_new();
   const productRows = products.map(product => ({
@@ -120,11 +123,21 @@ export async function exportExcel(
   XLSX.utils.book_append_sheet(workbook, returnItemsSheet, 'Return Items');
   const expensesSheet = XLSX.utils.json_to_sheet(expenses.map(expense => ({
     description: expense.description,
+    category_uuid: expense.category_uuid ?? '',
+    category_ar: expense.category_name_ar ?? '',
+    category_en: expense.category_name_en ?? '',
+    note: expense.note ?? '',
     amount_syp: expense.amount_syp,
     created_at: expense.created_at,
   })));
-  expensesSheet['!cols'] = [{ wch: 34 }, { wch: 18 }, { wch: 24 }];
+  expensesSheet['!cols'] = [{ wch: 34 }, { wch: 38 }, { wch: 24 }, { wch: 24 }, { wch: 38 }, { wch: 18 }, { wch: 24 }];
   XLSX.utils.book_append_sheet(workbook, expensesSheet, 'Expenses');
+  const expenseCategoriesSheet = XLSX.utils.json_to_sheet(expenseCategories.map(category => ({ uuid: category.uuid, name_ar: category.name_ar, name_en: category.name_en ?? '', is_system: category.is_system, is_active: category.is_active, created_at: category.created_at, updated_at: category.updated_at })));
+  expenseCategoriesSheet['!cols'] = [{ wch: 38 }, { wch: 28 }, { wch: 28 }, { wch: 12 }, { wch: 12 }, { wch: 24 }, { wch: 24 }];
+  XLSX.utils.book_append_sheet(workbook, expenseCategoriesSheet, 'Expense Categories');
+  const rateHistorySheet = XLSX.utils.json_to_sheet(exchangeRateHistory.map(entry => ({ date: entry.created_at, old_rate: entry.old_rate, new_rate: entry.new_rate, change_percent: exchangeRateChangePercent(entry.old_rate, entry.new_rate) })));
+  rateHistorySheet['!cols'] = [{ wch: 24 }, { wch: 18 }, { wch: 18 }, { wch: 18 }];
+  XLSX.utils.book_append_sheet(workbook, rateHistorySheet, 'Exchange Rate History');
 
   const filename = `sarafy-products-${new Date().toISOString().slice(0, 10)}.xlsx`;
   const uri = `${FileSystem.cacheDirectory}${filename}`;

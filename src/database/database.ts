@@ -1,13 +1,16 @@
 import * as SQLite from 'expo-sqlite';
-import { Expense, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
+import { ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
 import { createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
 import { deriveReturnStatus, previewReturn, returnedQuantities } from '@/utils/returns';
+import { DEFAULT_EXPENSE_CATEGORIES, OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
+
+export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
 async function migratePortableIdentity() {
   const db = await dbPromise;
@@ -131,6 +134,54 @@ async function migrateReturnsV10() {
   });
 }
 
+async function migrateExpensesAndRatesV11() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 11) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    await transaction.execAsync(`
+      CREATE TABLE expense_categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        name_ar TEXT NOT NULL,
+        name_en TEXT,
+        is_system INTEGER NOT NULL DEFAULT 0 CHECK(is_system IN (0,1)),
+        is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE exchange_rate_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        old_rate REAL NOT NULL CHECK(old_rate > 0),
+        new_rate REAL NOT NULL CHECK(new_rate > 0),
+        created_at TEXT NOT NULL
+      );
+    `);
+    const now = new Date().toISOString();
+    for (const [uuid, nameAr, nameEn] of DEFAULT_EXPENSE_CATEGORIES) {
+      await transaction.runAsync(`INSERT INTO expense_categories
+        (uuid,name_ar,name_en,is_system,is_active,created_at,updated_at) VALUES(?,?,?,1,1,?,?)`,
+      uuid, nameAr, nameEn, now, now);
+    }
+    const expenseColumns = await transaction.getAllAsync<{ name: string }>('PRAGMA table_info(expenses)');
+    if (!expenseColumns.some(column => column.name === 'category_id')) {
+      await transaction.execAsync('ALTER TABLE expenses ADD COLUMN category_id INTEGER REFERENCES expense_categories(id) ON DELETE RESTRICT');
+    }
+    if (!expenseColumns.some(column => column.name === 'note')) {
+      await transaction.execAsync('ALTER TABLE expenses ADD COLUMN note TEXT');
+    }
+    await transaction.runAsync(`UPDATE expenses SET category_id=(SELECT id FROM expense_categories WHERE uuid=?) WHERE category_id IS NULL`, OTHER_EXPENSE_CATEGORY_UUID);
+    await transaction.execAsync(`
+      CREATE INDEX idx_expenses_category_id ON expenses(category_id);
+      CREATE INDEX idx_expense_categories_active ON expense_categories(is_active);
+      CREATE INDEX idx_exchange_rate_history_created_at ON exchange_rate_history(created_at);
+      PRAGMA user_version = 11;
+    `);
+  });
+}
+
 export async function initializeDatabase() {
   const db = await dbPromise;
   await db.execAsync(`
@@ -198,6 +249,7 @@ export async function initializeDatabase() {
   await migratePortableIdentity();
   await migrateSalesV9();
   await migrateReturnsV10();
+  await migrateExpensesAndRatesV11();
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
   if (integrity?.integrity_check !== 'ok') throw new Error('DATABASE_INTEGRITY_CHECK_FAILED');
   const foreignKeys = await db.getAllAsync<{ table: string; rowid: number }>('PRAGMA foreign_key_check');
@@ -364,6 +416,43 @@ export async function saveSetting(key: keyof Settings, value: Settings[keyof Set
   await db.runAsync(
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
     key, JSON.stringify(value),
+  );
+}
+
+export async function updateExchangeRate(newRate: number) {
+  if (!Number.isFinite(newRate) || newRate <= 0 || Math.abs(newRate) > Number.MAX_SAFE_INTEGER) throw new Error('INVALID_EXCHANGE_RATE');
+  const db = await dbPromise;
+  let entry: ExchangeRateHistoryEntry | null = null;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const stored = await transaction.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='exchangeRate'");
+    let oldRate = 15000;
+    if (stored) {
+      const parsed: unknown = JSON.parse(stored.value);
+      if (typeof parsed !== 'number' || !Number.isFinite(parsed) || parsed <= 0) throw new Error('INVALID_STORED_EXCHANGE_RATE');
+      oldRate = parsed;
+    }
+    if (oldRate === newRate) return;
+    const uuid = createUuid();
+    const createdAt = new Date().toISOString();
+    const result = await transaction.runAsync(
+      'INSERT INTO exchange_rate_history(uuid,old_rate,new_rate,created_at) VALUES(?,?,?,?)',
+      uuid, oldRate, newRate, createdAt,
+    );
+    await transaction.runAsync(
+      "INSERT INTO settings(key,value) VALUES('exchangeRate',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      JSON.stringify(newRate),
+    );
+    entry = { id: result.lastInsertRowId, uuid, old_rate: oldRate, new_rate: newRate, created_at: createdAt };
+  });
+  return entry;
+}
+
+export async function getExchangeRateHistory(limit?: number) {
+  const db = await dbPromise;
+  if (limit != null && (!Number.isSafeInteger(limit) || limit <= 0)) throw new Error('INVALID_HISTORY_LIMIT');
+  return db.getAllAsync<ExchangeRateHistoryEntry>(
+    `SELECT * FROM exchange_rate_history ORDER BY created_at DESC,id DESC${limit == null ? '' : ' LIMIT ?'}`,
+    ...(limit == null ? [] : [limit]),
   );
 }
 
@@ -696,15 +785,93 @@ export async function deleteSuspendedSale(id: number) {
   if (!result.changes) throw new Error('DRAFT_NOT_FOUND');
 }
 
-export async function getExpenses() {
+const expenseSelect = `SELECT e.*,c.uuid AS category_uuid,c.name_ar AS category_name_ar,c.name_en AS category_name_en
+  FROM expenses e JOIN expense_categories c ON c.id=e.category_id`;
+
+export async function getExpenseCategories(includeInactive = true) {
   const db = await dbPromise;
-  return db.getAllAsync<Expense>('SELECT * FROM expenses ORDER BY created_at DESC');
+  return db.getAllAsync<ExpenseCategory>(`SELECT * FROM expense_categories${includeInactive ? '' : ' WHERE is_active=1'} ORDER BY is_system DESC,id`);
 }
 
-export async function addExpense(description: string, amountSyp: number) {
+export async function addExpenseCategory(nameAr: string, nameEn?: string | null) {
+  const ar = nameAr.trim(); const en = nameEn?.trim() || null;
+  if (!ar || ar.length > 60 || (en?.length ?? 0) > 60) throw new Error('INVALID_EXPENSE_CATEGORY');
+  const db = await dbPromise; const now = new Date().toISOString();
+  const duplicate = await db.getFirstAsync<{ id: number }>(`SELECT id FROM expense_categories
+    WHERE name_ar=? COLLATE NOCASE OR (? IS NOT NULL AND name_en=? COLLATE NOCASE) LIMIT 1`, ar, en, en);
+  if (duplicate) throw new Error('EXPENSE_CATEGORY_EXISTS');
+  const result = await db.runAsync(`INSERT INTO expense_categories(uuid,name_ar,name_en,is_system,is_active,created_at,updated_at)
+    VALUES(?,?,?,0,1,?,?)`, createUuid(), ar, en, now, now);
+  return result.lastInsertRowId;
+}
+
+export async function renameExpenseCategory(id: number, nameAr: string, nameEn?: string | null) {
+  const ar = nameAr.trim(); const en = nameEn?.trim() || null;
+  if (!Number.isSafeInteger(id) || id <= 0 || !ar || ar.length > 60 || (en?.length ?? 0) > 60) throw new Error('INVALID_EXPENSE_CATEGORY');
   const db = await dbPromise;
-  await db.runAsync(
-    'INSERT INTO expenses (uuid,description,amount_syp,created_at,updated_at) VALUES (?,?,?,?,?)',
-    createUuid(), description.trim(), amountSyp, new Date().toISOString(), new Date().toISOString(),
-  );
+  const category = await db.getFirstAsync<{ is_system: number }>('SELECT is_system FROM expense_categories WHERE id=?', id);
+  if (!category) throw new Error('EXPENSE_CATEGORY_NOT_FOUND');
+  if (category.is_system) throw new Error('SYSTEM_EXPENSE_CATEGORY_IMMUTABLE');
+  const duplicate = await db.getFirstAsync<{ id: number }>(`SELECT id FROM expense_categories
+    WHERE id<>? AND (name_ar=? COLLATE NOCASE OR (? IS NOT NULL AND name_en=? COLLATE NOCASE)) LIMIT 1`, id, ar, en, en);
+  if (duplicate) throw new Error('EXPENSE_CATEGORY_EXISTS');
+  await db.runAsync('UPDATE expense_categories SET name_ar=?,name_en=?,updated_at=? WHERE id=?', ar, en, new Date().toISOString(), id);
+}
+
+export async function setExpenseCategoryActive(id: number, active: boolean): Promise<'archived' | 'restored' | 'deleted'> {
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('INVALID_EXPENSE_CATEGORY');
+  const db = await dbPromise;
+  const category = await db.getFirstAsync<{ is_system: number }>('SELECT is_system FROM expense_categories WHERE id=?', id);
+  if (!category) throw new Error('EXPENSE_CATEGORY_NOT_FOUND');
+  if (active) { await db.runAsync('UPDATE expense_categories SET is_active=1,updated_at=? WHERE id=?', new Date().toISOString(), id); return 'restored'; }
+  await db.runAsync('UPDATE expense_categories SET is_active=0,updated_at=? WHERE id=?', new Date().toISOString(), id);
+  return 'archived';
+}
+
+export async function getExpenses() {
+  const db = await dbPromise;
+  return db.getAllAsync<Expense>(`${expenseSelect} ORDER BY e.created_at DESC,e.id DESC`);
+}
+
+function expenseDateStart(period: ExpenseQuery['period']) {
+  if (!period || period === 'all') return null;
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  if (period === 'week') { const day = start.getDay(); start.setDate(start.getDate() - (day === 0 ? 6 : day - 1)); }
+  else if (period === 'month') start.setDate(1);
+  return start.toISOString();
+}
+
+export async function queryExpenses(query: ExpenseQuery) {
+  const db = await dbPromise; const where: string[] = []; const parameters: (string | number)[] = [];
+  const search = query.search?.trim();
+  if (search) { const like = `%${search}%`; where.push('(COALESCE(e.note,e.description) LIKE ? COLLATE NOCASE OR c.name_ar LIKE ? COLLATE NOCASE OR COALESCE(c.name_en,\'\') LIKE ? COLLATE NOCASE)'); parameters.push(like, like, like); }
+  const start = expenseDateStart(query.period); if (start) { where.push('e.created_at>=?'); parameters.push(start); }
+  if (query.categoryUuid) { where.push('c.uuid=?'); parameters.push(query.categoryUuid); }
+  if (query.minAmount != null && Number.isFinite(query.minAmount)) { where.push('e.amount_syp>=?'); parameters.push(query.minAmount); }
+  if (query.maxAmount != null && Number.isFinite(query.maxAmount)) { where.push('e.amount_syp<=?'); parameters.push(query.maxAmount); }
+  const order: Record<NonNullable<ExpenseQuery['sort']>, string> = { newest: 'e.created_at DESC,e.id DESC', oldest: 'e.created_at ASC,e.id ASC', highest: 'e.amount_syp DESC,e.created_at DESC', lowest: 'e.amount_syp ASC,e.created_at DESC' };
+  return db.getAllAsync<Expense>(`${expenseSelect}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${order[query.sort ?? 'newest']}`, ...parameters);
+}
+
+export async function getExpenseTotalsByCategory(period: ExpenseQuery['period'] = 'all') {
+  const db = await dbPromise; const start = expenseDateStart(period);
+  return db.getAllAsync<ExpenseCategoryTotal>(`SELECT c.id AS categoryId,c.uuid AS categoryUuid,c.name_ar AS nameAr,c.name_en AS nameEn,SUM(e.amount_syp) AS totalSyp
+    FROM expenses e JOIN expense_categories c ON c.id=e.category_id${start ? ' WHERE e.created_at>=?' : ''}
+    GROUP BY c.id ORDER BY totalSyp DESC,c.id`, ...(start ? [start] : []));
+}
+
+export async function addExpense(categoryId: number, amountSyp: number, note?: string | null) {
+  if (!Number.isSafeInteger(categoryId) || categoryId <= 0 || !Number.isSafeInteger(amountSyp) || amountSyp <= 0) throw new Error('INVALID_EXPENSE');
+  const normalizedNote = note?.trim() || null;
+  if ((normalizedNote?.length ?? 0) > 240) throw new Error('EXPENSE_NOTE_TOO_LONG');
+  const db = await dbPromise;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const category = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM expense_categories WHERE id=? AND is_active=1', categoryId);
+    if (!category) throw new Error('EXPENSE_CATEGORY_INACTIVE');
+    const now = new Date().toISOString();
+    await transaction.runAsync(
+      'INSERT INTO expenses (uuid,description,amount_syp,category_id,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?)',
+      createUuid(), normalizedNote ?? '', amountSyp, categoryId, normalizedNote, now, now,
+    );
+  });
 }

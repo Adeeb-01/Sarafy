@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Expense, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
+import { ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
 import * as database from '@/database/database';
 
 const defaults: Settings = {
@@ -10,15 +10,17 @@ const defaults: Settings = {
 };
 
 async function loadSnapshot() {
-  const [products, categories, settings, sales, expenses, suspendedSales] = await Promise.all([
+  const [products, categories, settings, sales, expenses, expenseCategories, latestRateChanges, suspendedSales] = await Promise.all([
     database.getProducts(),
     database.getCategories(),
     database.loadSettings(defaults),
     database.getSales(),
     database.getExpenses(),
+    database.getExpenseCategories(),
+    database.getExchangeRateHistory(1),
     database.getSuspendedSaleSummaries(),
   ]);
-  return { products, categories, sales, expenses, suspendedSales, ...settings };
+  return { products, categories, sales, expenses, expenseCategories, latestRateChange: latestRateChanges[0] ?? null, suspendedSales, ...settings };
 }
 
 interface AppState extends Settings {
@@ -26,6 +28,8 @@ interface AppState extends Settings {
   categories: string[];
   sales: Sale[];
   expenses: Expense[];
+  expenseCategories: ExpenseCategory[];
+  latestRateChange: ExchangeRateHistoryEntry | null;
   suspendedSales: SuspendedSaleSummary[];
   isReady: boolean;
   initialize: () => Promise<void>;
@@ -36,6 +40,8 @@ interface AppState extends Settings {
   removeProduct: (id: number) => Promise<void>;
   createCategory: (name: string) => Promise<void>;
   updateSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => Promise<void>;
+  updateExchangeRate: (value: number) => Promise<ExchangeRateHistoryEntry | null>;
+  getExchangeRateHistory: () => Promise<ExchangeRateHistoryEntry[]>;
   refreshSales: () => Promise<void>;
   completeSale: (items: SaleItemInput[], discountSyp?: number, amountPaidSyp?: number, exchangeRate?: number, draftId?: number) => Promise<Sale>;
   createReturn: (saleId: number, selections: ReturnSelection[]) => Promise<SaleReturn>;
@@ -45,7 +51,12 @@ interface AppState extends Settings {
   refreshSuspendedSales: () => Promise<void>;
   queryInvoices: (query: InvoiceQuery) => Promise<Sale[]>;
   getInvoiceDetails: (saleId: number) => Promise<Sale | null>;
-  createExpense: (description: string, amountSyp: number) => Promise<void>;
+  queryExpenses: (query: ExpenseQuery) => Promise<Expense[]>;
+  getExpenseTotalsByCategory: (period?: ExpensePeriod) => Promise<ExpenseCategoryTotal[]>;
+  createExpense: (categoryId: number, amountSyp: number, note?: string | null) => Promise<void>;
+  createExpenseCategory: (nameAr: string, nameEn?: string | null) => Promise<void>;
+  renameExpenseCategory: (id: number, nameAr: string, nameEn?: string | null) => Promise<void>;
+  setExpenseCategoryActive: (id: number, active: boolean) => Promise<'archived' | 'restored' | 'deleted'>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -54,6 +65,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   categories: [],
   sales: [],
   expenses: [],
+  expenseCategories: [],
+  latestRateChange: null,
   suspendedSales: [],
   isReady: false,
   initialize: async () => {
@@ -81,9 +94,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ categories: await database.getCategories() });
   },
   updateSetting: async (key, value) => {
-    set(state => ({ ...state, [key]: value }));
+    if (key === 'exchangeRate') { await get().updateExchangeRate(value as number); return; }
     await database.saveSetting(key, value);
+    set(state => ({ ...state, [key]: value }));
   },
+  updateExchangeRate: async value => {
+    const entry = await database.updateExchangeRate(value);
+    if (entry) set({ exchangeRate: value, latestRateChange: entry });
+    return entry;
+  },
+  getExchangeRateHistory: database.getExchangeRateHistory,
   refreshSales: async () => {
     const [sales, expenses] = await Promise.all([database.getSales(), database.getExpenses()]);
     set({ sales, expenses });
@@ -111,8 +131,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   refreshSuspendedSales: async () => set({ suspendedSales: await database.getSuspendedSaleSummaries() }),
   queryInvoices: database.queryInvoices,
   getInvoiceDetails: database.getInvoiceDetails,
-  createExpense: async (description, amountSyp) => {
-    await database.addExpense(description, amountSyp);
+  queryExpenses: database.queryExpenses,
+  getExpenseTotalsByCategory: database.getExpenseTotalsByCategory,
+  createExpense: async (categoryId, amountSyp, note) => {
+    await database.addExpense(categoryId, amountSyp, note);
     set({ expenses: await database.getExpenses() });
+  },
+  createExpenseCategory: async (nameAr, nameEn) => {
+    await database.addExpenseCategory(nameAr, nameEn);
+    set({ expenseCategories: await database.getExpenseCategories() });
+  },
+  renameExpenseCategory: async (id, nameAr, nameEn) => {
+    await database.renameExpenseCategory(id, nameAr, nameEn);
+    set({ expenseCategories: await database.getExpenseCategories(), expenses: await database.getExpenses() });
+  },
+  setExpenseCategoryActive: async (id, active) => {
+    const result = await database.setExpenseCategoryActive(id, active);
+    set({ expenseCategories: await database.getExpenseCategories(), expenses: await database.getExpenses() });
+    return result;
   },
 }));

@@ -132,6 +132,14 @@ const ar = {
     available: 'متاح', returnAll: 'إرجاع الكل', shareReturnReceipt: 'مشاركة إيصال المرتجع', returnFailed: 'تعذر تسجيل المرتجع. لم تتغير الفاتورة.',
     returnPrepared: 'تم تجهيز إيصال المرتجع', returnPrepareFailed: 'تعذر تجهيز إيصال المرتجع.', returnId: 'رقم المرتجع',
   },
+  expense: {
+    search: 'ابحث في الملاحظات أو الفئات', searchAccessibility: 'البحث في المصاريف', filters: 'تصفية المصاريف',
+    category: 'الفئة', chooseCategory: 'اختر فئة', allCategories: 'كل الفئات', other: 'أخرى', note: 'الملاحظة', noteOptional: 'ملاحظة - اختياري', noteExample: 'مثال: صيانة البراد',
+    manageCategories: 'فئات المصاريف', addCategory: 'إضافة فئة', editCategory: 'تعديل الفئة', hideCategory: 'إخفاء الفئة', restoreCategory: 'استعادة الفئة',
+    categoryNameAr: 'الاسم بالعربية', categoryNameEn: 'الاسم بالإنكليزية - اختياري', systemCategory: 'افتراضية', inactiveCategory: 'مخفية',
+    categoryUsed: 'ستُخفى الفئة من المصاريف الجديدة، مع بقاء كل المصاريف التاريخية مرتبطة بها.', categorySaved: 'تم حفظ الفئة', categoryFailed: 'تعذر حفظ الفئة.',
+    categoryRequired: 'اختر فئة نشطة.', invalidCategoryName: 'أدخل اسم فئة صحيحًا.', noteTooLong: 'الملاحظة يجب ألا تتجاوز 240 محرفًا.', resultCount: (count: string) => `${count} مصروف`,
+  },
   analytics: {
     today: 'اليوم', week: 'الأسبوع', month: 'الشهر', thisWeek: 'هذا الأسبوع', thisMonth: 'هذا الشهر',
     period: 'فترة التحليلات', netProfit: 'صافي الربح', openNetProfit: 'فتح تفاصيل حساب صافي الربح',
@@ -158,7 +166,7 @@ const ar = {
     noImageIssues: 'لا توجد مشكلات في الصور', noImageIssuesDescription: 'جميع صور المنتجات المستخدمة متاحة.',
     noBackupsDescription: 'لم تُنشأ نسخ احتياطية تلقائية بعد.', imageHealthSummary: (healthy: string, missing: string, unused: string) => `صور سليمة: ${healthy}\nصور مفقودة: ${missing}\nصور غير مستخدمة: ${unused}`,
   },
-  rate: { editHint: 'يفتح لوحة تعديل سعر الصرف', updated: 'تم تحديث سعر الصرف', updateFailed: 'تعذر تحديث سعر الصرف. لم تتغير الإعدادات.', input: 'سعر الصرف بالليرة السورية' },
+  rate: { editHint: 'يفتح لوحة تعديل سعر الصرف', updated: 'تم تحديث سعر الصرف', updateFailed: 'تعذر تحديث سعر الصرف. لم تتغير الإعدادات.', input: 'سعر الصرف بالليرة السورية', history: 'سجل سعر الصرف', oldRate: 'السعر السابق', newRate: 'السعر الجديد', lastUpdated: 'آخر تعديل', changePercent: 'نسبة التغير', noHistory: 'لا يوجد سجل تغييرات بعد', historyHint: 'يفتح سجل تغيرات سعر الصرف', sameRate: 'السعر لم يتغير' },
 } as const;
 
 const en: ShapeOf<typeof ar> = {
@@ -274,6 +282,13 @@ const en: ShapeOf<typeof ar> = {
     available: 'Available', returnAll: 'Return all', shareReturnReceipt: 'Share return receipt', returnFailed: 'Could not record the return. The invoice was not changed.',
     returnPrepared: 'Return receipt prepared', returnPrepareFailed: 'Could not prepare the return receipt.', returnId: 'Return ID',
   },
+  expense: {
+    search: 'Search notes or categories', searchAccessibility: 'Search expenses', filters: 'Expense filters', category: 'Category', chooseCategory: 'Choose category', allCategories: 'All categories', other: 'Other',
+    note: 'Note', noteOptional: 'Note — optional', noteExample: 'Example: Refrigerator maintenance', manageCategories: 'Expense categories', addCategory: 'Add category', editCategory: 'Edit category',
+    hideCategory: 'Hide category', restoreCategory: 'Restore category', categoryNameAr: 'Arabic name', categoryNameEn: 'English name — optional', systemCategory: 'System', inactiveCategory: 'Hidden',
+    categoryUsed: 'The category will be hidden from new expenses while every historical expense remains linked to it.', categorySaved: 'Category saved', categoryFailed: 'Could not save the category.',
+    categoryRequired: 'Choose an active category.', invalidCategoryName: 'Enter a valid category name.', noteTooLong: 'The note must not exceed 240 characters.', resultCount: count => `${count} expenses`,
+  },
   analytics: {
     today: 'Today', week: 'Week', month: 'Month', thisWeek: 'This week', thisMonth: 'This month', period: 'Analytics period',
     netProfit: 'Net profit', openNetProfit: 'Open the net profit calculation details', coreMetrics: 'Core metrics', revenue: 'Revenue',
@@ -297,7 +312,7 @@ const en: ShapeOf<typeof ar> = {
     noImageIssues: 'No image issues', noImageIssuesDescription: 'All referenced product images are available.',
     noBackupsDescription: 'No automatic backups have been created yet.', imageHealthSummary: (healthy, missing, unused) => `Healthy images: ${healthy}\nMissing images: ${missing}\nUnused images: ${unused}`,
   },
-  rate: { editHint: 'Opens exchange rate editor', updated: 'Exchange rate updated', updateFailed: 'Could not update the exchange rate. Settings were not changed.', input: 'Exchange rate in SYP' },
+  rate: { editHint: 'Opens exchange rate editor', updated: 'Exchange rate updated', updateFailed: 'Could not update the exchange rate. Settings were not changed.', input: 'Exchange rate in SYP', history: 'Exchange rate history', oldRate: 'Previous rate', newRate: 'New rate', lastUpdated: 'Last updated', changePercent: 'Change percentage', noHistory: 'No rate changes recorded yet', historyHint: 'Opens exchange rate change history', sameRate: 'The rate did not change' },
 };
 
 type ShapeOf<T> = { [K in keyof T]: T[K] extends (...args: infer A) => unknown ? (...args: A) => string : T[K] extends object ? ShapeOf<T[K]> : string };

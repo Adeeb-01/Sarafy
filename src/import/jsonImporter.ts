@@ -1,4 +1,4 @@
-import { getDatabase } from '@/database/database';
+import { getDatabase, OTHER_EXPENSE_CATEGORY_UUID } from '@/database/database';
 import { createPreImportBackup } from '@/backup/backupManager';
 import { ImportOptions, ImportPayload, ImportPreview, ImportResult } from './importTypes';
 import { isUuid } from '@/utils/uuid';
@@ -20,6 +20,7 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
   if (preview.summary.invalidRecords || preview.summary.duplicates ||
       preview.issues.some(issue => issue.code === 'DUPLICATE_BARCODE') ||
       preview.issues.some(issue => issue.code === 'RETURN_PARENT_MISSING' || issue.code === 'RETURN_ITEM_PARENT_MISSING') ||
+      preview.issues.some(issue => issue.code === 'EXPENSE_CATEGORY_PARENT_MISSING') ||
       (preview.options.conflictStrategy === 'manual' && preview.summary.conflicts)) {
     throw new Error('IMPORT_REQUIRES_REVIEW');
   }
@@ -39,9 +40,25 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
       await transaction.runAsync('DELETE FROM sale_items');
       await transaction.runAsync('DELETE FROM sales');
       await transaction.runAsync('DELETE FROM expenses');
+      await transaction.runAsync('DELETE FROM exchange_rate_history');
+      if (payload.expenseCategories?.length) await transaction.runAsync('DELETE FROM expense_categories');
+      else { await transaction.runAsync('DELETE FROM expense_categories WHERE is_system=0'); await transaction.runAsync('UPDATE expense_categories SET is_active=1'); }
       await transaction.runAsync('DELETE FROM products');
       await transaction.runAsync('DELETE FROM categories');
       if (options.entities.includes('settings')) await transaction.runAsync('DELETE FROM settings');
+    }
+    if (options.entities.includes('expense_categories')) {
+      for (const item of payload.expenseCategories ?? []) {
+        const local = await transaction.getFirstAsync<{ id: number; updated_at: string }>('SELECT id,updated_at FROM expense_categories WHERE uuid=?', item.uuid);
+        if (!local) {
+          await transaction.runAsync(`INSERT INTO expense_categories(uuid,name_ar,name_en,is_system,is_active,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?)`, item.uuid, item.name_ar, item.name_en ?? null, item.is_system ? 1 : 0, item.is_active ? 1 : 0, item.created_at, item.updated_at);
+          inserted += 1;
+        } else if (!item.is_system && shouldUseImported(local.updated_at, item.updated_at, options)) {
+          await transaction.runAsync('UPDATE expense_categories SET name_ar=?,name_en=?,is_active=?,updated_at=? WHERE uuid=?', item.name_ar, item.name_en ?? null, item.is_active ? 1 : 0, item.updated_at, item.uuid);
+          updated += 1;
+        } else skipped += 1;
+      }
     }
     if (options.entities.includes('categories')) {
       for (const item of payload.categories) {
@@ -189,14 +206,25 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
     }
     if (options.entities.includes('expenses')) {
       for (const item of payload.expenses) {
+        const categoryUuid = item.category_uuid || OTHER_EXPENSE_CATEGORY_UUID;
+        const category = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM expense_categories WHERE uuid=?', categoryUuid);
+        if (!category) throw new Error('EXPENSE_CATEGORY_PARENT_MISSING');
         const local = await transaction.getFirstAsync<{ updated_at: string }>('SELECT updated_at FROM expenses WHERE uuid=?', item.uuid);
         if (!local) {
-          await transaction.runAsync('INSERT INTO expenses(uuid,description,amount_syp,created_at,updated_at) VALUES(?,?,?,?,?)', item.uuid, item.description, item.amount_syp, item.created_at, item.updated_at);
+          await transaction.runAsync('INSERT INTO expenses(uuid,description,amount_syp,category_id,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?)', item.uuid, item.description, item.amount_syp, category.id, item.note ?? null, item.created_at, item.updated_at);
           inserted += 1;
         } else if (shouldUseImported(local.updated_at, item.updated_at, options)) {
-          await transaction.runAsync('UPDATE expenses SET description=?,amount_syp=?,updated_at=? WHERE uuid=?', item.description, item.amount_syp, item.updated_at, item.uuid);
+          await transaction.runAsync('UPDATE expenses SET description=?,amount_syp=?,category_id=?,note=?,updated_at=? WHERE uuid=?', item.description, item.amount_syp, category.id, item.note ?? null, item.updated_at, item.uuid);
           updated += 1;
         } else skipped += 1;
+      }
+    }
+    if (options.entities.includes('exchange_rate_history')) {
+      for (const entry of payload.exchangeRateHistory ?? []) {
+        const exists = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM exchange_rate_history WHERE uuid=?', entry.uuid);
+        if (exists) { skipped += 1; continue; }
+        await transaction.runAsync('INSERT INTO exchange_rate_history(uuid,old_rate,new_rate,created_at) VALUES(?,?,?,?)', entry.uuid, entry.old_rate, entry.new_rate, entry.created_at);
+        inserted += 1;
       }
     }
     if (options.entities.includes('settings') && options.importSettings) {
@@ -233,8 +261,8 @@ export function defaultImportOptions(mode: ImportOptions['mode'] = 'safe_merge')
     mode,
     conflictStrategy: 'newest',
     entities: mode === 'full_restore'
-      ? ['products', 'categories', 'settings', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expenses', 'product_images', 'sale_drafts', 'sale_draft_items']
-      : ['products', 'categories', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expenses', 'product_images'],
+      ? ['products', 'categories', 'settings', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'product_images', 'sale_drafts', 'sale_draft_items']
+      : ['products', 'categories', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'product_images'],
     importSettings: mode === 'full_restore',
   };
 }
@@ -245,7 +273,7 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
   if (!Array.isArray(payload.products) || !Array.isArray(payload.categories) ||
       !Array.isArray(payload.sales) || !Array.isArray(payload.expenses) ||
       !payload.settings || typeof payload.version !== 'number') throw new Error('INVALID_BACKUP');
-  if (payload.version > 4) throw new Error('BACKUP_NEWER_THAN_APP');
+  if (payload.version > 5) throw new Error('BACKUP_NEWER_THAN_APP');
   const validDate = (input: unknown) => typeof input === 'string' && Number.isFinite(Date.parse(input));
   const finite = (input: unknown) => typeof input === 'number' && Number.isFinite(input);
   for (const product of payload.products) {
@@ -311,6 +339,16 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
     if (!expense || !isRecord(expense) || !isUuid(expense.uuid) || typeof expense.description !== 'string' ||
         !finite(expense.amount_syp) || expense.amount_syp < 0 ||
         !validDate(expense.created_at) || !validDate(expense.updated_at)) throw new Error('INVALID_EXPENSE');
+    if (expense.category_uuid != null && !isUuid(expense.category_uuid)) throw new Error('INVALID_EXPENSE_CATEGORY_REFERENCE');
+    if (expense.note != null && (typeof expense.note !== 'string' || expense.note.length > 240)) throw new Error('INVALID_EXPENSE_NOTE');
+  }
+  for (const category of payload.expenseCategories ?? []) {
+    if (!isRecord(category) || !isUuid(category.uuid) || typeof category.name_ar !== 'string' || !category.name_ar.trim() || category.name_ar.length > 60 ||
+        (category.name_en != null && (typeof category.name_en !== 'string' || category.name_en.length > 60)) || ![0, 1].includes(category.is_system) || ![0, 1].includes(category.is_active) ||
+        !validDate(category.created_at) || !validDate(category.updated_at)) throw new Error('INVALID_EXPENSE_CATEGORY');
+  }
+  for (const entry of payload.exchangeRateHistory ?? []) {
+    if (!isRecord(entry) || !isUuid(entry.uuid) || !finite(entry.old_rate) || entry.old_rate <= 0 || !finite(entry.new_rate) || entry.new_rate <= 0 || !validDate(entry.created_at)) throw new Error('INVALID_EXCHANGE_RATE_HISTORY');
   }
   const settings = payload.settings;
   if (!isRecord(settings) || Object.keys(settings).some(key => !SETTING_KEYS.includes(key as typeof SETTING_KEYS[number])) ||
