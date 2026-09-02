@@ -2,15 +2,14 @@ import { StyleSheet, Text, View } from 'react-native';
 import { BottomSheet, MonetaryValue } from '@/components/ui';
 import type { Language } from '@/types';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
-import type { AnalyticsPeriod, buildAnalytics } from '@/utils/salesAnalytics';
+import type { AnalyticsPeriod, AnalyticsProductMetric, buildAnalytics2 } from '@/utils/salesAnalytics';
 import { analyticsPeriodLabel } from '@/utils/analyticsUiState';
 import { formatNumber } from '@/utils/formatters';
 import { uiText } from '@/i18n';
 
-type AnalyticsResult = ReturnType<typeof buildAnalytics>;
-type TopProduct = AnalyticsResult['topProducts'][number];
-export type AnalyticsMetricKey = 'netProfit' | 'revenue' | 'grossProfit' | 'expenses' | 'invoiceCount';
-export type AnalyticsDetail = { kind: 'metric'; metric: AnalyticsMetricKey } | { kind: 'product'; product: TopProduct; rank: number };
+type AnalyticsResult = ReturnType<typeof buildAnalytics2>;
+export type AnalyticsMetricKey = 'netProfit' | 'revenue' | 'grossProfit' | 'expenses' | 'invoiceCount' | 'returns' | 'discounts';
+export type AnalyticsDetail = { kind: 'metric'; metric: AnalyticsMetricKey } | { kind: 'product'; product: AnalyticsProductMetric; rank: number };
 
 export function AnalyticsDetailSheet({ detail, analytics, period, language, onClose }: { detail: AnalyticsDetail | null; analytics: AnalyticsResult; period: AnalyticsPeriod; language: Language; onClose: () => void }) {
   const { colors } = useAppTheme();
@@ -21,25 +20,27 @@ export function AnalyticsDetailSheet({ detail, analytics, period, language, onCl
     return <BottomSheet visible onClose={onClose} title={detail.product.name} rtl={rtl}><View style={styles.content}>
       <PlainRow label={copy.analytics.rank} value={`#${formatNumber(detail.rank, language)}`} rtl={rtl} />
       <PlainRow label={copy.analytics.itemsSold} value={formatNumber(detail.product.quantity, language)} rtl={rtl} />
-      <MoneyRow label={copy.analytics.revenue} value={detail.product.revenue} language={language} />
+      <MoneyRow label={copy.analytics.revenue} value={detail.product.revenue} language={language} /><MoneyRow label={copy.analytics.grossProfit} value={detail.product.profit} language={language} />
       <Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.analytics.periodLabel(analyticsPeriodLabel(period, language))}</Text>
     </View></BottomSheet>;
   }
 
-  const titles: Record<AnalyticsMetricKey, string> = { netProfit: copy.analytics.netProfitDetails, revenue: copy.analytics.revenueDetails, grossProfit: copy.analytics.grossProfitDetails, expenses: copy.analytics.expensesDetails, invoiceCount: copy.analytics.invoiceDetails };
-  const productCosts = analytics.revenue - analytics.grossProfit;
+  const current = analytics.current;
+  const titles: Record<AnalyticsMetricKey, string> = { netProfit: copy.analytics.netProfitDetails, revenue: copy.analytics.revenueDetails, grossProfit: copy.analytics.grossProfitDetails, expenses: copy.analytics.expensesDetails, invoiceCount: copy.analytics.invoiceDetails, returns: copy.analytics.totalReturns, discounts: copy.analytics.totalDiscounts };
   return <BottomSheet visible onClose={onClose} title={titles[detail.metric]} rtl={rtl}><View style={styles.content}>
     {detail.metric === 'netProfit' && <View style={[styles.formula, { backgroundColor: colors.surfaceSecondary }]}>
-      <MoneyRow label={copy.analytics.revenue} value={analytics.revenue} language={language} />
-      <MoneyRow operator="−" label={copy.analytics.productCosts} value={productCosts} language={language} />
-      <MoneyRow operator="=" label={copy.analytics.grossProfit} value={analytics.grossProfit} language={language} />
-      <MoneyRow operator="−" label={copy.analytics.expenses} value={analytics.expenses} language={language} />
-      <MoneyRow operator="=" label={copy.analytics.netProfit} value={analytics.netProfit} language={language} strong negative={analytics.netProfit < 0} />
+      <MoneyRow label={copy.analytics.revenue} value={current.netSales} language={language} />
+      <MoneyRow operator="−" label={copy.analytics.netCogs} value={current.netCogs} language={language} />
+      <MoneyRow operator="=" label={copy.analytics.grossProfit} value={current.grossProfit} language={language} />
+      <MoneyRow operator="−" label={copy.analytics.expenses} value={current.operatingExpenses} language={language} />
+      <MoneyRow operator="=" label={copy.analytics.netProfit} value={current.netProfit} language={language} strong negative={current.netProfit < 0} />
     </View>}
-    {detail.metric === 'revenue' && <><MoneyRow label={copy.analytics.revenue} value={analytics.revenue} language={language} strong /><PlainRow label={copy.analytics.invoiceCount} value={formatNumber(analytics.invoiceCount, language)} rtl={rtl} /><MoneyRow label={copy.analytics.averageInvoice} value={analytics.averageInvoice} language={language} /></>}
-    {detail.metric === 'grossProfit' && <View style={[styles.formula, { backgroundColor: colors.surfaceSecondary }]}><MoneyRow label={copy.analytics.revenue} value={analytics.revenue} language={language} /><MoneyRow operator="−" label={copy.analytics.productCosts} value={productCosts} language={language} /><MoneyRow operator="=" label={copy.analytics.grossProfit} value={analytics.grossProfit} language={language} strong negative={analytics.grossProfit < 0} /></View>}
-    {detail.metric === 'expenses' && <MoneyRow label={copy.analytics.operatingExpenses} value={analytics.expenses} language={language} strong />}
-    {detail.metric === 'invoiceCount' && <><PlainRow label={copy.analytics.invoiceCount} value={formatNumber(analytics.invoiceCount, language)} rtl={rtl} /><PlainRow label={copy.analytics.itemsSold} value={formatNumber(analytics.itemCount, language)} rtl={rtl} /><MoneyRow label={copy.analytics.averageInvoice} value={analytics.averageInvoice} language={language} /></>}
+    {detail.metric === 'revenue' && <><MoneyRow label={copy.analytics.completedSales} value={current.completedSales} language={language} /><MoneyRow operator="−" label={copy.analytics.totalReturns} value={current.refunds} language={language} /><MoneyRow operator="=" label={copy.analytics.revenue} value={current.netSales} language={language} strong /><PlainRow label={copy.analytics.invoiceCount} value={formatNumber(current.invoiceCount, language)} rtl={rtl} /><PlainRow label={copy.analytics.returnCount} value={formatNumber(current.returnCount, language)} rtl={rtl} /></>}
+    {detail.metric === 'grossProfit' && <View style={[styles.formula, { backgroundColor: colors.surfaceSecondary }]}><MoneyRow label={copy.analytics.revenue} value={current.netSales} language={language} /><MoneyRow operator="−" label={copy.analytics.netCogs} value={current.netCogs} language={language} /><MoneyRow operator="=" label={copy.analytics.grossProfit} value={current.grossProfit} language={language} strong negative={current.grossProfit < 0} /></View>}
+    {detail.metric === 'expenses' && <MoneyRow label={copy.analytics.operatingExpenses} value={current.operatingExpenses} language={language} strong />}
+    {detail.metric === 'invoiceCount' && <><PlainRow label={copy.analytics.invoiceCount} value={formatNumber(current.invoiceCount, language)} rtl={rtl} /><PlainRow label={copy.analytics.itemsSold} value={formatNumber(current.itemCount, language)} rtl={rtl} /><MoneyRow label={copy.analytics.averageInvoice} value={current.averageInvoice} language={language} /></>}
+    {detail.metric === 'returns' && <><MoneyRow label={copy.analytics.totalReturns} value={current.refunds} language={language} strong /><PlainRow label={copy.analytics.returnCount} value={formatNumber(current.returnCount, language)} rtl={rtl} /><PlainRow label={copy.analytics.returnedQuantity} value={formatNumber(current.returnedQuantity, language)} rtl={rtl} /></>}
+    {detail.metric === 'discounts' && <><MoneyRow label={copy.analytics.totalDiscounts} value={current.discounts} language={language} strong /><MoneyRow label={copy.analytics.completedSales} value={current.grossSales} language={language} /></>}
     <Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.analytics.periodLabel(analyticsPeriodLabel(period, language))}</Text>
   </View></BottomSheet>;
 }

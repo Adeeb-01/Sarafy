@@ -21,6 +21,7 @@
     "test:phase10": "node --test scripts/phase10-returns.test.mjs",
     "test:phase10.5": "node --test scripts/phase10_5-invoice-performance.test.mjs",
     "test:phase11": "node --test scripts/phase11-expenses-rates.test.mjs",
+    "test:phase12": "node --test scripts/phase12-analytics2.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

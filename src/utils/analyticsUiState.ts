@@ -1,12 +1,38 @@
-import type { Language } from '@/types';
-import type { AnalyticsPeriod } from '@/utils/salesAnalytics';
-import { formatNumber } from '@/utils/formatters';
-import { uiText } from '@/i18n/ui';
+import type { Language } from '../types/index.ts';
+import type { AnalyticsPeriod, MetricComparison } from './salesAnalytics.ts';
+import { formatNumber } from './formatters.ts';
+import { uiText } from '../i18n/ui.ts';
 
 export const analyticsPeriodLabel = (period: AnalyticsPeriod, language: Language) => {
   const copy = uiText(language).analytics;
   return period === 'day' ? copy.today : period === 'week' ? copy.thisWeek : copy.thisMonth;
 };
+
+export const comparisonPeriodLabel = (period: AnalyticsPeriod, language: Language) => {
+  const copy = uiText(language).analytics;
+  return period === 'day' ? copy.vsYesterday : period === 'week' ? copy.vsWeek : copy.vsMonth;
+};
+
+export const formatAnalyticsPercent = (value: number | null, language: Language) => {
+  if (value == null || !Number.isFinite(value)) return null;
+  const normalized = Math.abs(value) < 0.05 ? 0 : value;
+  const capped = Math.abs(normalized) > 999 ? `${normalized < 0 ? '<-' : '>'}999` : `${normalized > 0 ? '+' : ''}${normalized.toLocaleString(language === 'ar' ? 'ar-SY' : 'en-US', { maximumFractionDigits: 1 })}`;
+  return `${capped}%`;
+};
+
+export const formatComparison = (comparison: MetricComparison, language: Language) => {
+  if (comparison.direction === 'same') return '0%';
+  return formatAnalyticsPercent(comparison.percentageChange, language);
+};
+
+export const weekdayLabel = (day: number, language: Language, width: 'short' | 'long' = 'short') => {
+  const sunday = new Date(2026, 7, 23 + day, 12);
+  return new Intl.DateTimeFormat(language === 'ar' ? 'ar-SY' : 'en-US', { weekday: width }).format(sunday);
+};
+
+export const hourLabel = (hour: number, language: Language) => new Intl.DateTimeFormat(
+  language === 'ar' ? 'ar-SY' : 'en-US', { hour: 'numeric', hour12: true },
+).format(new Date(2026, 0, 1, hour));
 
 export const formatCompactAxisValue = (value: number, language: Language) => {
   if (!Number.isFinite(value)) return formatNumber(0, language);
