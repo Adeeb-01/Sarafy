@@ -295,6 +295,10 @@ export interface CashSessionSummary extends CashSession {
   expected_cash_usd_cents: number;
 }
 
+export type CashSessionHistoryRow = Pick<CashSession,
+  'id' | 'uuid' | 'opened_at' | 'closed_at' | 'closing_difference_syp' | 'closing_difference_usd_cents'
+>;
+
 export type ActiveCashSessionSummary = CashSessionSummary;
 export type ClosedCashSession = CashSessionSummary;
 

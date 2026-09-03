@@ -24,6 +24,7 @@
     "test:phase12": "node --test scripts/phase12-analytics2.test.mjs",
     "test:phase13": "node --test scripts/phase13-cash-sessions.test.mjs",
     "test:phase14": "node --test scripts/phase14-multi-currency.test.mjs",
+    "test:phase14.5": "node --test scripts/phase14_5-session-history.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

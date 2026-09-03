@@ -1,5 +1,5 @@
 import * as SQLite from 'expo-sqlite';
-import { CashSession, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
+import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
 import { createDeterministicUuid, createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
@@ -1083,9 +1083,16 @@ export async function closeCashSession(actualCashSyp: number, actualCashUsdCents
   return session;
 }
 
-export async function getCashSessionHistory(sort: 'newest' | 'oldest' = 'newest'): Promise<CashSessionSummary[]> {
+export async function getCashSessionHistory(sort: 'newest' | 'oldest' = 'newest'): Promise<CashSessionHistoryRow[]> {
   const db = await dbPromise;
-  return db.getAllAsync<CashSessionSummary>(`${cashSessionSummarySelect} WHERE cs.closed_at IS NOT NULL ORDER BY cs.opened_at ${sort === 'oldest' ? 'ASC' : 'DESC'},cs.id ${sort === 'oldest' ? 'ASC' : 'DESC'}`);
+  const direction = sort === 'oldest' ? 'ASC' : 'DESC';
+  return db.getAllAsync<CashSessionHistoryRow>(`SELECT id,uuid,opened_at,closed_at,closing_difference_syp,closing_difference_usd_cents
+    FROM cash_sessions WHERE closed_at IS NOT NULL ORDER BY opened_at ${direction},id ${direction}`);
+}
+
+export async function getCashSessionsForExport(): Promise<CashSessionSummary[]> {
+  const db = await dbPromise;
+  return db.getAllAsync<CashSessionSummary>(`${cashSessionSummarySelect} WHERE cs.closed_at IS NOT NULL ORDER BY cs.opened_at DESC,cs.id DESC`);
 }
 
 export async function getCashSessionDetail(id: number): Promise<CashSessionSummary | null> {

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
+import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
 import * as database from '@/database/database';
 
 const defaults: Settings = {
@@ -62,7 +62,8 @@ interface AppState extends Settings {
   refreshActiveCashSession: () => Promise<void>;
   openCashSession: (openingCashSyp: number, openingCashUsdCents?: number, note?: string | null) => Promise<CashSessionSummary>;
   closeCashSession: (actualCashSyp: number, actualCashUsdCents?: number, note?: string | null) => Promise<CashSessionSummary>;
-  getCashSessionHistory: (sort?: 'newest' | 'oldest') => Promise<CashSessionSummary[]>;
+  getCashSessionHistory: (sort?: 'newest' | 'oldest') => Promise<CashSessionHistoryRow[]>;
+  getCashSessionsForExport: () => Promise<CashSessionSummary[]>;
   getCashSessionDetail: (id: number) => Promise<CashSessionSummary | null>;
   getCashSessionSales: (id: number) => Promise<Sale[]>;
   getCashSessionExpenses: (id: number) => Promise<Expense[]>;
@@ -173,6 +174,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     return session;
   },
   getCashSessionHistory: database.getCashSessionHistory,
+  getCashSessionsForExport: database.getCashSessionsForExport,
   getCashSessionDetail: database.getCashSessionDetail,
   getCashSessionSales: database.getCashSessionSales,
   getCashSessionExpenses: database.getCashSessionExpenses,
