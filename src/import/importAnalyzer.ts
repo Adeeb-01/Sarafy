@@ -199,6 +199,29 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
       summary.newRecords += 1 + record.items.length;
     });
   }
+  if (options.entities.includes('sale_payments')) {
+    const localRows = await db.getAllAsync<{ uuid: string; sale_uuid: string; currency: string; amount_minor: number; syp_equivalent: number; exchange_rate_syp_per_usd: number | null }>('SELECT sp.uuid,s.uuid AS sale_uuid,sp.currency,sp.amount_minor,sp.syp_equivalent,sp.exchange_rate_syp_per_usd FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id');
+    const localByUuid = new Map(localRows.map(row => [row.uuid, row]));
+    const localCurrency = new Map(localRows.map(row => [`${row.sale_uuid}:${row.currency}`, row.uuid]));
+    const knownSales = new Set((await db.getAllAsync<{ uuid: string }>('SELECT uuid FROM sales')).map(row => row.uuid));
+    payload.sales.forEach(sale => knownSales.add(sale.uuid));
+    const seenUuid = new Set<string>(); const seenCurrency = new Set<string>();
+    for (const [index, payment] of (payload.salePayments ?? []).entries()) {
+      const key = `${payment.sale_uuid}:${payment.currency}`;
+      if (seenUuid.has(payment.uuid) || seenCurrency.has(key)) { summary.duplicates += 1; issues.push({ entity: 'sale_payments', row: index + 1, code: 'DUPLICATE_UUID', action: 'rejected' }); continue; }
+      seenUuid.add(payment.uuid); seenCurrency.add(key);
+      if (!knownSales.has(payment.sale_uuid)) { summary.conflicts += 1; issues.push({ entity: 'sale_payments', row: index + 1, field: 'sale_uuid', value: payment.sale_uuid, code: 'PAYMENT_PARENT_MISSING', action: 'review' }); continue; }
+      const local = localByUuid.get(payment.uuid);
+      if (local) {
+        const unchanged = local.sale_uuid === payment.sale_uuid && local.currency === payment.currency && local.amount_minor === payment.amount_minor && local.syp_equivalent === payment.syp_equivalent && local.exchange_rate_syp_per_usd === payment.exchange_rate_syp_per_usd;
+        if (unchanged) summary.unchangedRecords += 1; else { summary.conflicts += 1; issues.push({ entity: 'sale_payments', row: index + 1, code: 'PAYMENT_CONFLICT', action: 'review' }); }
+      } else if (localCurrency.has(key)) { summary.conflicts += 1; issues.push({ entity: 'sale_payments', row: index + 1, code: 'PAYMENT_SETTLEMENT_CONFLICT', action: 'review' }); }
+      else summary.newRecords += 1;
+    }
+    const totals = new Map<string, number>();
+    for (const payment of payload.salePayments ?? []) totals.set(payment.sale_uuid, (totals.get(payment.sale_uuid) ?? 0) + payment.syp_equivalent);
+    for (const [saleUuid, total] of totals) { const sale = payload.sales.find(row => row.uuid === saleUuid); if (sale && total - (sale.change_syp ?? 0) !== sale.net_total_syp) { summary.conflicts += 1; issues.push({ entity: 'sale_payments', row: 0, value: saleUuid, code: 'PAYMENT_SETTLEMENT_CONFLICT', action: 'review' }); } }
+  }
   if (options.entities.includes('categories')) {
     const local = new Set((await db.getAllAsync<{ uuid: string }>('SELECT uuid FROM categories')).map(row => row.uuid));
     const seen = new Set<string>();

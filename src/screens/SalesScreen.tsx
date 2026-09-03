@@ -7,13 +7,14 @@ import { SuspendedSalesView } from '@/components/sales/SuspendedSalesView';
 import { AnalyticsDashboard } from '@/components/analytics/AnalyticsDashboard';
 import { AppButton, ConfirmSheet, MonetaryValue, ScreenContainer, SegmentedControl, useSnackbar } from '@/components/ui';
 import { useAppStore } from '@/store/useAppStore';
-import { Product, Sale, SuspendedSaleSummary } from '@/types';
+import { PaymentMode, Product, Sale, SuspendedSaleSummary } from '@/types';
 import { spacing, typography, useAppTheme } from '@/theme';
 import { calculateSypPrice } from '@/utils/priceCalculator';
 import { formatNumber } from '@/utils/formatters';
 import { shareInvoicePdf } from '@/utils/invoice';
 import { haptics } from '@/utils/haptics';
-import { addCartLine, calculateCartSubtotal, calculatePayment, changeCartLineQuantity, clampCartDiscount, parseLocalizedNumber, setCartLineQuantity } from '@/utils/salesUiState';
+import { addCartLine, calculateCartSubtotal, changeCartLineQuantity, clampCartDiscount, parseLocalizedNumber, setCartLineQuantity } from '@/utils/salesUiState';
+import { calculateSettlement, formatUsdCents, minimumUsdCentsToCover, parseUsdToCents } from '@/utils/multiCurrency';
 import { uiText } from '@/i18n';
 import { BarcodeScannerScreen } from '@/components/barcode/BarcodeScannerScreen';
 import { ProductFormModal } from '@/components/ProductFormModal';
@@ -36,6 +37,8 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const [discount, setDiscount] = useState('');
   const [amountPaid, setAmountPaid] = useState('');
   const [exactPayment, setExactPayment] = useState(true);
+  const [paymentMode, setPaymentMode] = useState<PaymentMode>('SYP');
+  const [usdAmount, setUsdAmount] = useState('');
   const [cartExchangeRate, setCartExchangeRate] = useState<number | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<number | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -61,7 +64,13 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const parsedDiscount = useMemo(() => parseLocalizedNumber(discount), [discount]);
   const appliedDiscount = clampCartDiscount(parsedDiscount, subtotal);
   const total = subtotal - appliedDiscount;
-  const payment = useMemo(() => calculatePayment(total, amountPaid, exactPayment), [amountPaid, exactPayment, total]);
+  const lockedRate = cartExchangeRate ?? state.exchangeRate;
+  const payment = useMemo(() => {
+    const syp = paymentMode === 'USD' ? 0 : exactPayment ? total : parseLocalizedNumber(amountPaid);
+    const usd = paymentMode === 'SYP' ? 0 : parseUsdToCents(usdAmount);
+    if (!Number.isSafeInteger(syp) || syp < 0 || usd == null) return null;
+    try { return calculateSettlement(total, lockedRate, { mode: paymentMode, sypAmount: syp, usdCents: usd }); } catch { return null; }
+  }, [amountPaid, exactPayment, lockedRate, paymentMode, total, usdAmount]);
   const cartItemCount = useMemo(() => cart.reduce((sum, line) => sum + line.quantity, 0), [cart]);
   const productsByBarcode = useMemo(() => createProductBarcodeMap(state.products), [state.products]);
   const visibleSuspendedSales = useMemo(() => state.suspendedSales.filter(draft => draft.id !== activeDraftId), [activeDraftId, state.suspendedSales]);
@@ -99,21 +108,21 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   }, []);
 
   const requestComplete = useCallback(() => {
-    if (!cart.length || discountError || !payment.valid || cart.some(line => !line.isAvailable) || savingRef.current) return;
+    if (!cart.length || discountError || !payment?.valid || cart.some(line => !line.isAvailable) || savingRef.current) return;
     if (!state.activeCashSession) { snackbar.show({ text: copy.cashSession.cashRequired, tone: 'info' }); setSection('cash'); return; }
     haptics.warning();
     setConfirmOpen(true);
-  }, [cart, copy.cashSession.cashRequired, discountError, payment.valid, snackbar, state.activeCashSession]);
+  }, [cart, copy.cashSession.cashRequired, discountError, payment?.valid, snackbar, state.activeCashSession]);
 
   const completeSale = async () => {
-    if (!cart.length || discountError || !payment.valid || cart.some(line => !line.isAvailable) || savingRef.current) return;
+    if (!cart.length || discountError || !payment?.valid || cart.some(line => !line.isAvailable) || savingRef.current) return;
     savingRef.current = true;
     setSaving(true);
     try {
-      const sale = await state.completeSale(cart, appliedDiscount, payment.amountPaidSyp, cartExchangeRate ?? state.exchangeRate, activeDraftId ?? undefined);
+      const sale = await state.completeSale(cart, appliedDiscount, { mode: paymentMode, sypAmount: payment.payments.find(row => row.currency === 'SYP')?.amount_minor ?? 0, usdCents: payment.payments.find(row => row.currency === 'USD')?.amount_minor ?? 0 }, lockedRate, activeDraftId ?? undefined);
       setCart([]);
       setDiscount('');
-      setAmountPaid(''); setExactPayment(true); setCartExchangeRate(null); setActiveDraftId(null);
+      setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setCartExchangeRate(null); setActiveDraftId(null);
       setReviewOpen(false);
       setConfirmOpen(false);
       setCompletedSale(sale);
@@ -136,7 +145,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     savingRef.current = true; setSaving(true);
     try {
       await state.suspendSale(cart, appliedDiscount, cartExchangeRate ?? state.exchangeRate, activeDraftId ?? undefined);
-      setCart([]); setDiscount(''); setAmountPaid(''); setExactPayment(true); setCartExchangeRate(null); setActiveDraftId(null);
+      setCart([]); setDiscount(''); setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setCartExchangeRate(null); setActiveDraftId(null);
       setReviewOpen(false); setSuspendConfirmOpen(false); setCompletedSale(null);
       haptics.success(); snackbar.show({ text: copy.sales.suspendedDone, tone: 'success' });
     } catch (error) {
@@ -157,7 +166,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
         const product = item.product_id == null ? undefined : products.get(item.product_id);
         return { productId: item.product_id, cartKey: item.product_id == null ? `draft:${item.uuid}` : `product:${item.product_id}`, productName: item.product_name, barcodeSnapshot: item.barcode_snapshot, quantity: item.quantity, unitPriceSyp: item.unit_price_syp, unitCostSyp: item.unit_cost_syp, isAvailable: Boolean(product && product.is_active !== 0) };
       });
-      setCart(restored); setDiscount(full.discount_syp ? String(full.discount_syp) : ''); setAmountPaid(''); setExactPayment(true);
+      setCart(restored); setDiscount(full.discount_syp ? String(full.discount_syp) : ''); setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true);
       setCartExchangeRate(full.exchange_rate); setActiveDraftId(full.id); setCompletedSale(null); setSection('sale'); setReviewOpen(true); setDraftToResume(null);
       haptics.success();
     } catch (error) {
@@ -178,7 +187,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     const result = buildRepeatedSaleCart(cart, sale, state.products, settings);
     const wasEmpty = cart.length === 0;
     setCart(result.cart); if (wasEmpty) { setDiscount(''); setCartExchangeRate(state.exchangeRate); setActiveDraftId(null); }
-    setAmountPaid(''); setExactPayment(true); setCompletedSale(null); setSelectedSale(null); setSaleToRepeat(null); setSection('sale');
+    setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setCompletedSale(null); setSelectedSale(null); setSaleToRepeat(null); setSection('sale');
     snackbar.show({ text: result.unavailableNames.length ? copy.sales.repeatSummary(formatNumber(result.addedProducts, state.language), formatNumber(result.unavailableNames.length, state.language), result.unavailableNames.slice(0, 2).join('، ')) : copy.sales.repeatAllAdded(formatNumber(result.addedProducts, state.language)), tone: result.unavailableNames.length ? 'info' : 'success' });
   }, [cart, copy.sales, settings, snackbar, state.exchangeRate, state.language, state.products]);
 
@@ -237,7 +246,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
         {section === 'cash' && <CashSessionScreen language={state.language} bottomNavigationInset={bottomNavigationInset} />}
       </Animated.View>
     </View>
-    <CartReviewModal visible={reviewOpen} cart={cart} discount={discount} discountError={discountError} subtotal={subtotal} appliedDiscount={appliedDiscount} total={total} amountPaid={amountPaid} exactPayment={exactPayment} payment={payment} language={state.language} saving={saving} draftRate={activeDraftId == null ? null : cartExchangeRate} currentRate={state.exchangeRate} onClose={() => setReviewOpen(false)} onDiscountChange={setDiscount} onAmountPaidChange={value => { setExactPayment(false); setAmountPaid(value); }} onExactPayment={() => { setExactPayment(true); setAmountPaid(''); }} onPaymentSuggestion={value => { setExactPayment(false); setAmountPaid(String(value)); }} onQuantityChange={setQuantity} onQuantityDelta={changeQuantity} onRequestComplete={requestComplete} onRequestSuspend={() => setSuspendConfirmOpen(true)} />
+    <CartReviewModal visible={reviewOpen} cart={cart} discount={discount} discountError={discountError} subtotal={subtotal} appliedDiscount={appliedDiscount} total={total} paymentMode={paymentMode} sypAmount={exactPayment ? String(total) : amountPaid} usdAmount={usdAmount} settlement={payment} language={state.language} saving={saving} draftRate={activeDraftId == null ? null : cartExchangeRate} currentRate={state.exchangeRate} onClose={() => setReviewOpen(false)} onDiscountChange={setDiscount} onPaymentModeChange={mode => { setPaymentMode(mode); setAmountPaid(''); setUsdAmount(''); setExactPayment(mode === 'SYP'); }} onSypAmountChange={value => { setExactPayment(false); setAmountPaid(value); }} onUsdAmountChange={setUsdAmount} onExactSyp={() => { setExactPayment(true); setAmountPaid(''); }} onMinimumUsd={() => { const syp = paymentMode === 'MIXED' ? (exactPayment ? total : parseLocalizedNumber(amountPaid)) : 0; const remaining = Math.max(0, total - (Number.isSafeInteger(syp) && syp >= 0 ? syp : 0)); setUsdAmount(formatUsdCents(minimumUsdCentsToCover(remaining, lockedRate)).replace(' USD', '')); }} onQuantityChange={setQuantity} onQuantityDelta={changeQuantity} onRequestComplete={requestComplete} onRequestSuspend={() => setSuspendConfirmOpen(true)} />
     <ConfirmSheet visible={confirmOpen} onClose={() => setConfirmOpen(false)} onConfirm={() => void completeSale()} title={copy.sales.completeTitle} description={copy.sales.itemsLabel(formatNumber(cartItemCount, state.language))} confirmLabel={copy.sales.completeSale} cancelLabel={copy.sales.review} loading={saving} rtl={rtl} icon="check-circle" tone="success"><MonetaryValue value={total} language={state.language} currencyLabel={copy.common.syp} compact={false} /></ConfirmSheet>
     <ConfirmSheet visible={suspendConfirmOpen} onClose={() => setSuspendConfirmOpen(false)} onConfirm={() => void suspendCurrentSale()} title={copy.sales.suspendTitle} description={copy.sales.suspendDescription} confirmLabel={copy.sales.suspendSale} cancelLabel={copy.common.cancel} loading={saving} rtl={rtl} icon="pause-circle" tone="warning" />
     <ConfirmSheet visible={draftToResume !== null} onClose={() => setDraftToResume(null)} onConfirm={() => { if (draftToResume) void loadDraftIntoCart(draftToResume, true); }} title={copy.sales.currentSaleExists} description={copy.sales.suspendDescription} confirmLabel={copy.sales.holdCurrentAndResume} cancelLabel={copy.common.cancel} loading={draftBusyId !== null} rtl={rtl} icon="repeat" tone="warning" />

@@ -1,35 +1,32 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { AppInput, MonetaryValue } from '@/components/ui';
+import { AppInput, MonetaryValue, SegmentedControl } from '@/components/ui';
 import { uiText } from '@/i18n';
-import { Language } from '@/types';
+import { Language, PaymentMode, PaymentSettlement } from '@/types';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
 import { formatNumber } from '@/utils/formatters';
-import { PaymentCalculation, paymentSuggestions } from '@/utils/salesUiState';
 
-export function PaymentSection({ total, amount, exact, calculation, language, onAmountChange, onExact, onSuggestion }:
-  { total: number; amount: string; exact: boolean; calculation: PaymentCalculation; language: Language; onAmountChange: (value: string) => void; onExact: () => void; onSuggestion: (value: number) => void }) {
+export function PaymentSection({ total, rate, mode, sypAmount, usdAmount, settlement, language, onModeChange, onSypChange, onUsdChange, onExactSyp, onMinimumUsd }:
+  { total: number; rate: number; mode: PaymentMode; sypAmount: string; usdAmount: string; settlement: PaymentSettlement | null; language: Language; onModeChange: (value: PaymentMode) => void; onSypChange: (value: string) => void; onUsdChange: (value: string) => void; onExactSyp: () => void; onMinimumUsd: () => void }) {
   const { colors } = useAppTheme();
   const copy = uiText(language);
   const rtl = language === 'ar';
-  const suggestions = paymentSuggestions(total);
-  const error = calculation.valid ? undefined : calculation.reason === 'insufficient' ? copy.sales.insufficientPayment : calculation.reason === 'negative' ? copy.sales.negativePayment : copy.sales.invalidPayment;
+  const paid = settlement?.totalTenderEquivalentSyp ?? 0;
   return <View style={styles.section}>
-    <Text style={[typography.title, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.payment}</Text>
-    <AppInput label={copy.sales.amountPaid} value={exact ? formatNumber(total, 'en') : amount} onChangeText={onAmountChange} error={error}
-      placeholder="0" keyboardType="number-pad" accessibilityLabel={copy.sales.amountPaidAccessibility} rtl={rtl}
-      style={styles.technicalInput}
-      trailing={<View style={[styles.currency, { backgroundColor: colors.surfaceSecondary }]}><Text style={[typography.label, { color: colors.textSecondary }]}>{copy.common.syp}</Text></View>} />
-    <View style={[styles.quick, { flexDirection: rtl ? 'row-reverse' : 'row' }]}>
-      <QuickAmount label={copy.sales.fullAmount} selected={exact} onPress={onExact} />
-      {suggestions.filter(value => value !== total).map(value => <QuickAmount key={value} label={formatNumber(value, language)} selected={!exact && calculation.valid && calculation.amountPaidSyp === value} onPress={() => onSuggestion(value)} />)}
-    </View>
-    <View style={[styles.change, { backgroundColor: calculation.valid ? colors.successSoft : colors.surfaceSecondary, flexDirection: rtl ? 'row-reverse' : 'row' }]}>
-      <Text style={[typography.bodyMedium, { color: calculation.valid ? colors.success : colors.textSecondary }]}>{copy.sales.change}</Text>
-      <MonetaryValue value={calculation.valid ? calculation.changeSyp : 0} language={language} currencyLabel={copy.common.syp} inline
+    <Text style={[typography.title, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.payment.method}</Text>
+    <SegmentedControl value={mode} onChange={onModeChange} options={[{ value: 'SYP', label: copy.payment.syp }, { value: 'USD', label: copy.payment.usd }, { value: 'MIXED', label: copy.payment.mixed }]} rtl={rtl} compactLabels accessibilityLabel={copy.payment.method} />
+    {mode !== 'USD' && <><AppInput label={copy.payment.sypReceived} value={sypAmount} onChangeText={onSypChange} error={sypAmount.trim() && !settlement ? copy.payment.invalidSyp : undefined} placeholder="0" keyboardType="number-pad" accessibilityLabel={copy.payment.sypReceived} rtl={rtl} style={styles.technicalInput} trailing={<Currency label={copy.common.syp} />} /><QuickAmount label={copy.payment.exactSyp} selected={settlement?.payments.some(row => row.currency === 'SYP' && row.amount_minor === total) ?? false} onPress={onExactSyp} /></>}
+    {mode !== 'SYP' && <><AppInput label={copy.payment.usdReceived} value={usdAmount} onChangeText={onUsdChange} error={usdAmount.trim() && !settlement ? copy.payment.invalidUsd : undefined} placeholder="0.00" keyboardType="decimal-pad" accessibilityLabel={copy.payment.usdReceived} rtl={rtl} style={styles.technicalInput} trailing={<Currency label="USD" />} /><QuickAmount label={copy.payment.minimumUsd} selected={false} onPress={onMinimumUsd} /></>}
+    <Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.payment.exchangeRate}: <Text style={styles.ltr}>{formatNumber(rate, language)} {copy.common.syp}/USD</Text></Text>
+    {(settlement?.payments.some(row => row.currency === 'USD') ?? false) && <Text style={[typography.caption, { color: colors.textSecondary, textAlign: rtl ? 'right' : 'left' }]}>{copy.payment.usdEquivalent}: {formatNumber(settlement?.payments.find(row => row.currency === 'USD')?.syp_equivalent ?? 0, language)} {copy.common.syp}</Text>}
+    <View style={[styles.change, { backgroundColor: settlement?.valid ? colors.successSoft : colors.surfaceSecondary, flexDirection: rtl ? 'row-reverse' : 'row' }]}>
+      <View><Text style={[typography.bodyMedium, { color: settlement?.valid ? colors.success : colors.textSecondary, textAlign: rtl ? 'right' : 'left' }]}>{settlement?.valid ? copy.payment.change : copy.payment.remaining}</Text><Text style={[typography.caption, { color: colors.textMuted, writingDirection: 'ltr' }]}>{copy.payment.totalPaid}: {formatNumber(paid, language)} {copy.common.syp}</Text></View>
+      <MonetaryValue value={settlement?.valid ? settlement.changeSyp : settlement?.remainingSyp ?? total} language={language} currencyLabel={copy.common.syp} inline
         style={{ flexDirection: rtl ? 'row-reverse' : 'row' }} textStyle={styles.changeValue} />
     </View>
   </View>;
 }
+
+function Currency({ label }: { label: string }) { const { colors } = useAppTheme(); return <View style={[styles.currency, { backgroundColor: colors.surfaceSecondary }]}><Text style={[typography.label, { color: colors.textSecondary }]}>{label}</Text></View>; }
 
 function QuickAmount({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
   const { colors } = useAppTheme();
@@ -41,8 +38,9 @@ function QuickAmount({ label, selected, onPress }: { label: string; selected: bo
 
 const styles = StyleSheet.create({
   section: { gap: spacing.xs, paddingTop: spacing.sm }, currency: { minHeight: 32, paddingHorizontal: spacing.xs, borderRadius: radius.sm, alignItems: 'center', justifyContent: 'center' },
-  quick: { flexWrap: 'wrap', gap: spacing.xs }, chip: { minHeight: 44, minWidth: 92, paddingHorizontal: spacing.sm, borderRadius: radius.pill, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
+  quick: { flexWrap: 'wrap', gap: spacing.xs }, chip: { minHeight: 44, alignSelf: 'flex-start', minWidth: 112, paddingHorizontal: spacing.sm, borderRadius: radius.pill, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
   pressed: { opacity: 0.76 }, change: { minHeight: 52, paddingHorizontal: spacing.sm, borderRadius: radius.md, alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
   technicalInput: { writingDirection: 'ltr' },
+  ltr: { writingDirection: 'ltr' },
   changeValue: { ...typography.numericTotal, fontSize: 19, lineHeight: 25 },
 });

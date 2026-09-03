@@ -157,6 +157,16 @@ const ar = {
     cashRequired: 'لا توجد وردية مفتوحة. افتح وردية لبدء العمليات النقدية.', activeStatus: 'مفتوحة', closedStatus: 'مغلقة',
     hourShort: ' س', minuteShort: ' د', operationCount: (count: string) => `${count} عملية`, historyAccessibility: (date: string, difference: string) => `وردية ${date}، فرق الصندوق ${difference} ليرة سورية`,
   },
+  payment: {
+    method: 'طريقة الدفع', syp: 'ليرة', usd: 'دولار', mixed: 'مختلط', mixedFull: 'دفع مختلط',
+    sypReceived: 'المبلغ المستلم بالليرة', usdReceived: 'المبلغ المستلم بالدولار', usdEquivalent: 'القيمة المكافئة',
+    totalPaid: 'إجمالي المدفوع', remaining: 'المبلغ المتبقي', change: 'الباقي', fullyPaid: 'المبلغ مدفوع بالكامل',
+    exchangeRate: 'سعر الصرف', exactSyp: 'دفع المبلغ تمامًا', minimumUsd: 'أقل مبلغ دولار يغطي الفاتورة',
+    invalidSyp: 'أدخل مبلغ ليرة صحيحًا.', invalidUsd: 'أدخل مبلغ دولار صحيحًا بخانتين عشريتين كحد أقصى.',
+    sypDrawer: 'صندوق الليرة', usdDrawer: 'صندوق الدولار', cashReceived: 'النقد المستلم', changeGiven: 'الباقي المدفوع للزبون',
+    expectedUsd: 'الرصيد المتوقع بالدولار', actualUsd: 'الرصيد الفعلي بالدولار', differenceUsd: 'فرق صندوق الدولار',
+    paymentBreakdown: 'تفاصيل الدفع', paymentMode: 'طريقة الدفع', legacyPayment: 'دفع تاريخي', refundSypNote: 'يتم تسجيل قيمة المرتجع بالليرة السورية.',
+  },
   analytics: {
     today: 'اليوم', week: 'الأسبوع', month: 'الشهر', thisWeek: 'هذا الأسبوع', thisMonth: 'هذا الشهر',
     period: 'فترة التحليلات', netProfit: 'صافي الربح', openNetProfit: 'فتح تفاصيل حساب صافي الربح',
@@ -327,6 +337,16 @@ const en: ShapeOf<typeof ar> = {
     closedExpense: 'An expense linked to a closed shift cannot be deleted.', longRunning: 'This shift has been open for more than 24 hours.',
     cashRequired: 'No shift is open. Open a shift to begin cash operations.', activeStatus: 'Open', closedStatus: 'Closed',
     hourShort: 'h', minuteShort: 'm', operationCount: (count: string) => `${count} operations`, historyAccessibility: (date: string, difference: string) => `Shift ${date}, cash difference ${difference} SYP`,
+  },
+  payment: {
+    method: 'Payment method', syp: 'SYP', usd: 'USD', mixed: 'Mixed', mixedFull: 'Mixed cash payment',
+    sypReceived: 'SYP received', usdReceived: 'USD received', usdEquivalent: 'USD equivalent', totalPaid: 'Total paid',
+    remaining: 'Amount remaining', change: 'Change', fullyPaid: 'Paid in full', exchangeRate: 'Exchange rate',
+    exactSyp: 'Pay exact amount', minimumUsd: 'Minimum USD that covers the invoice', invalidSyp: 'Enter a valid whole SYP amount.',
+    invalidUsd: 'Enter a valid USD amount with at most two decimal places.', sypDrawer: 'SYP drawer', usdDrawer: 'USD drawer',
+    cashReceived: 'Cash received', changeGiven: 'Change given to customer', expectedUsd: 'Expected USD', actualUsd: 'Actual USD',
+    differenceUsd: 'USD drawer difference', paymentBreakdown: 'Payment details', paymentMode: 'Payment method', legacyPayment: 'Historical payment',
+    refundSypNote: 'The refund is recorded in SYP.',
   },
   analytics: {
     today: 'Today', week: 'Week', month: 'Month', thisWeek: 'This week', thisMonth: 'This month', period: 'Analytics period',

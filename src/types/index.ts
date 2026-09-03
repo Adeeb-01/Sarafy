@@ -40,6 +40,34 @@ export interface SaleItem {
 }
 
 export type ReturnStatus = 'none' | 'partial' | 'full';
+export type PaymentCurrency = 'SYP' | 'USD';
+export type PaymentMode = 'SYP' | 'USD' | 'MIXED';
+
+export interface SalePayment {
+  id: number;
+  uuid: string;
+  sale_id: number;
+  currency: PaymentCurrency;
+  amount_minor: number;
+  syp_equivalent: number;
+  exchange_rate_syp_per_usd: number | null;
+  created_at: string;
+}
+
+export interface PaymentInput {
+  mode: PaymentMode;
+  sypAmount: number;
+  usdCents: number;
+}
+
+export interface PaymentSettlement {
+  mode: PaymentMode;
+  payments: Array<Omit<SalePayment, 'id' | 'uuid' | 'sale_id' | 'created_at'>>;
+  totalTenderEquivalentSyp: number;
+  changeSyp: number;
+  remainingSyp: number;
+  valid: boolean;
+}
 
 export interface SaleReturnItem {
   id: number;
@@ -97,6 +125,7 @@ export interface Sale {
   line_count?: number;
   returns?: SaleReturn[];
   return_summary?: SaleReturnSummary;
+  payments?: SalePayment[];
 }
 
 export interface ReturnableSaleItem extends SaleItem {
@@ -239,6 +268,13 @@ export interface CashSession {
   closing_expenses_total_syp: number | null;
   closing_expected_cash_syp: number | null;
   closing_difference_syp: number | null;
+  opening_cash_usd_cents: number;
+  closing_actual_cash_usd_cents: number | null;
+  closing_expected_cash_usd_cents: number | null;
+  closing_difference_usd_cents: number | null;
+  closing_cash_received_syp: number | null;
+  closing_cash_received_usd_cents: number | null;
+  closing_change_given_syp: number | null;
   opening_note: string | null;
   closing_note: string | null;
   created_at: string;
@@ -253,6 +289,10 @@ export interface CashSessionSummary extends CashSession {
   expenses_total_syp: number;
   expense_count: number;
   expected_cash_syp: number;
+  cash_received_syp: number;
+  cash_received_usd_cents: number;
+  change_given_syp: number;
+  expected_cash_usd_cents: number;
 }
 
 export type ActiveCashSessionSummary = CashSessionSummary;

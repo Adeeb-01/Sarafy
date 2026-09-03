@@ -23,6 +23,7 @@
     "test:phase11": "node --test scripts/phase11-expenses-rates.test.mjs",
     "test:phase12": "node --test scripts/phase12-analytics2.test.mjs",
     "test:phase13": "node --test scripts/phase13-cash-sessions.test.mjs",
+    "test:phase14": "node --test scripts/phase14-multi-currency.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

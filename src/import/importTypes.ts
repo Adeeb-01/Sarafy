@@ -2,7 +2,12 @@ import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, Produc
 
 export type ImportMode = 'safe_merge' | 'selective' | 'full_restore';
 export type ConflictStrategy = 'newest' | 'keep_local' | 'use_imported' | 'manual';
-export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
+export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_payments' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
+
+export interface PortableSalePayment {
+  uuid: string; sale_uuid: string; currency: 'SYP' | 'USD'; amount_minor: number;
+  syp_equivalent: number; exchange_rate_syp_per_usd: number | null; created_at: string;
+}
 
 export interface PortableSaleReturnItem {
   uuid: string; sale_item_uuid: string; quantity: number; refund_amount_syp: number;
@@ -32,6 +37,7 @@ export interface ImportPayload {
   categories: PortableCategory[];
   settings: Settings;
   sales: Sale[];
+  salePayments?: PortableSalePayment[];
   expenses: Expense[];
   drafts?: SuspendedSale[];
   returns?: PortableSaleReturn[];

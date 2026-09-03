@@ -1,6 +1,7 @@
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { Language, Sale } from '@/types';
+import { derivePaymentMode, formatUsdCents } from '@/utils/multiCurrency';
 
 const escapeHtml = (value: string) => value
   .replace(/&/g, '&amp;')
@@ -19,7 +20,16 @@ export async function shareInvoicePdf(sale: Sale, language: Language) {
       <td>${money(item.unit_price_syp)}</td>
       <td>${money(item.line_total_syp)}</td>
     </tr>`).join('');
-  const paymentRows = sale.amount_paid_syp == null ? '' : `
+  const payments = sale.payments ?? [];
+  const syp = payments.find(payment => payment.currency === 'SYP');
+  const usd = payments.find(payment => payment.currency === 'USD');
+  const mode = derivePaymentMode(payments);
+  const paymentRows = payments.length ? `<div class="payment">
+    <div class="line"><span>${rtl ? 'طريقة الدفع' : 'Payment method'}</span><b>${mode === 'MIXED' ? (rtl ? 'مختلط' : 'Mixed') : mode}</b></div>
+    ${syp ? `<div class="line"><span>${rtl ? 'المستلم بالليرة' : 'SYP received'}</span><b>${money(syp.amount_minor)}</b></div>` : ''}
+    ${usd ? `<div class="line"><span>${rtl ? 'المستلم بالدولار' : 'USD received'}</span><b dir="ltr">${formatUsdCents(usd.amount_minor)}</b></div><div class="line"><span>${rtl ? 'سعر الصرف' : 'Exchange rate'}</span><b>${money(usd.exchange_rate_syp_per_usd ?? sale.exchange_rate)}/USD</b></div><div class="line"><span>${rtl ? 'القيمة المكافئة' : 'SYP equivalent'}</span><b>${money(usd.syp_equivalent)}</b></div>` : ''}
+    <div class="line"><span>${rtl ? 'إجمالي المدفوع' : 'Total tender'}</span><b>${money(payments.reduce((sum, payment) => sum + payment.syp_equivalent, 0))}</b></div>
+    <div class="line"><span>${rtl ? 'الباقي بالليرة' : 'Change SYP'}</span><b>${money(sale.change_syp ?? 0)}</b></div></div>` : sale.amount_paid_syp == null ? '' : `
     <div class="payment"><div class="line"><span>${rtl ? 'المدفوع' : 'Paid'}</span><b>${money(sale.amount_paid_syp)}</b></div>
     <div class="line"><span>${rtl ? 'الباقي' : 'Change'}</span><b>${money(sale.change_syp ?? 0)}</b></div></div>`;
   const html = `<!doctype html><html dir="${rtl ? 'rtl' : 'ltr'}"><head><meta charset="utf-8">
