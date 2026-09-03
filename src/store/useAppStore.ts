@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
+import { CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
 import * as database from '@/database/database';
 
 const defaults: Settings = {
@@ -10,7 +10,7 @@ const defaults: Settings = {
 };
 
 async function loadSnapshot() {
-  const [products, categories, settings, sales, expenses, expenseCategories, latestRateChanges, suspendedSales] = await Promise.all([
+  const [products, categories, settings, sales, expenses, expenseCategories, latestRateChanges, suspendedSales, activeCashSession] = await Promise.all([
     database.getProducts(),
     database.getCategories(),
     database.loadSettings(defaults),
@@ -19,8 +19,9 @@ async function loadSnapshot() {
     database.getExpenseCategories(),
     database.getExchangeRateHistory(1),
     database.getSuspendedSaleSummaries(),
+    database.getActiveCashSession(),
   ]);
-  return { products, categories, sales, expenses, expenseCategories, latestRateChange: latestRateChanges[0] ?? null, suspendedSales, ...settings };
+  return { products, categories, sales, expenses, expenseCategories, latestRateChange: latestRateChanges[0] ?? null, suspendedSales, activeCashSession, ...settings };
 }
 
 interface AppState extends Settings {
@@ -31,6 +32,7 @@ interface AppState extends Settings {
   expenseCategories: ExpenseCategory[];
   latestRateChange: ExchangeRateHistoryEntry | null;
   suspendedSales: SuspendedSaleSummary[];
+  activeCashSession: CashSessionSummary | null;
   isReady: boolean;
   initialize: () => Promise<void>;
   refreshProducts: () => Promise<void>;
@@ -57,6 +59,14 @@ interface AppState extends Settings {
   createExpenseCategory: (nameAr: string, nameEn?: string | null) => Promise<void>;
   renameExpenseCategory: (id: number, nameAr: string, nameEn?: string | null) => Promise<void>;
   setExpenseCategoryActive: (id: number, active: boolean) => Promise<'archived' | 'restored' | 'deleted'>;
+  refreshActiveCashSession: () => Promise<void>;
+  openCashSession: (openingCashSyp: number, note?: string | null) => Promise<CashSessionSummary>;
+  closeCashSession: (actualCashSyp: number, note?: string | null) => Promise<CashSessionSummary>;
+  getCashSessionHistory: (sort?: 'newest' | 'oldest') => Promise<CashSessionSummary[]>;
+  getCashSessionDetail: (id: number) => Promise<CashSessionSummary | null>;
+  getCashSessionSales: (id: number) => Promise<Sale[]>;
+  getCashSessionExpenses: (id: number) => Promise<Expense[]>;
+  getCashSessionReturns: (id: number) => Promise<CashSessionReturnSummary[]>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -68,6 +78,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   expenseCategories: [],
   latestRateChange: null,
   suspendedSales: [],
+  activeCashSession: null,
   isReady: false,
   initialize: async () => {
     await database.initializeDatabase();
@@ -110,12 +121,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   completeSale: async (items, discountSyp = 0, amountPaidSyp, exchangeRate = get().exchangeRate, draftId) => {
     const sale = await database.createSale(items, exchangeRate, discountSyp, amountPaidSyp, draftId);
-    set({ sales: [sale, ...get().sales], suspendedSales: draftId == null ? get().suspendedSales : get().suspendedSales.filter(draft => draft.id !== draftId) });
+    set({ sales: [sale, ...get().sales], suspendedSales: draftId == null ? get().suspendedSales : get().suspendedSales.filter(draft => draft.id !== draftId), activeCashSession: await database.getActiveCashSession() });
     return sale;
   },
   createReturn: async (saleId, selections) => {
     const record = await database.createSaleReturn(saleId, selections);
-    set({ sales: await database.getSales() });
+    set({ sales: await database.getSales(), activeCashSession: await database.getActiveCashSession() });
     return record;
   },
   suspendSale: async (items, discountSyp, exchangeRate, replaceDraftId) => {
@@ -135,7 +146,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   getExpenseTotalsByCategory: database.getExpenseTotalsByCategory,
   createExpense: async (categoryId, amountSyp, note) => {
     await database.addExpense(categoryId, amountSyp, note);
-    set({ expenses: await database.getExpenses() });
+    set({ expenses: await database.getExpenses(), activeCashSession: await database.getActiveCashSession() });
   },
   createExpenseCategory: async (nameAr, nameEn) => {
     await database.addExpenseCategory(nameAr, nameEn);
@@ -150,4 +161,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ expenseCategories: await database.getExpenseCategories(), expenses: await database.getExpenses() });
     return result;
   },
+  refreshActiveCashSession: async () => set({ activeCashSession: await database.getActiveCashSession() }),
+  openCashSession: async (openingCashSyp, note) => {
+    const session = await database.openCashSession(openingCashSyp, note);
+    set({ activeCashSession: session });
+    return session;
+  },
+  closeCashSession: async (actualCashSyp, note) => {
+    const session = await database.closeCashSession(actualCashSyp, note);
+    set({ activeCashSession: null });
+    return session;
+  },
+  getCashSessionHistory: database.getCashSessionHistory,
+  getCashSessionDetail: database.getCashSessionDetail,
+  getCashSessionSales: database.getCashSessionSales,
+  getCashSessionExpenses: database.getCashSessionExpenses,
+  getCashSessionReturns: database.getCashSessionReturns,
 }));

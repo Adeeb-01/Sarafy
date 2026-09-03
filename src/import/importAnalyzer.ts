@@ -19,6 +19,32 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
   const db = await getDatabase();
   const summary = emptySummary();
   const issues: ImportIssue[] = [];
+  const localCashSessions = await db.getAllAsync<Record<string, unknown> & { uuid: string }>('SELECT * FROM cash_sessions');
+  const localSessionByUuid = new Map(localCashSessions.map(row => [row.uuid, row]));
+  const localSessions = new Set(localSessionByUuid.keys());
+  const importableSessions = new Set<string>();
+  if (options.entities.includes('cash_sessions')) {
+    const localSessionRows = new Set(localSessions);
+    const seenSessions = new Set<string>();
+    for (const [index, session] of (payload.cashSessions ?? []).entries()) {
+      if (seenSessions.has(session.uuid)) {
+        summary.duplicates += 1; issues.push({ entity: 'cash_sessions', row: index + 1, field: 'uuid', value: session.uuid, code: 'DUPLICATE_UUID', action: 'rejected' });
+      } else if (options.mode === 'full_restore') {
+        summary.newRecords += 1; importableSessions.add(session.uuid);
+      } else if (session.closed_at == null) {
+        summary.conflicts += 1; issues.push({ entity: 'cash_sessions', row: index + 1, code: 'OPEN_CASH_SESSION_CONFLICT', action: 'review' });
+      } else if (localSessionRows.has(session.uuid)) {
+        if (comparable(localSessionByUuid.get(session.uuid)!) === comparable(session)) summary.unchangedRecords += 1;
+        else { summary.conflicts += 1; issues.push({ entity: 'cash_sessions', row: index + 1, code: 'CASH_SESSION_CONFLICT', action: 'review' }); }
+      }
+      else { summary.newRecords += 1; importableSessions.add(session.uuid); }
+      seenSessions.add(session.uuid);
+    }
+  }
+  const knownSession = (uuid: string | null | undefined) => !uuid || localSessions.has(uuid) || importableSessions.has(uuid) || (options.mode === 'full_restore' && (payload.cashSessions ?? []).some(session => session.uuid === uuid));
+  payload.sales.forEach((sale, index) => { if (!knownSession(sale.cash_session_uuid)) { summary.conflicts += 1; issues.push({ entity: 'sales', row: index + 1, field: 'cash_session_uuid', value: sale.cash_session_uuid ?? '', code: 'CASH_SESSION_PARENT_MISSING', action: 'review' }); } });
+  payload.expenses.forEach((expense, index) => { if (!knownSession(expense.cash_session_uuid)) { summary.conflicts += 1; issues.push({ entity: 'expenses', row: index + 1, field: 'cash_session_uuid', value: expense.cash_session_uuid ?? '', code: 'CASH_SESSION_PARENT_MISSING', action: 'review' }); } });
+  (payload.returns ?? []).forEach((record, index) => { if (!knownSession(record.cash_session_uuid)) { summary.conflicts += 1; issues.push({ entity: 'sale_returns', row: index + 1, field: 'cash_session_uuid', value: record.cash_session_uuid ?? '', code: 'CASH_SESSION_PARENT_MISSING', action: 'review' }); } });
   const analyze = async (entity: 'products' | 'sales' | 'expenses', records: Array<{ uuid: string; updated_at: string }>) => {
     if (!options.entities.includes(entity)) return;
     const local = await db.getAllAsync<Record<string, unknown> & { uuid: string; updated_at: string }>(`SELECT * FROM ${entity}`);

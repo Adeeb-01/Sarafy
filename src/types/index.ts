@@ -63,6 +63,8 @@ export interface SaleReturn {
   returned_cost_syp: number;
   created_at: string;
   updated_at: string;
+  cash_session_id?: number | null;
+  cash_session_uuid?: string | null;
   items: SaleReturnItem[];
 }
 
@@ -88,6 +90,8 @@ export interface Sale {
   change_syp: number | null;
   created_at: string;
   updated_at: string;
+  cash_session_id?: number | null;
+  cash_session_uuid?: string | null;
   items: SaleItem[];
   item_count?: number;
   line_count?: number;
@@ -180,6 +184,8 @@ export interface Expense {
   note?: string | null;
   created_at: string;
   updated_at: string;
+  cash_session_id?: number | null;
+  cash_session_uuid?: string | null;
 }
 
 export interface ExpenseCategory {
@@ -219,4 +225,45 @@ export interface ExchangeRateHistoryEntry {
   old_rate: number;
   new_rate: number;
   created_at: string;
+}
+
+export interface CashSession {
+  id: number;
+  uuid: string;
+  opened_at: string;
+  closed_at: string | null;
+  opening_cash_syp: number;
+  closing_actual_cash_syp: number | null;
+  closing_sales_total_syp: number | null;
+  closing_refunds_total_syp: number | null;
+  closing_expenses_total_syp: number | null;
+  closing_expected_cash_syp: number | null;
+  closing_difference_syp: number | null;
+  opening_note: string | null;
+  closing_note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CashSessionSummary extends CashSession {
+  sales_total_syp: number;
+  invoice_count: number;
+  refunds_total_syp: number;
+  return_count: number;
+  expenses_total_syp: number;
+  expense_count: number;
+  expected_cash_syp: number;
+}
+
+export type ActiveCashSessionSummary = CashSessionSummary;
+export type ClosedCashSession = CashSessionSummary;
+
+export interface CashSessionClosePreview {
+  session: ActiveCashSessionSummary;
+  actual_cash_syp: number;
+  difference_syp: number;
+}
+
+export interface CashSessionReturnSummary extends Omit<SaleReturn, 'items'> {
+  invoice_number: string;
 }

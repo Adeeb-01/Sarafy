@@ -4,6 +4,7 @@ import { ImportOptions, ImportPayload, ImportPreview, ImportResult } from './imp
 import { isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
+import { calculateCashDifference, calculateExpectedCash } from '@/utils/cashSession';
 
 const SETTING_KEYS = ['exchangeRate', 'isRoundingEnabled', 'roundingTarget', 'language'] as const;
 
@@ -21,6 +22,7 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
       preview.issues.some(issue => issue.code === 'DUPLICATE_BARCODE') ||
       preview.issues.some(issue => issue.code === 'RETURN_PARENT_MISSING' || issue.code === 'RETURN_ITEM_PARENT_MISSING') ||
       preview.issues.some(issue => issue.code === 'EXPENSE_CATEGORY_PARENT_MISSING') ||
+      preview.issues.some(issue => issue.code === 'CASH_SESSION_PARENT_MISSING' || issue.code === 'OPEN_CASH_SESSION_CONFLICT' || issue.code === 'CASH_SESSION_CONFLICT') ||
       (preview.options.conflictStrategy === 'manual' && preview.summary.conflicts)) {
     throw new Error('IMPORT_REQUIRES_REVIEW');
   }
@@ -40,6 +42,7 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
       await transaction.runAsync('DELETE FROM sale_items');
       await transaction.runAsync('DELETE FROM sales');
       await transaction.runAsync('DELETE FROM expenses');
+      await transaction.runAsync('DELETE FROM cash_sessions');
       await transaction.runAsync('DELETE FROM exchange_rate_history');
       if (payload.expenseCategories?.length) await transaction.runAsync('DELETE FROM expense_categories');
       else { await transaction.runAsync('DELETE FROM expense_categories WHERE is_system=0'); await transaction.runAsync('UPDATE expense_categories SET is_active=1'); }
@@ -47,6 +50,31 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
       await transaction.runAsync('DELETE FROM categories');
       if (options.entities.includes('settings')) await transaction.runAsync('DELETE FROM settings');
     }
+    if (options.entities.includes('cash_sessions')) {
+      const openCount = (payload.cashSessions ?? []).filter(session => session.closed_at == null).length;
+      if (options.mode === 'full_restore' && openCount > 1) throw new Error('MULTIPLE_OPEN_CASH_SESSIONS');
+      for (const session of payload.cashSessions ?? []) {
+        if (options.mode !== 'full_restore' && session.closed_at == null) throw new Error('OPEN_CASH_SESSION_CONFLICT');
+        const local = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE uuid=?', session.uuid);
+        if (local) { skipped += 1; continue; }
+        await transaction.runAsync(`INSERT INTO cash_sessions(uuid,opened_at,closed_at,opening_cash_syp,closing_actual_cash_syp,
+          closing_sales_total_syp,closing_refunds_total_syp,closing_expenses_total_syp,closing_expected_cash_syp,
+          closing_difference_syp,opening_note,closing_note,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        session.uuid, session.opened_at, session.closed_at, session.opening_cash_syp, session.closing_actual_cash_syp,
+        session.closing_sales_total_syp, session.closing_refunds_total_syp, session.closing_expenses_total_syp,
+        session.closing_expected_cash_syp, session.closing_difference_syp, session.opening_note, session.closing_note,
+        session.created_at, session.updated_at);
+        inserted += 1;
+      }
+    }
+    const sessionRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM cash_sessions');
+    const sessionIdByUuid = new Map(sessionRows.map(session => [session.uuid, session.id]));
+    const resolveCashSessionId = (uuid?: string | null) => {
+      if (!uuid) return null;
+      const id = sessionIdByUuid.get(uuid);
+      if (!id) throw new Error('CASH_SESSION_PARENT_MISSING');
+      return id;
+    };
     if (options.entities.includes('expense_categories')) {
       for (const item of payload.expenseCategories ?? []) {
         const local = await transaction.getFirstAsync<{ id: number; updated_at: string }>('SELECT id,updated_at FROM expense_categories WHERE uuid=?', item.uuid);
@@ -115,6 +143,7 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
     }
     if (options.entities.includes('sales')) {
       for (const sale of payload.sales) {
+        const cashSessionId = resolveCashSessionId(sale.cash_session_uuid);
         const local = await transaction.getFirstAsync<{ id: number; updated_at: string }>('SELECT id,updated_at FROM sales WHERE uuid=?', sale.uuid);
         let saleId = local?.id;
         let saleWasInserted = false;
@@ -124,14 +153,14 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
             ? `${sale.invoice_number}-${sale.uuid.slice(0, 8)}`
             : sale.invoice_number;
           const result = await transaction.runAsync(
-            `INSERT INTO sales(uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,amount_paid_syp,change_syp,created_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+            `INSERT INTO sales(uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,amount_paid_syp,change_syp,created_at,updated_at,cash_session_id)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             sale.uuid, invoiceNumber, sale.exchange_rate, sale.subtotal_syp, sale.discount_syp,
             sale.net_total_syp, sale.cost_syp, sale.profit_syp, sale.amount_paid_syp ?? null,
-            sale.change_syp ?? null, sale.created_at, sale.updated_at,
+            sale.change_syp ?? null, sale.created_at, sale.updated_at, cashSessionId,
           );
           saleId = result.lastInsertRowId; saleWasInserted = true; inserted += 1;
-        } else skipped += 1; // Completed invoices are immutable snapshots.
+        } else { if (cashSessionId) await transaction.runAsync('UPDATE sales SET cash_session_id=COALESCE(cash_session_id,?) WHERE id=?', cashSessionId, local.id); skipped += 1; } // Completed invoices are immutable snapshots.
         if (saleId && saleWasInserted && options.entities.includes('sale_items')) {
           for (const item of sale.items) {
             const exists = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_items WHERE uuid=?', item.uuid);
@@ -150,6 +179,7 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
     }
     if (options.entities.includes('sale_returns')) {
       for (const record of payload.returns ?? []) {
+        const cashSessionId = resolveCashSessionId(record.cash_session_uuid);
         const duplicate = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_returns WHERE uuid=?', record.uuid);
         if (duplicate) { skipped += 1; continue; }
         const sale = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sales WHERE uuid=?', record.sale_uuid);
@@ -171,8 +201,8 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
           if (!quantities || quantities.returned + requestedQuantity > quantities.sold) throw new Error('RETURN_QUANTITY_EXCEEDED');
         }
         const insertedReturn = await transaction.runAsync(
-          'INSERT INTO sale_returns(uuid,sale_id,refund_total_syp,returned_cost_syp,created_at,updated_at) VALUES(?,?,?,?,?,?)',
-          record.uuid, sale.id, record.refund_total_syp, record.returned_cost_syp, record.created_at, record.updated_at,
+          'INSERT INTO sale_returns(uuid,sale_id,refund_total_syp,returned_cost_syp,created_at,updated_at,cash_session_id) VALUES(?,?,?,?,?,?,?)',
+          record.uuid, sale.id, record.refund_total_syp, record.returned_cost_syp, record.created_at, record.updated_at, cashSessionId,
         );
         inserted += 1;
         if (!options.entities.includes('sale_return_items')) continue;
@@ -206,15 +236,16 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
     }
     if (options.entities.includes('expenses')) {
       for (const item of payload.expenses) {
+        const cashSessionId = resolveCashSessionId(item.cash_session_uuid);
         const categoryUuid = item.category_uuid || OTHER_EXPENSE_CATEGORY_UUID;
         const category = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM expense_categories WHERE uuid=?', categoryUuid);
         if (!category) throw new Error('EXPENSE_CATEGORY_PARENT_MISSING');
         const local = await transaction.getFirstAsync<{ updated_at: string }>('SELECT updated_at FROM expenses WHERE uuid=?', item.uuid);
         if (!local) {
-          await transaction.runAsync('INSERT INTO expenses(uuid,description,amount_syp,category_id,note,created_at,updated_at) VALUES(?,?,?,?,?,?,?)', item.uuid, item.description, item.amount_syp, category.id, item.note ?? null, item.created_at, item.updated_at);
+          await transaction.runAsync('INSERT INTO expenses(uuid,description,amount_syp,category_id,note,created_at,updated_at,cash_session_id) VALUES(?,?,?,?,?,?,?,?)', item.uuid, item.description, item.amount_syp, category.id, item.note ?? null, item.created_at, item.updated_at, cashSessionId);
           inserted += 1;
         } else if (shouldUseImported(local.updated_at, item.updated_at, options)) {
-          await transaction.runAsync('UPDATE expenses SET description=?,amount_syp=?,category_id=?,note=?,updated_at=? WHERE uuid=?', item.description, item.amount_syp, category.id, item.note ?? null, item.updated_at, item.uuid);
+          await transaction.runAsync('UPDATE expenses SET description=?,amount_syp=?,category_id=?,note=?,updated_at=?,cash_session_id=COALESCE(cash_session_id,?) WHERE uuid=?', item.description, item.amount_syp, category.id, item.note ?? null, item.updated_at, cashSessionId, item.uuid);
           updated += 1;
         } else skipped += 1;
       }
@@ -261,8 +292,8 @@ export function defaultImportOptions(mode: ImportOptions['mode'] = 'safe_merge')
     mode,
     conflictStrategy: 'newest',
     entities: mode === 'full_restore'
-      ? ['products', 'categories', 'settings', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'product_images', 'sale_drafts', 'sale_draft_items']
-      : ['products', 'categories', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'product_images'],
+      ? ['products', 'categories', 'settings', 'cash_sessions', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'product_images', 'sale_drafts', 'sale_draft_items']
+      : ['products', 'categories', 'cash_sessions', 'sales', 'sale_items', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'product_images'],
     importSettings: mode === 'full_restore',
   };
 }
@@ -273,7 +304,7 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
   if (!Array.isArray(payload.products) || !Array.isArray(payload.categories) ||
       !Array.isArray(payload.sales) || !Array.isArray(payload.expenses) ||
       !payload.settings || typeof payload.version !== 'number') throw new Error('INVALID_BACKUP');
-  if (payload.version > 5) throw new Error('BACKUP_NEWER_THAN_APP');
+  if (payload.version > 6) throw new Error('BACKUP_NEWER_THAN_APP');
   const validDate = (input: unknown) => typeof input === 'string' && Number.isFinite(Date.parse(input));
   const finite = (input: unknown) => typeof input === 'number' && Number.isFinite(input);
   for (const product of payload.products) {
@@ -301,6 +332,7 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
         (sale.change_syp != null && (!finite(sale.change_syp) || sale.change_syp < 0))) {
       throw new Error('INVALID_SALE');
     }
+    if (sale.cash_session_uuid != null && !isUuid(sale.cash_session_uuid)) throw new Error('INVALID_CASH_SESSION_REFERENCE');
     for (const item of sale.items) {
       if (!item || !isRecord(item) || !isUuid(item.uuid) || typeof item.product_name !== 'string' ||
           !finite(item.quantity) || item.quantity <= 0 || !finite(item.unit_price_syp) ||
@@ -326,6 +358,7 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
   for (const record of payload.returns ?? []) {
     if (!isRecord(record) || !isUuid(record.uuid) || !isUuid(record.sale_uuid) || !Number.isSafeInteger(record.refund_total_syp) || record.refund_total_syp < 0 ||
         !Number.isSafeInteger(record.returned_cost_syp) || record.returned_cost_syp < 0 || !validDate(record.created_at) || !validDate(record.updated_at) || !Array.isArray(record.items)) throw new Error('INVALID_RETURN');
+    if (record.cash_session_uuid != null && !isUuid(record.cash_session_uuid)) throw new Error('INVALID_CASH_SESSION_REFERENCE');
     const seenReturnItems = new Set<string>(); const seenParentItems = new Set<string>();
     for (const item of record.items) {
       if (!isRecord(item) || !isUuid(item.uuid) || !isUuid(item.sale_item_uuid) || !Number.isSafeInteger(item.quantity) || item.quantity <= 0 ||
@@ -340,6 +373,7 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
         !finite(expense.amount_syp) || expense.amount_syp < 0 ||
         !validDate(expense.created_at) || !validDate(expense.updated_at)) throw new Error('INVALID_EXPENSE');
     if (expense.category_uuid != null && !isUuid(expense.category_uuid)) throw new Error('INVALID_EXPENSE_CATEGORY_REFERENCE');
+    if (expense.cash_session_uuid != null && !isUuid(expense.cash_session_uuid)) throw new Error('INVALID_CASH_SESSION_REFERENCE');
     if (expense.note != null && (typeof expense.note !== 'string' || expense.note.length > 240)) throw new Error('INVALID_EXPENSE_NOTE');
   }
   for (const category of payload.expenseCategories ?? []) {
@@ -349,6 +383,30 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
   }
   for (const entry of payload.exchangeRateHistory ?? []) {
     if (!isRecord(entry) || !isUuid(entry.uuid) || !finite(entry.old_rate) || entry.old_rate <= 0 || !finite(entry.new_rate) || entry.new_rate <= 0 || !validDate(entry.created_at)) throw new Error('INVALID_EXCHANGE_RATE_HISTORY');
+  }
+  const openSessions = (payload.cashSessions ?? []).filter(session => session.closed_at == null);
+  if (openSessions.length > 1) throw new Error('MULTIPLE_OPEN_CASH_SESSIONS');
+  const seenCashSessions = new Set<string>();
+  for (const session of payload.cashSessions ?? []) {
+    if (!isRecord(session) || !isUuid(session.uuid) || !validDate(session.opened_at) || !validDate(session.created_at) || !validDate(session.updated_at) ||
+        (session.closed_at != null && !validDate(session.closed_at)) || !Number.isSafeInteger(session.opening_cash_syp) || session.opening_cash_syp < 0 ||
+        (session.closing_actual_cash_syp != null && (!Number.isSafeInteger(session.closing_actual_cash_syp) || session.closing_actual_cash_syp < 0)) ||
+        (session.opening_note != null && (typeof session.opening_note !== 'string' || session.opening_note.length > 240)) ||
+        (session.closing_note != null && (typeof session.closing_note !== 'string' || session.closing_note.length > 240))) throw new Error('INVALID_CASH_SESSION');
+    if (seenCashSessions.has(session.uuid)) throw new Error('DUPLICATE_CASH_SESSION');
+    seenCashSessions.add(session.uuid);
+    const closingValues = [session.closing_actual_cash_syp, session.closing_sales_total_syp, session.closing_refunds_total_syp,
+      session.closing_expenses_total_syp, session.closing_expected_cash_syp, session.closing_difference_syp];
+    if (session.closed_at == null) {
+      if (closingValues.some(value => value != null) || session.closing_note != null) throw new Error('INVALID_OPEN_CASH_SESSION');
+      continue;
+    }
+    if (Date.parse(session.closed_at) < Date.parse(session.opened_at) || closingValues.some(value => !Number.isSafeInteger(value)) ||
+        (session.closing_actual_cash_syp ?? -1) < 0 || (session.closing_sales_total_syp ?? -1) < 0 ||
+        (session.closing_refunds_total_syp ?? -1) < 0 || (session.closing_expenses_total_syp ?? -1) < 0) throw new Error('INVALID_CLOSED_CASH_SESSION');
+    const expected = calculateExpectedCash(session.opening_cash_syp, session.closing_sales_total_syp!, session.closing_refunds_total_syp!, session.closing_expenses_total_syp!);
+    const difference = calculateCashDifference(session.closing_actual_cash_syp!, expected);
+    if (session.closing_expected_cash_syp !== expected || session.closing_difference_syp !== difference) throw new Error('INVALID_CASH_SESSION_SNAPSHOT');
   }
   const settings = payload.settings;
   if (!isRecord(settings) || Object.keys(settings).some(key => !SETTING_KEYS.includes(key as typeof SETTING_KEYS[number])) ||

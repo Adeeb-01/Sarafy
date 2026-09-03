@@ -58,8 +58,8 @@ test('insights ignore noise, avoid missing comparisons, prioritize deterministic
   const quiet=generateAnalyticsInsights({returnRatePercent:2},{netProfit:compareMetric(102,100),netSales:compareMetric(100,0),expenses:compareMetric(101,100)},{quantity:[],revenue:[],profit:[]},{values:[],strongest:null,weakest:null}); assert.equal(quiet.length,0);
 });
 
-test('Phase 12 keeps schema v11, no derived tables/dependencies, and reuses native text/design controls', async () => {
-  const [db,dashboard,chart,pkg]=await Promise.all(['../src/database/database.ts','../src/components/analytics/AnalyticsDashboard.tsx','../src/components/analytics/SalesTrendChart.tsx','../package.json'].map(path=>readFile(new URL(path,import.meta.url),'utf8'))); assert.match(db,/SCHEMA_VERSION = 11/); assert.doesNotMatch(db,/analytics_totals|analytics_cache|daily_stats|insights_table/); assert.match(dashboard,/SegmentedControl/); assert.match(dashboard,/RateHistoryScreen/); assert.match(dashboard,/useMemo/); assert.doesNotMatch(chart,/SvgText/); const parsed=JSON.parse(pkg); assert.equal(parsed.dependencies['react-native-svg'],'15.15.4');
+test('Analytics 2.0 keeps no derived tables/dependencies and reuses native text/design controls', async () => {
+  const [db,dashboard,chart,pkg]=await Promise.all(['../src/database/database.ts','../src/components/analytics/AnalyticsDashboard.tsx','../src/components/analytics/SalesTrendChart.tsx','../package.json'].map(path=>readFile(new URL(path,import.meta.url),'utf8'))); assert.match(db,/SCHEMA_VERSION = 12/); assert.doesNotMatch(db,/analytics_totals|analytics_cache|daily_stats|insights_table/); assert.match(dashboard,/SegmentedControl/); assert.match(dashboard,/RateHistoryScreen/); assert.match(dashboard,/useMemo/); assert.doesNotMatch(chart,/SvgText/); const parsed=JSON.parse(pkg); assert.equal(parsed.dependencies['react-native-svg'],'15.15.4');
 });
 
 test('full analytics benchmark remains finite on the requested synthetic workload', () => {

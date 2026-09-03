@@ -21,8 +21,9 @@ import { createProductBarcodeMap, findProductByExactBarcode } from '@/utils/barc
 import { buildRepeatedSaleCart } from '@/utils/repeatSale';
 import { ReturnFlowScreen } from '@/components/sales/ReturnFlowScreen';
 import { shareReturnReceiptPdf } from '@/utils/returnReceipt';
+import { CashSessionScreen } from '@/components/cash/CashSessionScreen';
 
-type SalesSection = 'sale' | 'suspended' | 'invoices' | 'expenses' | 'analytics';
+type SalesSection = 'sale' | 'suspended' | 'invoices' | 'expenses' | 'analytics' | 'cash';
 
 export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationInset?: number }) {
   const state = useAppStore();
@@ -99,9 +100,10 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
 
   const requestComplete = useCallback(() => {
     if (!cart.length || discountError || !payment.valid || cart.some(line => !line.isAvailable) || savingRef.current) return;
+    if (!state.activeCashSession) { snackbar.show({ text: copy.cashSession.cashRequired, tone: 'info' }); setSection('cash'); return; }
     haptics.warning();
     setConfirmOpen(true);
-  }, [cart, discountError, payment.valid]);
+  }, [cart, copy.cashSession.cashRequired, discountError, payment.valid, snackbar, state.activeCashSession]);
 
   const completeSale = async () => {
     if (!cart.length || discountError || !payment.valid || cart.some(line => !line.isAvailable) || savingRef.current) return;
@@ -120,7 +122,9 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     } catch (error) {
       if (__DEV__) console.error('[SaleCompletionFailed]', error);
       haptics.error();
-      snackbar.show({ text: copy.sales.saleFailed, tone: 'error', duration: 4800 });
+      const required = error instanceof Error && error.message === 'CASH_SESSION_REQUIRED';
+      snackbar.show({ text: required ? copy.cashSession.cashRequired : copy.sales.saleFailed, tone: required ? 'info' : 'error', duration: 4800 });
+      if (required) { setConfirmOpen(false); setSection('cash'); }
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -211,8 +215,8 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
 
   const createReturn = useCallback(async (saleId: number, selections: import('@/types').ReturnSelection[]) => {
     try { const record = await state.createReturn(saleId, selections); haptics.success(); snackbar.show({ text: copy.sales.returnRecorded, tone: 'success' }); return record; }
-    catch (error) { if (__DEV__) console.error('[ReturnCreationFailed]', error); haptics.error(); snackbar.show({ text: copy.sales.returnFailed, tone: 'error' }); throw error; }
-  }, [copy.sales.returnFailed, copy.sales.returnRecorded, snackbar, state]);
+    catch (error) { if (__DEV__) console.error('[ReturnCreationFailed]', error); haptics.error(); const required = error instanceof Error && error.message === 'CASH_SESSION_REQUIRED'; snackbar.show({ text: required ? copy.cashSession.cashRequired : copy.sales.returnFailed, tone: required ? 'info' : 'error' }); if (required) { setReturnSale(null); setSection('cash'); } throw error; }
+  }, [copy.cashSession.cashRequired, copy.sales.returnFailed, copy.sales.returnRecorded, snackbar, state]);
 
   const shareReturn = useCallback(async (record: import('@/types').SaleReturn, sale: Sale) => {
     try { await shareReturnReceiptPdf(record, sale, state.language); snackbar.show({ text: copy.sales.returnPrepared, tone: 'success' }); }
@@ -223,13 +227,14 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
 
   return <ScreenContainer>
     <View style={styles.page}>
-      <View style={[styles.header, { backgroundColor: colors.surfaceSecondary }]}><View style={[styles.titleRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={styles.titleCopy}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.subtitle}</Text></View><AppButton label={`${copy.sales.suspendedSales}${visibleSuspendedSales.length ? ` (${formatNumber(visibleSuspendedSales.length, state.language)})` : ''}`} icon="pause" variant={section === 'suspended' ? 'primary' : 'secondary'} onPress={() => setSection('suspended')} style={styles.suspendedButton} /></View><SegmentedControl value={section} onChange={setSection} options={sectionOptions} rtl={rtl} subtle compactLabels accessibilityLabel={copy.sales.sections} /></View>
+      <View style={[styles.header, { backgroundColor: colors.surfaceSecondary }]}><View style={[styles.titleRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={styles.titleCopy}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.subtitle}</Text></View><View style={[styles.headerActions, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><AppButton label={copy.cashSession.title} icon="briefcase" variant={section === 'cash' ? 'primary' : 'secondary'} onPress={() => setSection('cash')} style={styles.cashButton} /><AppButton label={`${copy.sales.suspendedSales}${visibleSuspendedSales.length ? ` (${formatNumber(visibleSuspendedSales.length, state.language)})` : ''}`} icon="pause" variant={section === 'suspended' ? 'primary' : 'secondary'} onPress={() => setSection('suspended')} style={styles.suspendedButton} /></View></View><SegmentedControl value={section === 'cash' || section === 'suspended' ? 'sale' : section} onChange={setSection} options={sectionOptions} rtl={rtl} subtle compactLabels accessibilityLabel={copy.sales.sections} /></View>
       <Animated.View key={section} entering={FadeIn.duration(170).reduceMotion(ReduceMotion.System)} style={styles.content}>
         {section === 'sale' && <NewSaleView products={state.products} settings={settings} cart={cart} completedSale={completedSale} bottomNavigationInset={bottomNavigationInset} sharing={completedSale?.id === sharingSaleId} onAdd={addProduct} onQuantityChange={(id, quantity) => setQuantity(id, quantity)} onQuantityDelta={(id, delta) => changeQuantity(id, delta)} onReviewCart={() => setReviewOpen(true)} onNewSale={() => setCompletedSale(null)} onShare={sale => void shareSale(sale)} onViewDetails={sale => { setSelectedSale(sale); setSection('invoices'); }} onOpenScanner={() => setScannerOpen(true)} />}
         {section === 'suspended' && <SuspendedSalesView drafts={visibleSuspendedSales} language={state.language} bottomNavigationInset={bottomNavigationInset} busyId={draftBusyId} onResume={draft => { if (cart.length) setDraftToResume(draft); else void loadDraftIntoCart(draft, false); }} onDelete={setDraftToDelete} />}
         {section === 'invoices' && <InvoiceHistory language={state.language} bottomNavigationInset={bottomNavigationInset} selectedSale={selectedSale} sharingSaleId={sharingSaleId} revision={state.sales.reduce((sum, sale) => sum + (sale.returns?.length ?? 0), 0)} queryInvoices={state.queryInvoices} onSelect={sale => void openInvoice(sale)} onCloseDetails={() => setSelectedSale(null)} onShare={sale => void shareSale(sale)} onReturn={sale => { setSelectedSale(null); setReturnSale(sale); }} onRepeat={sale => { if (cart.length) setSaleToRepeat(sale); else repeatSale(sale); }} />}
-        {section === 'expenses' && <ExpensesView language={state.language} bottomNavigationInset={bottomNavigationInset} />}
+        {section === 'expenses' && <ExpensesView language={state.language} bottomNavigationInset={bottomNavigationInset} hasActiveCashSession={!!state.activeCashSession} onRequireCashSession={() => setSection('cash')} />}
         {section === 'analytics' && <AnalyticsDashboard sales={state.sales} expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} />}
+        {section === 'cash' && <CashSessionScreen language={state.language} bottomNavigationInset={bottomNavigationInset} />}
       </Animated.View>
     </View>
     <CartReviewModal visible={reviewOpen} cart={cart} discount={discount} discountError={discountError} subtotal={subtotal} appliedDiscount={appliedDiscount} total={total} amountPaid={amountPaid} exactPayment={exactPayment} payment={payment} language={state.language} saving={saving} draftRate={activeDraftId == null ? null : cartExchangeRate} currentRate={state.exchangeRate} onClose={() => setReviewOpen(false)} onDiscountChange={setDiscount} onAmountPaidChange={value => { setExactPayment(false); setAmountPaid(value); }} onExactPayment={() => { setExactPayment(true); setAmountPaid(''); }} onPaymentSuggestion={value => { setExactPayment(false); setAmountPaid(String(value)); }} onQuantityChange={setQuantity} onQuantityDelta={changeQuantity} onRequestComplete={requestComplete} onRequestSuspend={() => setSuspendConfirmOpen(true)} />
@@ -249,8 +254,8 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       return { kind: 'success', title: product.name, quantity: formatNumber(nextQuantity, state.language), amount };
     }} />
     <ProductFormModal visible={unknownProductBarcode !== null} product={null} mode="create" initialSection="identity" initialBarcode={unknownProductBarcode ?? undefined} onClose={() => setUnknownProductBarcode(null)} />
-    <ReturnFlowScreen sale={returnSale} language={state.language} onClose={() => setReturnSale(null)} onCreate={createReturn} onShare={shareReturn} />
+    <ReturnFlowScreen sale={returnSale} language={state.language} hasActiveCashSession={!!state.activeCashSession} onRequireCashSession={() => { setReturnSale(null); setSection('cash'); snackbar.show({ text: copy.cashSession.cashRequired, tone: 'info' }); }} onClose={() => setReturnSale(null)} onCreate={createReturn} onShare={shareReturn} />
   </ScreenContainer>;
 }
 
-const styles = StyleSheet.create({ page: { flex: 1 }, header: { paddingHorizontal: spacing.md, paddingTop: spacing.xs, paddingBottom: spacing.sm, gap: spacing.xs }, titleRow: { alignItems: 'center', gap: spacing.xs }, titleCopy: { minWidth: 0, flex: 1 }, suspendedButton: { minWidth: 106 }, content: { flex: 1 } });
+const styles = StyleSheet.create({ page: { flex: 1 }, header: { paddingHorizontal: spacing.md, paddingTop: spacing.xs, paddingBottom: spacing.sm, gap: spacing.xs }, titleRow: { alignItems: 'center', gap: spacing.xs }, titleCopy: { minWidth: 0, flex: 1 }, headerActions: { gap: spacing.xxs }, cashButton: { minWidth: 90 }, suspendedButton: { minWidth: 106 }, content: { flex: 1 } });

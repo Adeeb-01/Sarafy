@@ -2,7 +2,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as XLSX from 'xlsx';
-import { ExchangeRateHistoryEntry, Expense, ExpenseCategory, Product, Sale, Settings } from '@/types';
+import { CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, Product, Sale, Settings } from '@/types';
 import { exchangeRateChangePercent } from '@/utils/exchangeRate';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
@@ -40,8 +40,10 @@ export async function exportExcel(
   expenses: Expense[] = [],
   expenseCategories: ExpenseCategory[] = [],
   exchangeRateHistory: ExchangeRateHistoryEntry[] = [],
+  cashSessions: CashSessionSummary[] = [],
 ) {
   const workbook = XLSX.utils.book_new();
+  const sessionUuidById = new Map(cashSessions.map(session => [session.id, session.uuid]));
   const productRows = products.map(product => ({
     uuid: product.uuid,
     id: product.id,
@@ -93,6 +95,7 @@ export async function exportExcel(
     change_syp: sale.change_syp,
     cost_syp: sale.cost_syp,
     gross_profit_syp: sale.profit_syp,
+    cash_session_uuid: sale.cash_session_uuid ?? (sale.cash_session_id ? sessionUuidById.get(sale.cash_session_id) : '') ?? '',
   })));
   salesSheet['!cols'] = [{ wch: 24 }, { wch: 24 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 18 }, { wch: 16 }, { wch: 16 }, { wch: 18 }];
   XLSX.utils.book_append_sheet(workbook, salesSheet, 'Sales');
@@ -112,6 +115,7 @@ export async function exportExcel(
   const returnsSheet = XLSX.utils.json_to_sheet(returns.map(({ sale, record }) => ({
     return_uuid: record.uuid, original_invoice_number: sale.invoice_number, return_date: record.created_at,
     refund_total_syp: record.refund_total_syp, returned_cost_syp: record.returned_cost_syp,
+    cash_session_uuid: record.cash_session_uuid ?? (record.cash_session_id ? sessionUuidById.get(record.cash_session_id) : null) ?? '',
   })));
   returnsSheet['!cols'] = [{ wch: 38 }, { wch: 25 }, { wch: 24 }, { wch: 20 }, { wch: 20 }];
   XLSX.utils.book_append_sheet(workbook, returnsSheet, 'Returns');
@@ -129,6 +133,7 @@ export async function exportExcel(
     note: expense.note ?? '',
     amount_syp: expense.amount_syp,
     created_at: expense.created_at,
+    cash_session_uuid: expense.cash_session_uuid ?? (expense.cash_session_id ? sessionUuidById.get(expense.cash_session_id) : '') ?? '',
   })));
   expensesSheet['!cols'] = [{ wch: 34 }, { wch: 38 }, { wch: 24 }, { wch: 24 }, { wch: 38 }, { wch: 18 }, { wch: 24 }];
   XLSX.utils.book_append_sheet(workbook, expensesSheet, 'Expenses');
@@ -138,6 +143,18 @@ export async function exportExcel(
   const rateHistorySheet = XLSX.utils.json_to_sheet(exchangeRateHistory.map(entry => ({ date: entry.created_at, old_rate: entry.old_rate, new_rate: entry.new_rate, change_percent: exchangeRateChangePercent(entry.old_rate, entry.new_rate) })));
   rateHistorySheet['!cols'] = [{ wch: 24 }, { wch: 18 }, { wch: 18 }, { wch: 18 }];
   XLSX.utils.book_append_sheet(workbook, rateHistorySheet, 'Exchange Rate History');
+  const cashSessionsSheet = XLSX.utils.json_to_sheet(cashSessions.map(session => ({
+    uuid: session.uuid, opened_at: session.opened_at, closed_at: session.closed_at ?? '', opening_cash_syp: session.opening_cash_syp,
+    sales_total_syp: session.closed_at ? session.closing_sales_total_syp : session.sales_total_syp,
+    refunds_total_syp: session.closed_at ? session.closing_refunds_total_syp : session.refunds_total_syp,
+    expenses_total_syp: session.closed_at ? session.closing_expenses_total_syp : session.expenses_total_syp,
+    expected_cash_syp: session.closed_at ? session.closing_expected_cash_syp : session.expected_cash_syp,
+    actual_cash_syp: session.closing_actual_cash_syp ?? '', difference_syp: session.closing_difference_syp ?? '',
+    invoice_count: session.invoice_count, return_count: session.return_count, expense_count: session.expense_count,
+    opening_note: session.opening_note ?? '', closing_note: session.closing_note ?? '',
+  })));
+  cashSessionsSheet['!cols'] = [{ wch: 38 }, { wch: 24 }, { wch: 24 }, ...Array.from({ length: 11 }, () => ({ wch: 20 }))];
+  XLSX.utils.book_append_sheet(workbook, cashSessionsSheet, 'Cash Sessions');
 
   const filename = `sarafy-products-${new Date().toISOString().slice(0, 10)}.xlsx`;
   const uri = `${FileSystem.cacheDirectory}${filename}`;

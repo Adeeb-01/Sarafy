@@ -1,5 +1,5 @@
 import * as SQLite from 'expo-sqlite';
-import { ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
+import { CashSession, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InvoiceQuery, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
 import { createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
@@ -8,7 +8,7 @@ import { DEFAULT_EXPENSE_CATEGORIES, OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
@@ -182,6 +182,50 @@ async function migrateExpensesAndRatesV11() {
   });
 }
 
+async function migrateCashSessionsV12() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 12) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    await transaction.execAsync(`
+      CREATE TABLE cash_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        opened_at TEXT NOT NULL,
+        closed_at TEXT,
+        opening_cash_syp INTEGER NOT NULL CHECK(opening_cash_syp >= 0),
+        closing_actual_cash_syp INTEGER CHECK(closing_actual_cash_syp >= 0),
+        closing_sales_total_syp INTEGER,
+        closing_refunds_total_syp INTEGER,
+        closing_expenses_total_syp INTEGER,
+        closing_expected_cash_syp INTEGER,
+        closing_difference_syp INTEGER,
+        opening_note TEXT,
+        closing_note TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_cash_sessions_uuid ON cash_sessions(uuid);
+      CREATE INDEX idx_cash_sessions_opened_at ON cash_sessions(opened_at);
+      CREATE INDEX idx_cash_sessions_closed_at ON cash_sessions(closed_at);
+      CREATE UNIQUE INDEX idx_cash_sessions_single_open ON cash_sessions((1)) WHERE closed_at IS NULL;
+    `);
+    const salesColumns = await transaction.getAllAsync<{ name: string }>('PRAGMA table_info(sales)');
+    if (!salesColumns.some(column => column.name === 'cash_session_id')) await transaction.execAsync('ALTER TABLE sales ADD COLUMN cash_session_id INTEGER REFERENCES cash_sessions(id) ON DELETE RESTRICT');
+    const expenseColumns = await transaction.getAllAsync<{ name: string }>('PRAGMA table_info(expenses)');
+    if (!expenseColumns.some(column => column.name === 'cash_session_id')) await transaction.execAsync('ALTER TABLE expenses ADD COLUMN cash_session_id INTEGER REFERENCES cash_sessions(id) ON DELETE RESTRICT');
+    const returnColumns = await transaction.getAllAsync<{ name: string }>('PRAGMA table_info(sale_returns)');
+    if (!returnColumns.some(column => column.name === 'cash_session_id')) await transaction.execAsync('ALTER TABLE sale_returns ADD COLUMN cash_session_id INTEGER REFERENCES cash_sessions(id) ON DELETE RESTRICT');
+    await transaction.execAsync(`
+      CREATE INDEX idx_sales_cash_session_id ON sales(cash_session_id);
+      CREATE INDEX idx_expenses_cash_session_id ON expenses(cash_session_id);
+      CREATE INDEX idx_sale_returns_cash_session_id ON sale_returns(cash_session_id);
+      PRAGMA user_version = 12;
+    `);
+  });
+}
+
 export async function initializeDatabase() {
   const db = await dbPromise;
   await db.execAsync(`
@@ -250,6 +294,7 @@ export async function initializeDatabase() {
   await migrateSalesV9();
   await migrateReturnsV10();
   await migrateExpensesAndRatesV11();
+  await migrateCashSessionsV12();
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
   if (integrity?.integrity_check !== 'ok') throw new Error('DATABASE_INTEGRITY_CHECK_FAILED');
   const foreignKeys = await db.getAllAsync<{ table: string; rowid: number }>('PRAGMA foreign_key_check');
@@ -652,6 +697,8 @@ export async function createSale(
   const invoiceNumber = `INV-${createdAt.replace(/\D/g, '').slice(0, 17)}`;
   let saleId = 0;
   await db.withExclusiveTransactionAsync(async transaction => {
+    const activeSession = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
+    if (!activeSession) throw new Error('CASH_SESSION_REQUIRED');
     if (draftId != null) {
       const draft = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_drafts WHERE id=?', draftId);
       if (!draft) throw new Error('DRAFT_NOT_FOUND');
@@ -665,9 +712,9 @@ export async function createSale(
     }
     const result = await transaction.runAsync(
       `INSERT INTO sales
-       (uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,amount_paid_syp,change_syp,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-      createUuid(), invoiceNumber, exchangeRate, subtotal, discount, net, cost, profit, paid, change, createdAt, createdAt,
+       (uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,amount_paid_syp,change_syp,created_at,updated_at,cash_session_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      createUuid(), invoiceNumber, exchangeRate, subtotal, discount, net, cost, profit, paid, change, createdAt, createdAt, activeSession.id,
     );
     saleId = result.lastInsertRowId;
     for (const [index, item] of items.entries()) {
@@ -693,6 +740,8 @@ export async function createSaleReturn(saleId: number, selections: ReturnSelecti
   const db = await dbPromise;
   let returnId = 0;
   await db.withExclusiveTransactionAsync(async transaction => {
+    const activeSession = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
+    if (!activeSession) throw new Error('CASH_SESSION_REQUIRED');
     const header = await transaction.getFirstAsync<Omit<Sale, 'items'>>('SELECT * FROM sales WHERE id=?', saleId);
     if (!header) throw new Error('SALE_NOT_FOUND');
     const saleItems = await transaction.getAllAsync<SaleItem>('SELECT * FROM sale_items WHERE sale_id=? ORDER BY id', saleId);
@@ -712,8 +761,8 @@ export async function createSaleReturn(saleId: number, selections: ReturnSelecti
     if (!preview.items.length) throw new Error('EMPTY_RETURN');
     const now = new Date().toISOString();
     const inserted = await transaction.runAsync(
-      'INSERT INTO sale_returns(uuid,sale_id,refund_total_syp,returned_cost_syp,created_at,updated_at) VALUES(?,?,?,?,?,?)',
-      createUuid(), saleId, preview.refundTotalSyp, preview.returnedCostSyp, now, now,
+      'INSERT INTO sale_returns(uuid,sale_id,refund_total_syp,returned_cost_syp,created_at,updated_at,cash_session_id) VALUES(?,?,?,?,?,?,?)',
+      createUuid(), saleId, preview.refundTotalSyp, preview.returnedCostSyp, now, now, activeSession.id,
     );
     returnId = inserted.lastInsertRowId;
     for (const item of preview.items) await transaction.runAsync(
@@ -866,12 +915,135 @@ export async function addExpense(categoryId: number, amountSyp: number, note?: s
   if ((normalizedNote?.length ?? 0) > 240) throw new Error('EXPENSE_NOTE_TOO_LONG');
   const db = await dbPromise;
   await db.withExclusiveTransactionAsync(async transaction => {
+    const activeSession = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
+    if (!activeSession) throw new Error('CASH_SESSION_REQUIRED');
     const category = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM expense_categories WHERE id=? AND is_active=1', categoryId);
     if (!category) throw new Error('EXPENSE_CATEGORY_INACTIVE');
     const now = new Date().toISOString();
     await transaction.runAsync(
-      'INSERT INTO expenses (uuid,description,amount_syp,category_id,note,created_at,updated_at) VALUES (?,?,?,?,?,?,?)',
-      createUuid(), normalizedNote ?? '', amountSyp, categoryId, normalizedNote, now, now,
+      'INSERT INTO expenses (uuid,description,amount_syp,category_id,note,created_at,updated_at,cash_session_id) VALUES (?,?,?,?,?,?,?,?)',
+      createUuid(), normalizedNote ?? '', amountSyp, categoryId, normalizedNote, now, now, activeSession.id,
     );
+  });
+}
+
+const cashSessionSummarySelect = `SELECT cs.*,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE(s.sales_total_syp,0) ELSE cs.closing_sales_total_syp END AS sales_total_syp,COALESCE(s.invoice_count,0) AS invoice_count,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE(r.refunds_total_syp,0) ELSE cs.closing_refunds_total_syp END AS refunds_total_syp,COALESCE(r.return_count,0) AS return_count,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE(e.expenses_total_syp,0) ELSE cs.closing_expenses_total_syp END AS expenses_total_syp,COALESCE(e.expense_count,0) AS expense_count,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE(s.sales_total_syp,0)-COALESCE(r.refunds_total_syp,0)-COALESCE(e.expenses_total_syp,0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp
+  FROM cash_sessions cs
+  LEFT JOIN (SELECT cash_session_id,SUM(net_total_syp) AS sales_total_syp,COUNT(*) AS invoice_count FROM sales WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) s ON s.cash_session_id=cs.id
+  LEFT JOIN (SELECT cash_session_id,SUM(refund_total_syp) AS refunds_total_syp,COUNT(*) AS return_count FROM sale_returns WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) r ON r.cash_session_id=cs.id
+  LEFT JOIN (SELECT cash_session_id,SUM(amount_syp) AS expenses_total_syp,COUNT(*) AS expense_count FROM expenses WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) e ON e.cash_session_id=cs.id`;
+
+const cashSessionDetailSelect = `SELECT cs.*,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(net_total_syp) FROM sales WHERE cash_session_id=cs.id),0) ELSE cs.closing_sales_total_syp END AS sales_total_syp,
+  (SELECT COUNT(*) FROM sales WHERE cash_session_id=cs.id) AS invoice_count,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(refund_total_syp) FROM sale_returns WHERE cash_session_id=cs.id),0) ELSE cs.closing_refunds_total_syp END AS refunds_total_syp,
+  (SELECT COUNT(*) FROM sale_returns WHERE cash_session_id=cs.id) AS return_count,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(amount_syp) FROM expenses WHERE cash_session_id=cs.id),0) ELSE cs.closing_expenses_total_syp END AS expenses_total_syp,
+  (SELECT COUNT(*) FROM expenses WHERE cash_session_id=cs.id) AS expense_count,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE((SELECT SUM(net_total_syp) FROM sales WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(refund_total_syp) FROM sale_returns WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(amount_syp) FROM expenses WHERE cash_session_id=cs.id),0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp
+  FROM cash_sessions cs`;
+
+function validateCashAmount(value: number) {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error('INVALID_CASH_AMOUNT');
+}
+
+function normalizeSessionNote(note?: string | null) {
+  const normalized = note?.trim() || null;
+  if ((normalized?.length ?? 0) > 240) throw new Error('SESSION_NOTE_TOO_LONG');
+  return normalized;
+}
+
+export async function getActiveCashSession(): Promise<CashSessionSummary | null> {
+  const db = await dbPromise;
+  return db.getFirstAsync<CashSessionSummary>(`${cashSessionDetailSelect} WHERE cs.closed_at IS NULL LIMIT 1`);
+}
+
+export async function openCashSession(openingCashSyp: number, openingNote?: string | null): Promise<CashSessionSummary> {
+  validateCashAmount(openingCashSyp);
+  const note = normalizeSessionNote(openingNote);
+  const db = await dbPromise;
+  let id = 0;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const active = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
+    if (active) throw new Error('CASH_SESSION_ALREADY_OPEN');
+    const now = new Date().toISOString();
+    const result = await transaction.runAsync(`INSERT INTO cash_sessions
+      (uuid,opened_at,opening_cash_syp,opening_note,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
+    createUuid(), now, openingCashSyp, note, now, now);
+    id = result.lastInsertRowId;
+  });
+  const session = await getCashSessionDetail(id);
+  if (!session) throw new Error('CASH_SESSION_NOT_FOUND');
+  return session;
+}
+
+export async function closeCashSession(actualCashSyp: number, closingNote?: string | null): Promise<CashSessionSummary> {
+  validateCashAmount(actualCashSyp);
+  const note = normalizeSessionNote(closingNote);
+  const db = await dbPromise;
+  let id = 0;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const active = await transaction.getFirstAsync<CashSession>('SELECT * FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
+    if (!active) throw new Error('CASH_SESSION_NOT_FOUND');
+    const totals = await transaction.getFirstAsync<{ sales: number; refunds: number; expenses: number }>(`SELECT
+      COALESCE((SELECT SUM(net_total_syp) FROM sales WHERE cash_session_id=?),0) AS sales,
+      COALESCE((SELECT SUM(refund_total_syp) FROM sale_returns WHERE cash_session_id=?),0) AS refunds,
+      COALESCE((SELECT SUM(amount_syp) FROM expenses WHERE cash_session_id=?),0) AS expenses`, active.id, active.id, active.id);
+    const sales = totals?.sales ?? 0; const refunds = totals?.refunds ?? 0; const expenses = totals?.expenses ?? 0;
+    const expected = active.opening_cash_syp + sales - refunds - expenses;
+    const difference = actualCashSyp - expected;
+    if (![sales, refunds, expenses, expected, difference].every(Number.isSafeInteger)) throw new Error('INVALID_CASH_TOTAL');
+    const now = new Date().toISOString();
+    const result = await transaction.runAsync(`UPDATE cash_sessions SET closed_at=?,closing_actual_cash_syp=?,
+      closing_sales_total_syp=?,closing_refunds_total_syp=?,closing_expenses_total_syp=?,
+      closing_expected_cash_syp=?,closing_difference_syp=?,closing_note=?,updated_at=?
+      WHERE id=? AND closed_at IS NULL`, now, actualCashSyp, sales, refunds, expenses, expected, difference, note, now, active.id);
+    if (result.changes !== 1) throw new Error('CASH_SESSION_ALREADY_CLOSED');
+    id = active.id;
+  });
+  const session = await getCashSessionDetail(id);
+  if (!session) throw new Error('CASH_SESSION_NOT_FOUND');
+  return session;
+}
+
+export async function getCashSessionHistory(sort: 'newest' | 'oldest' = 'newest'): Promise<CashSessionSummary[]> {
+  const db = await dbPromise;
+  return db.getAllAsync<CashSessionSummary>(`${cashSessionSummarySelect} WHERE cs.closed_at IS NOT NULL ORDER BY cs.opened_at ${sort === 'oldest' ? 'ASC' : 'DESC'},cs.id ${sort === 'oldest' ? 'ASC' : 'DESC'}`);
+}
+
+export async function getCashSessionDetail(id: number): Promise<CashSessionSummary | null> {
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  const db = await dbPromise;
+  return db.getFirstAsync<CashSessionSummary>(`${cashSessionDetailSelect} WHERE cs.id=?`, id);
+}
+
+export async function getCashSessionSales(id: number) {
+  const db = await dbPromise;
+  const rows = await db.getAllAsync<Omit<Sale, 'items'>>('SELECT * FROM sales WHERE cash_session_id=? ORDER BY created_at DESC,id DESC', id);
+  return attachInvoiceSummaries(rows);
+}
+
+export async function getCashSessionExpenses(id: number) {
+  const db = await dbPromise;
+  return db.getAllAsync<Expense>(`${expenseSelect} WHERE e.cash_session_id=? ORDER BY e.created_at DESC,e.id DESC`, id);
+}
+
+export async function getCashSessionReturns(id: number): Promise<CashSessionReturnSummary[]> {
+  const db = await dbPromise;
+  return db.getAllAsync<CashSessionReturnSummary>('SELECT sr.*,s.invoice_number FROM sale_returns sr JOIN sales s ON s.id=sr.sale_id WHERE sr.cash_session_id=? ORDER BY sr.created_at DESC,sr.id DESC', id);
+}
+
+export async function deleteExpense(id: number) {
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('INVALID_EXPENSE');
+  const db = await dbPromise;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const expense = await transaction.getFirstAsync<{ session_closed_at: string | null }>(`SELECT cs.closed_at AS session_closed_at FROM expenses e LEFT JOIN cash_sessions cs ON cs.id=e.cash_session_id WHERE e.id=?`, id);
+    if (!expense) throw new Error('EXPENSE_NOT_FOUND');
+    if (expense.session_closed_at) throw new Error('CLOSED_SESSION_EXPENSE_IMMUTABLE');
+    await transaction.runAsync('DELETE FROM expenses WHERE id=?', id);
   });
 }
