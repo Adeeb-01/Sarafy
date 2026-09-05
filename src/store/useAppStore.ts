@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
+import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptQuery, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, Supplier, SupplierInput, SupplierSort, SuspendedSale, SuspendedSaleSummary } from '@/types';
 import * as database from '@/database/database';
 
 const defaults: Settings = {
@@ -75,6 +75,13 @@ interface AppState extends Settings {
   adjustInventory: (productId: number, mode: 'stock_in' | 'stock_out' | 'physical_count', quantity: number, note?: string | null) => Promise<void>;
   updateInventoryThreshold: (productId: number, threshold: number | null) => Promise<void>;
   auditInventoryHealth: () => Promise<InventoryHealthReport>;
+  getSuppliers: (search?: string, sort?: SupplierSort, includeInactive?: boolean) => Promise<Supplier[]>;
+  addSupplier: (input: SupplierInput) => Promise<number>;
+  updateSupplier: (id: number, input: SupplierInput) => Promise<void>;
+  setSupplierActive: (id: number, active: boolean) => Promise<'archived' | 'restored'>;
+  queryPurchaseReceipts: (query?: PurchaseReceiptQuery) => Promise<PurchaseReceipt[]>;
+  getPurchaseReceiptDetail: (id: number) => Promise<PurchaseReceipt | null>;
+  createPurchaseReceipt: (input: PurchaseReceiptInput) => Promise<PurchaseReceipt>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -193,4 +200,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   adjustInventory: database.adjustInventory,
   updateInventoryThreshold: database.updateInventoryThreshold,
   auditInventoryHealth: database.auditInventoryHealth,
+  getSuppliers: database.getSuppliers,
+  addSupplier: database.addSupplier,
+  updateSupplier: database.updateSupplier,
+  setSupplierActive: database.setSupplierActive,
+  queryPurchaseReceipts: database.queryPurchaseReceipts,
+  getPurchaseReceiptDetail: database.getPurchaseReceiptDetail,
+  createPurchaseReceipt: async input => {
+    const receipt = await database.createPurchaseReceipt(input);
+    set({ products: await database.getProducts() });
+    return receipt;
+  },
 }));

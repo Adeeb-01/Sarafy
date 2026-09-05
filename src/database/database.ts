@@ -1,5 +1,5 @@
 import * as SQLite from 'expo-sqlite';
-import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryMovement, InventoryMovementType, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
+import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryMovement, InventoryMovementType, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptQuery, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierInput, SupplierSort, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
 import { createDeterministicUuid, createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
@@ -9,7 +9,7 @@ import { calculateSettlement } from '@/utils/multiCurrency';
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
@@ -302,11 +302,95 @@ async function migrateInventoryV14() {
         created_at TEXT NOT NULL,
         CHECK(quantity_after = quantity_before + quantity_delta)
       );
-      CREATE INDEX idx_inventory_balances_tracking_quantity ON inventory_balances(tracking_enabled,quantity);
+      CREATE INDEX IF NOT EXISTS idx_inventory_balances_tracking_quantity ON inventory_balances(tracking_enabled,quantity);
+      CREATE INDEX IF NOT EXISTS idx_inventory_movements_product_created ON inventory_movements(product_id,created_at DESC,id DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_movements_sale_item ON inventory_movements(sale_item_id) WHERE sale_item_id IS NOT NULL AND movement_type='sale';
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_movements_return_item ON inventory_movements(return_item_id) WHERE return_item_id IS NOT NULL AND movement_type='return';
+      PRAGMA user_version = 14;
+    `);
+  });
+}
+
+async function migratePurchasesV15() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 15) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    await transaction.execAsync(`
+      CREATE TABLE suppliers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+        phone TEXT,
+        address TEXT,
+        note TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE purchase_receipts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+        supplier_uuid_snapshot TEXT NOT NULL,
+        supplier_name_snapshot TEXT NOT NULL,
+        reference_number TEXT,
+        note TEXT,
+        received_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE purchase_receipt_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        purchase_receipt_id INTEGER NOT NULL REFERENCES purchase_receipts(id) ON DELETE RESTRICT,
+        product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+        product_uuid_snapshot TEXT NOT NULL,
+        product_name_snapshot TEXT NOT NULL,
+        barcode_snapshot TEXT,
+        quantity INTEGER NOT NULL CHECK(quantity > 0),
+        unit_cost_usd_cents INTEGER NOT NULL CHECK(unit_cost_usd_cents >= 0),
+        line_total_usd_cents INTEGER NOT NULL CHECK(line_total_usd_cents >= 0),
+        created_at TEXT NOT NULL,
+        UNIQUE(purchase_receipt_id,product_uuid_snapshot),
+        CHECK(line_total_usd_cents = quantity * unit_cost_usd_cents)
+      );
+      ALTER TABLE inventory_movements RENAME TO inventory_movements_v14;
+      CREATE TABLE inventory_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+        product_uuid_snapshot TEXT NOT NULL,
+        product_name_snapshot TEXT NOT NULL,
+        barcode_snapshot TEXT,
+        movement_type TEXT NOT NULL CHECK(movement_type IN ('opening','stock_in','stock_out','adjustment','sale','return','purchase')),
+        quantity_delta INTEGER NOT NULL CHECK(quantity_delta <> 0),
+        quantity_before INTEGER NOT NULL CHECK(quantity_before >= 0),
+        quantity_after INTEGER NOT NULL CHECK(quantity_after >= 0),
+        sale_item_id INTEGER REFERENCES sale_items(id) ON DELETE RESTRICT,
+        return_item_id INTEGER REFERENCES sale_return_items(id) ON DELETE RESTRICT,
+        purchase_receipt_item_id INTEGER REFERENCES purchase_receipt_items(id) ON DELETE RESTRICT,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        CHECK(quantity_after = quantity_before + quantity_delta),
+        CHECK((movement_type='purchase' AND purchase_receipt_item_id IS NOT NULL AND sale_item_id IS NULL AND return_item_id IS NULL) OR
+              (movement_type<>'purchase' AND purchase_receipt_item_id IS NULL))
+      );
+      INSERT INTO inventory_movements(id,uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,return_item_id,note,created_at)
+        SELECT id,uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,return_item_id,note,created_at FROM inventory_movements_v14;
+      DROP TABLE inventory_movements_v14;
+      CREATE INDEX idx_suppliers_name ON suppliers(name COLLATE NOCASE);
+      CREATE INDEX idx_suppliers_active ON suppliers(is_active);
+      CREATE INDEX idx_purchase_receipts_supplier_id ON purchase_receipts(supplier_id);
+      CREATE INDEX idx_purchase_receipts_received_at ON purchase_receipts(received_at DESC,id DESC);
+      CREATE INDEX idx_purchase_receipt_items_receipt_id ON purchase_receipt_items(purchase_receipt_id);
+      CREATE INDEX idx_purchase_receipt_items_product_id ON purchase_receipt_items(product_id);
+      CREATE INDEX IF NOT EXISTS idx_inventory_balances_tracking_quantity ON inventory_balances(tracking_enabled,quantity);
       CREATE INDEX idx_inventory_movements_product_created ON inventory_movements(product_id,created_at DESC,id DESC);
       CREATE UNIQUE INDEX idx_inventory_movements_sale_item ON inventory_movements(sale_item_id) WHERE sale_item_id IS NOT NULL AND movement_type='sale';
       CREATE UNIQUE INDEX idx_inventory_movements_return_item ON inventory_movements(return_item_id) WHERE return_item_id IS NOT NULL AND movement_type='return';
-      PRAGMA user_version = 14;
+      CREATE UNIQUE INDEX idx_inventory_movements_purchase_item ON inventory_movements(purchase_receipt_item_id) WHERE purchase_receipt_item_id IS NOT NULL AND movement_type='purchase';
+      PRAGMA user_version = 15;
     `);
   });
 }
@@ -382,6 +466,7 @@ export async function initializeDatabase() {
   await migrateCashSessionsV12();
   await migrateMultiCurrencyV13();
   await migrateInventoryV14();
+  await migratePurchasesV15();
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
   if (integrity?.integrity_check !== 'ok') throw new Error('DATABASE_INTEGRITY_CHECK_FAILED');
   const foreignKeys = await db.getAllAsync<{ table: string; rowid: number }>('PRAGMA foreign_key_check');
@@ -585,13 +670,119 @@ export async function updateInventoryThreshold(productId: number, threshold: num
 
 export async function auditInventoryHealth(): Promise<InventoryHealthReport> {
   const db = await dbPromise;
-  const row = await db.getFirstAsync<{ negative: number; arithmetic: number; latest: number; sale_duplicates: number; return_duplicates: number }>(`SELECT
+  const row = await db.getFirstAsync<{ negative: number; arithmetic: number; latest: number; sale_duplicates: number; return_duplicates: number; purchase_duplicates: number; purchase_invalid: number; purchase_missing: number }>(`SELECT
     (SELECT COUNT(*) FROM inventory_balances WHERE quantity<0) AS negative,
     (SELECT COUNT(*) FROM inventory_movements WHERE quantity_after<>quantity_before+quantity_delta OR quantity_before<0 OR quantity_after<0) AS arithmetic,
     (SELECT COUNT(*) FROM inventory_balances b WHERE b.tracking_enabled=1 AND EXISTS(SELECT 1 FROM inventory_movements m WHERE m.product_id=b.product_id) AND b.quantity<>(SELECT m.quantity_after FROM inventory_movements m WHERE m.product_id=b.product_id ORDER BY m.id DESC LIMIT 1)) AS latest,
     (SELECT COUNT(*) FROM (SELECT sale_item_id FROM inventory_movements WHERE sale_item_id IS NOT NULL GROUP BY sale_item_id HAVING COUNT(*)>1)) AS sale_duplicates,
-    (SELECT COUNT(*) FROM (SELECT return_item_id FROM inventory_movements WHERE return_item_id IS NOT NULL GROUP BY return_item_id HAVING COUNT(*)>1)) AS return_duplicates`);
-  return { negativeBalances: row?.negative ?? 0, arithmeticMismatches: row?.arithmetic ?? 0, latestBalanceMismatches: row?.latest ?? 0, duplicateSaleMovements: row?.sale_duplicates ?? 0, duplicateReturnMovements: row?.return_duplicates ?? 0 };
+    (SELECT COUNT(*) FROM (SELECT return_item_id FROM inventory_movements WHERE return_item_id IS NOT NULL GROUP BY return_item_id HAVING COUNT(*)>1)) AS return_duplicates,
+    (SELECT COUNT(*) FROM (SELECT purchase_receipt_item_id FROM inventory_movements WHERE purchase_receipt_item_id IS NOT NULL GROUP BY purchase_receipt_item_id HAVING COUNT(*)>1)) AS purchase_duplicates,
+    (SELECT COUNT(*) FROM inventory_movements m LEFT JOIN purchase_receipt_items pi ON pi.id=m.purchase_receipt_item_id
+      WHERE (m.movement_type='purchase' AND (pi.id IS NULL OR m.quantity_delta<>pi.quantity OR m.product_uuid_snapshot<>pi.product_uuid_snapshot)) OR (m.purchase_receipt_item_id IS NOT NULL AND m.movement_type<>'purchase')) AS purchase_invalid,
+    (SELECT COUNT(*) FROM purchase_receipt_items pi WHERE NOT EXISTS(SELECT 1 FROM inventory_movements m WHERE m.purchase_receipt_item_id=pi.id AND m.movement_type='purchase')) AS purchase_missing`);
+  return { negativeBalances: row?.negative ?? 0, arithmeticMismatches: row?.arithmetic ?? 0, latestBalanceMismatches: row?.latest ?? 0, duplicateSaleMovements: row?.sale_duplicates ?? 0, duplicateReturnMovements: row?.return_duplicates ?? 0, duplicatePurchaseMovements: row?.purchase_duplicates ?? 0, invalidPurchaseMovements: row?.purchase_invalid ?? 0, missingPurchaseMovements: row?.purchase_missing ?? 0 };
+}
+
+function normalizeOptionalText(value: string | null | undefined, maxLength: number) {
+  const normalized = value?.trim() || null;
+  if ((normalized?.length ?? 0) > maxLength) throw new Error('TEXT_TOO_LONG');
+  return normalized;
+}
+
+export async function getSuppliers(search = '', sort: SupplierSort = 'name', includeInactive = true): Promise<Supplier[]> {
+  const db = await dbPromise; const where: string[] = []; const parameters: string[] = [];
+  const term = search.trim();
+  if (term) { where.push('(s.name LIKE ? COLLATE NOCASE OR COALESCE(s.phone,\'\') LIKE ?)'); parameters.push(`%${term}%`, `%${term}%`); }
+  if (!includeInactive) where.push('s.is_active=1');
+  const order = sort === 'newest' ? 's.created_at DESC,s.id DESC' : 's.name COLLATE NOCASE ASC,s.id ASC';
+  return db.getAllAsync<Supplier>(`SELECT s.*,COUNT(pr.id) AS receipt_count,MAX(pr.received_at) AS latest_receipt_at
+    FROM suppliers s LEFT JOIN purchase_receipts pr ON pr.supplier_id=s.id${where.length ? ` WHERE ${where.join(' AND ')}` : ''}
+    GROUP BY s.id ORDER BY ${order}`, ...parameters);
+}
+
+export async function addSupplier(input: SupplierInput) {
+  const name = input.name.trim();
+  if (!name || name.length > 120) throw new Error('INVALID_SUPPLIER_NAME');
+  const phone = normalizeOptionalText(input.phone, 60); const address = normalizeOptionalText(input.address, 240); const note = normalizeOptionalText(input.note, 500);
+  const db = await dbPromise; const now = new Date().toISOString();
+  const result = await db.runAsync('INSERT INTO suppliers(uuid,name,phone,address,note,is_active,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?)', createUuid(), name, phone, address, note, now, now);
+  return result.lastInsertRowId;
+}
+
+export async function updateSupplier(id: number, input: SupplierInput) {
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('SUPPLIER_NOT_FOUND');
+  const name = input.name.trim(); if (!name || name.length > 120) throw new Error('INVALID_SUPPLIER_NAME');
+  const db = await dbPromise; const result = await db.runAsync('UPDATE suppliers SET name=?,phone=?,address=?,note=?,updated_at=? WHERE id=?', name, normalizeOptionalText(input.phone, 60), normalizeOptionalText(input.address, 240), normalizeOptionalText(input.note, 500), new Date().toISOString(), id);
+  if (!result.changes) throw new Error('SUPPLIER_NOT_FOUND');
+}
+
+export async function setSupplierActive(id: number, active: boolean): Promise<'archived' | 'restored'> {
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('SUPPLIER_NOT_FOUND');
+  const db = await dbPromise; const result = await db.runAsync('UPDATE suppliers SET is_active=?,updated_at=? WHERE id=?', active ? 1 : 0, new Date().toISOString(), id);
+  if (!result.changes) throw new Error('SUPPLIER_NOT_FOUND');
+  return active ? 'restored' : 'archived';
+}
+
+function purchaseDateStart(period: PurchaseReceiptQuery['period']) {
+  if (!period || period === 'all') return null;
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  if (period === 'week') { const day = start.getDay(); start.setDate(start.getDate() - (day === 0 ? 6 : day - 1)); }
+  else if (period === 'month') start.setDate(1);
+  return start.toISOString();
+}
+
+const purchaseSummarySelect = `SELECT pr.id,pr.uuid,pr.supplier_id,pr.supplier_uuid_snapshot,pr.supplier_name_snapshot,pr.reference_number,pr.note,pr.received_at,pr.created_at,
+  COUNT(pi.id) AS item_count,COALESCE(SUM(pi.quantity),0) AS total_quantity,COALESCE(SUM(pi.line_total_usd_cents),0) AS total_cost_usd_cents
+  FROM purchase_receipts pr JOIN purchase_receipt_items pi ON pi.purchase_receipt_id=pr.id`;
+
+export async function queryPurchaseReceipts(query: PurchaseReceiptQuery = {}): Promise<PurchaseReceipt[]> {
+  const db = await dbPromise; const where: string[] = []; const parameters: Array<string | number> = [];
+  if (query.limit != null && (!Number.isSafeInteger(query.limit) || query.limit <= 0 || query.limit > 10000)) throw new Error('INVALID_PURCHASE_QUERY');
+  const search = query.search?.trim(); if (search) { const like = `%${search}%`; where.push('(pr.supplier_name_snapshot LIKE ? COLLATE NOCASE OR COALESCE(pr.reference_number,\'\') LIKE ? OR EXISTS(SELECT 1 FROM purchase_receipt_items psi WHERE psi.purchase_receipt_id=pr.id AND psi.product_name_snapshot LIKE ? COLLATE NOCASE))'); parameters.push(like, like, like); }
+  const start = purchaseDateStart(query.period); if (start) { where.push('pr.received_at>=?'); parameters.push(start); }
+  if (query.supplierId != null) { where.push('pr.supplier_id=?'); parameters.push(query.supplierId); }
+  const order = { newest: 'pr.received_at DESC,pr.id DESC', oldest: 'pr.received_at ASC,pr.id ASC', highest: 'total_cost_usd_cents DESC,pr.id DESC', lowest: 'total_cost_usd_cents ASC,pr.id DESC' }[query.sort ?? 'newest'];
+  return db.getAllAsync<PurchaseReceipt>(`${purchaseSummarySelect}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} GROUP BY pr.id ORDER BY ${order}${query.limit ? ' LIMIT ?' : ''}`, ...parameters, ...(query.limit ? [query.limit] : []));
+}
+
+export async function getPurchaseReceiptDetail(id: number): Promise<PurchaseReceipt | null> {
+  const db = await dbPromise;
+  const receipt = await db.getFirstAsync<PurchaseReceipt>(`${purchaseSummarySelect} WHERE pr.id=? GROUP BY pr.id`, id);
+  if (!receipt) return null;
+  const items = await db.getAllAsync<PurchaseReceipt['items'] extends Array<infer T> ? T : never>('SELECT * FROM purchase_receipt_items WHERE purchase_receipt_id=? ORDER BY id', id);
+  return { ...receipt, items };
+}
+
+export async function createPurchaseReceipt(input: PurchaseReceiptInput): Promise<PurchaseReceipt> {
+  if (!Number.isSafeInteger(input.supplierId) || input.supplierId <= 0 || !input.items.length) throw new Error('INVALID_PURCHASE_RECEIPT');
+  const reference = normalizeOptionalText(input.referenceNumber, 120); const note = normalizeOptionalText(input.note, 500);
+  const productIds = new Set<number>();
+  for (const item of input.items) {
+    if (!Number.isSafeInteger(item.productId) || item.productId <= 0 || !Number.isSafeInteger(item.quantity) || item.quantity <= 0 || !Number.isSafeInteger(item.unitCostUsdCents) || item.unitCostUsdCents < 0 || productIds.has(item.productId)) throw new Error('INVALID_PURCHASE_ITEM');
+    const total = BigInt(item.quantity) * BigInt(item.unitCostUsdCents); if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('INVALID_PURCHASE_ITEM');
+    productIds.add(item.productId);
+  }
+  const db = await dbPromise; const now = new Date().toISOString(); let receiptId = 0;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const supplier = await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=? AND is_active=1', input.supplierId);
+    if (!supplier) throw new Error('SUPPLIER_INACTIVE');
+    const result = await transaction.runAsync(`INSERT INTO purchase_receipts(uuid,supplier_id,supplier_uuid_snapshot,supplier_name_snapshot,reference_number,note,received_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?)`, createUuid(), supplier.id, supplier.uuid, supplier.name, reference, note, now, now);
+    receiptId = result.lastInsertRowId;
+    for (const item of input.items) {
+      const product = await transaction.getFirstAsync<Product & { tracking_enabled: number; quantity: number }>(`SELECT p.*,b.tracking_enabled,b.quantity FROM products p JOIN inventory_balances b ON b.product_id=p.id WHERE p.id=? AND p.is_active=1 AND b.tracking_enabled=1`, item.productId);
+      if (!product) throw new Error('PRODUCT_NOT_TRACKED');
+      const lineTotal = item.quantity * item.unitCostUsdCents;
+      const itemResult = await transaction.runAsync(`INSERT INTO purchase_receipt_items(uuid,purchase_receipt_id,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,quantity,unit_cost_usd_cents,line_total_usd_cents,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`, createUuid(), receiptId, product.id, product.uuid, product.name, product.barcode, item.quantity, item.unitCostUsdCents, lineTotal, now);
+      const after = product.quantity + item.quantity; if (!Number.isSafeInteger(after)) throw new Error('INVALID_PURCHASE_ITEM');
+      const changed = await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND quantity=? AND tracking_enabled=1', after, now, product.id, product.quantity);
+      if (!changed.changes) throw new Error('INVENTORY_CONCURRENT_UPDATE');
+      await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,purchase_receipt_item_id,note,created_at)
+        VALUES(?,?,?,?,?,'purchase',?,?,?,?,?,?)`, createUuid(), product.id, product.uuid, product.name, product.barcode, item.quantity, product.quantity, after, itemResult.lastInsertRowId, reference, now);
+    }
+  });
+  const receipt = await getPurchaseReceiptDetail(receiptId); if (!receipt) throw new Error('PURCHASE_RECEIPT_NOT_FOUND'); return receipt;
 }
 
 export async function getCategories() {

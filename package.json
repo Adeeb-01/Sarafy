@@ -26,6 +26,7 @@
     "test:phase14": "node --test scripts/phase14-multi-currency.test.mjs",
     "test:phase14.5": "node --test scripts/phase14_5-session-history.test.mjs",
     "test:phase15": "node --test scripts/phase15-inventory.test.mjs",
+    "test:phase16": "node --test scripts/phase16-suppliers-purchases.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

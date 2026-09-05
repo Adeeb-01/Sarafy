@@ -157,7 +157,7 @@ export interface SaleItemInput {
   unitCostSyp: number;
 }
 
-export type InventoryMovementType = 'opening' | 'stock_in' | 'stock_out' | 'adjustment' | 'sale' | 'return';
+export type InventoryMovementType = 'opening' | 'stock_in' | 'stock_out' | 'adjustment' | 'sale' | 'return' | 'purchase';
 export type InventoryStockStatus = 'in_stock' | 'low_stock' | 'out_of_stock';
 
 export interface InventoryBalance {
@@ -191,6 +191,7 @@ export interface InventoryMovement {
   quantity_after: number;
   sale_item_id: number | null;
   return_item_id: number | null;
+  purchase_receipt_item_id: number | null;
   note: string | null;
   created_at: string;
 }
@@ -213,7 +214,61 @@ export interface InventoryHealthReport {
   latestBalanceMismatches: number;
   duplicateSaleMovements: number;
   duplicateReturnMovements: number;
+  duplicatePurchaseMovements: number;
+  invalidPurchaseMovements: number;
+  missingPurchaseMovements: number;
 }
+
+export interface Supplier {
+  id: number;
+  uuid: string;
+  name: string;
+  phone: string | null;
+  address: string | null;
+  note: string | null;
+  is_active: number;
+  created_at: string;
+  updated_at: string;
+  receipt_count?: number;
+  latest_receipt_at?: string | null;
+}
+
+export type SupplierInput = Pick<Supplier, 'name' | 'phone' | 'address' | 'note'>;
+export type SupplierSort = 'name' | 'newest';
+
+export interface PurchaseReceiptItem {
+  id: number;
+  uuid: string;
+  purchase_receipt_id: number;
+  product_id: number | null;
+  product_uuid_snapshot: string;
+  product_name_snapshot: string;
+  barcode_snapshot: string | null;
+  quantity: number;
+  unit_cost_usd_cents: number;
+  line_total_usd_cents: number;
+  created_at: string;
+}
+
+export interface PurchaseReceipt {
+  id: number;
+  uuid: string;
+  supplier_id: number | null;
+  supplier_uuid_snapshot: string;
+  supplier_name_snapshot: string;
+  reference_number: string | null;
+  note: string | null;
+  received_at: string;
+  created_at: string;
+  item_count: number;
+  total_quantity: number;
+  total_cost_usd_cents: number;
+  items?: PurchaseReceiptItem[];
+}
+
+export interface PurchaseReceiptInputItem { productId: number; quantity: number; unitCostUsdCents: number }
+export interface PurchaseReceiptInput { supplierId: number; referenceNumber?: string | null; note?: string | null; items: PurchaseReceiptInputItem[] }
+export interface PurchaseReceiptQuery { search?: string; period?: 'all' | 'today' | 'week' | 'month'; supplierId?: number; sort?: 'newest' | 'oldest' | 'highest' | 'lowest'; limit?: number }
 
 export interface PaymentInfo {
   amountPaidSyp: number;

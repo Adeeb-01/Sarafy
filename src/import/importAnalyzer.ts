@@ -22,6 +22,9 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
   if (options.mode !== 'full_restore' && ((payload.inventoryBalances?.length ?? 0) || (payload.inventoryMovements?.length ?? 0))) {
     issues.push({ entity: 'inventory_balances', row: 0, code: 'OPERATIONAL_STOCK_SKIPPED_SAFE_MERGE', action: 'skipped' });
   }
+  if (options.mode !== 'full_restore' && (payload.purchaseReceipts?.length ?? 0) > 0) {
+    issues.push({ entity: 'purchase_receipts', row: 0, code: 'PURCHASE_HISTORY_SKIPPED_SAFE_MERGE', action: 'skipped' });
+  }
   const localCashSessions = await db.getAllAsync<Record<string, unknown> & { uuid: string }>('SELECT * FROM cash_sessions');
   const localSessionByUuid = new Map(localCashSessions.map(row => [row.uuid, row]));
   const localSessions = new Set(localSessionByUuid.keys());
@@ -162,6 +165,19 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
       if (seen.has(category.uuid)) { summary.duplicates += 1; issues.push({ entity: 'expense_categories', row: index + 1, code: 'DUPLICATE_UUID', action: 'rejected' }); continue; }
       seen.add(category.uuid); const existing = local.get(category.uuid);
       if (!existing) summary.newRecords += 1; else if (Date.parse(category.updated_at) > Date.parse(existing.updated_at)) summary.updatedRecords += 1; else summary.unchangedRecords += 1;
+    }
+  }
+  if (options.entities.includes('suppliers')) {
+    const local = new Map((await db.getAllAsync<Record<string, unknown> & { uuid: string; updated_at: string }>('SELECT * FROM suppliers')).map(row => [row.uuid, row]));
+    const seen = new Set<string>();
+    for (const [index, supplier] of (payload.suppliers ?? []).entries()) {
+      if (!isUuid(supplier.uuid)) { summary.invalidRecords += 1; issues.push({ entity: 'suppliers', row: index + 1, field: 'uuid', code: 'INVALID_UUID', action: 'rejected' }); continue; }
+      if (seen.has(supplier.uuid)) { summary.duplicates += 1; issues.push({ entity: 'suppliers', row: index + 1, field: 'uuid', code: 'DUPLICATE_UUID', action: 'rejected' }); continue; }
+      seen.add(supplier.uuid); const existing = local.get(supplier.uuid);
+      if (!existing) summary.newRecords += 1;
+      else if (comparable(existing) === comparable(supplier)) summary.unchangedRecords += 1;
+      else if (options.conflictStrategy === 'manual') { summary.conflicts += 1; issues.push({ entity: 'suppliers', row: index + 1, code: 'SUPPLIER_CONFLICT', action: 'review' }); }
+      else summary.updatedRecords += 1;
     }
   }
   if (options.entities.includes('expenses')) {

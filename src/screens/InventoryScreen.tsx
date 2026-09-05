@@ -7,6 +7,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
 import { InventoryDetail, InventoryListItem, InventoryQuery, Product } from '@/types';
 import { formatNumber } from '@/utils/formatters';
+import { PurchasesScreen } from '@/screens/PurchasesScreen';
 
 type Editor = { kind: 'enable'; product: Product | null } | { kind: 'adjust'; item: InventoryListItem; mode: 'stock_in' | 'stock_out' | 'physical_count' };
 
@@ -15,13 +16,16 @@ export function InventoryScreen({ bottomNavigationInset = 0 }: { bottomNavigatio
   const [items, setItems] = useState<InventoryListItem[]>([]); const [metrics, setMetrics] = useState({ tracked: 0, lowStock: 0, outOfStock: 0 });
   const [search, setSearch] = useState(''); const [status, setStatus] = useState<InventoryQuery['status']>('all'); const [sort, setSort] = useState<NonNullable<InventoryQuery['sort']>>('name');
   const [loading, setLoading] = useState(true); const [editor, setEditor] = useState<Editor | null>(null); const [detail, setDetail] = useState<InventoryDetail | null>(null);
+  const [workspace, setWorkspace] = useState<'inventory' | 'suppliers' | 'receipts'>('inventory');
   const refresh = useCallback(async () => { setLoading(true); try { const [rows, summary] = await Promise.all([store.queryInventory({ search, status, sort }), store.getInventoryMetrics()]); setItems(rows); setMetrics(summary); } finally { setLoading(false); } }, [search, sort, status, store]);
   useEffect(() => { const timer = setTimeout(() => void refresh(), 180); return () => clearTimeout(timer); }, [refresh]);
   const untracked = useMemo(() => store.products.filter(product => product.is_active !== 0 && !product.inventory_tracking_enabled), [store.products]);
   const openDetail = useCallback(async (item: InventoryListItem) => { const value = await store.getInventoryDetail(item.product_id); setDetail(value); }, [store]);
   const statusOptions = [{ value: 'all' as const, label: copy.inventory.all }, { value: 'low_stock' as const, label: copy.inventory.lowStock }, { value: 'out_of_stock' as const, label: copy.inventory.outOfStock }, { value: 'in_stock' as const, label: copy.inventory.inStock }];
+  if (workspace !== 'inventory') return <PurchasesScreen section={workspace} onSectionChange={setWorkspace} bottomNavigationInset={bottomNavigationInset} />;
   return <ScreenContainer><View style={styles.page}>
     <View style={styles.header}><View style={[styles.titleRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={styles.flex}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.inventory.title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.inventory.subtitle}</Text></View><AppButton label={copy.inventory.enable} icon="plus" onPress={() => setEditor({ kind: 'enable', product: null })} /></View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}><Chip label={copy.purchase.inventoryTab} active onPress={() => setWorkspace('inventory')} /><Chip label={copy.purchase.suppliersTab} active={false} onPress={() => setWorkspace('suppliers')} /><Chip label={copy.purchase.receiptsTab} active={false} onPress={() => setWorkspace('receipts')} /></ScrollView>
       <View style={[styles.metrics, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><Metric label={copy.inventory.tracked} value={metrics.tracked} /><Metric label={copy.inventory.lowStock} value={metrics.lowStock} warning /><Metric label={copy.inventory.outOfStock} value={metrics.outOfStock} warning /></View>
       <AppButton label={copy.inventory.health} icon="shield" variant="secondary" onPress={() => void store.auditInventoryHealth().then(report => { const issueCount = Object.values(report).reduce((sum, value) => sum + value, 0); snackbar.show({ text: issueCount ? copy.inventory.failed : copy.inventory.noIssues, tone: issueCount ? 'error' : 'success' }); }).catch(() => snackbar.show({ text: copy.inventory.failed, tone: 'error' }))} />
       <SearchInput value={search} onChangeText={setSearch} placeholder={copy.inventory.search} clearLabel={copy.common.clearSearch} rtl={rtl} />

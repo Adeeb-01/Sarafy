@@ -1,8 +1,8 @@
-import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryMovementType, Product, Sale, Settings, SuspendedSale } from '@/types';
+import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryMovementType, Product, Sale, Settings, Supplier, SuspendedSale } from '@/types';
 
 export type ImportMode = 'safe_merge' | 'selective' | 'full_restore';
 export type ConflictStrategy = 'newest' | 'keep_local' | 'use_imported' | 'manual';
-export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_payments' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'inventory_balances' | 'inventory_movements' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
+export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_payments' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'inventory_balances' | 'inventory_movements' | 'suppliers' | 'purchase_receipts' | 'purchase_receipt_items' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
 
 export interface PortableSalePayment {
   uuid: string; sale_uuid: string; currency: 'SYP' | 'USD'; amount_minor: number;
@@ -26,7 +26,17 @@ export interface PortableInventoryBalance { product_uuid: string; tracking_enabl
 export interface PortableInventoryMovement {
   uuid: string; product_uuid: string; product_uuid_snapshot: string; product_name_snapshot: string; barcode_snapshot: string | null;
   movement_type: InventoryMovementType; quantity_delta: number; quantity_before: number; quantity_after: number;
-  sale_item_uuid: string | null; return_item_uuid: string | null; note: string | null; created_at: string;
+  sale_item_uuid: string | null; return_item_uuid: string | null; purchase_receipt_item_uuid?: string | null; note: string | null; created_at: string;
+}
+
+export type PortableSupplier = Omit<Supplier, 'id' | 'receipt_count' | 'latest_receipt_at'>;
+export interface PortablePurchaseReceiptItem {
+  uuid: string; product_uuid: string | null; product_uuid_snapshot: string; product_name_snapshot: string; barcode_snapshot: string | null;
+  quantity: number; unit_cost_usd_cents: number; line_total_usd_cents: number; created_at: string;
+}
+export interface PortablePurchaseReceipt {
+  uuid: string; supplier_uuid: string | null; supplier_uuid_snapshot: string; supplier_name_snapshot: string; reference_number: string | null;
+  note: string | null; received_at: string; created_at: string; items: PortablePurchaseReceiptItem[];
 }
 
 export interface PortableCategory {
@@ -53,6 +63,8 @@ export interface ImportPayload {
   cashSessions?: PortableCashSession[];
   inventoryBalances?: PortableInventoryBalance[];
   inventoryMovements?: PortableInventoryMovement[];
+  suppliers?: PortableSupplier[];
+  purchaseReceipts?: PortablePurchaseReceipt[];
 }
 
 export interface ImportOptions {

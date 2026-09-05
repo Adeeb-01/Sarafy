@@ -39,6 +39,9 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
     if (options.mode === 'full_restore') {
       await transaction.runAsync('DELETE FROM inventory_movements');
       await transaction.runAsync('DELETE FROM inventory_balances');
+      await transaction.runAsync('DELETE FROM purchase_receipt_items');
+      await transaction.runAsync('DELETE FROM purchase_receipts');
+      await transaction.runAsync('DELETE FROM suppliers');
       await transaction.runAsync('DELETE FROM sale_payments');
       await transaction.runAsync('DELETE FROM sale_return_items');
       await transaction.runAsync('DELETE FROM sale_returns');
@@ -147,6 +150,18 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
       if (localProductByImportedId.has(oldId)) continue;
       const row = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM products WHERE uuid=?', uuid);
       if (row) localProductByImportedId.set(oldId, row.id);
+    }
+    if (options.entities.includes('suppliers')) {
+      for (const supplier of payload.suppliers ?? []) {
+        const local = await transaction.getFirstAsync<{ id: number; updated_at: string }>('SELECT id,updated_at FROM suppliers WHERE uuid=?', supplier.uuid);
+        if (!local) {
+          await transaction.runAsync('INSERT INTO suppliers(uuid,name,phone,address,note,is_active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)', supplier.uuid, supplier.name, supplier.phone, supplier.address, supplier.note, supplier.is_active ? 1 : 0, supplier.created_at, supplier.updated_at);
+          inserted += 1;
+        } else if (shouldUseImported(local.updated_at, supplier.updated_at, options)) {
+          await transaction.runAsync('UPDATE suppliers SET name=?,phone=?,address=?,note=?,is_active=?,updated_at=? WHERE id=?', supplier.name, supplier.phone, supplier.address, supplier.note, supplier.is_active ? 1 : 0, supplier.updated_at, local.id);
+          updated += 1;
+        } else skipped += 1;
+      }
     }
     if (options.entities.includes('sales')) {
       for (const sale of payload.sales) {
@@ -290,6 +305,24 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
         inserted += 1;
       }
     }
+    if (options.mode === 'full_restore' && options.entities.includes('purchase_receipts')) {
+      for (const receipt of payload.purchaseReceipts ?? []) {
+        const supplier = receipt.supplier_uuid ? await transaction.getFirstAsync<{ id: number }>('SELECT id FROM suppliers WHERE uuid=?', receipt.supplier_uuid) : null;
+        if (receipt.supplier_uuid && !supplier) throw new Error('PURCHASE_SUPPLIER_PARENT_MISSING');
+        const insertedReceipt = await transaction.runAsync(`INSERT INTO purchase_receipts(uuid,supplier_id,supplier_uuid_snapshot,supplier_name_snapshot,reference_number,note,received_at,created_at)
+          VALUES(?,?,?,?,?,?,?,?)`, receipt.uuid, supplier?.id ?? null, receipt.supplier_uuid_snapshot, receipt.supplier_name_snapshot, receipt.reference_number, receipt.note, receipt.received_at, receipt.created_at);
+        inserted += 1;
+        if (!options.entities.includes('purchase_receipt_items')) continue;
+        for (const item of receipt.items) {
+          const product = item.product_uuid ? await transaction.getFirstAsync<{ id: number }>('SELECT id FROM products WHERE uuid=?', item.product_uuid) : null;
+          if (item.product_uuid && !product) throw new Error('PURCHASE_PRODUCT_PARENT_MISSING');
+          if (!Number.isSafeInteger(item.quantity) || item.quantity <= 0 || !Number.isSafeInteger(item.unit_cost_usd_cents) || item.unit_cost_usd_cents < 0 || item.line_total_usd_cents !== item.quantity * item.unit_cost_usd_cents) throw new Error('INVALID_PURCHASE_ITEM');
+          await transaction.runAsync(`INSERT INTO purchase_receipt_items(uuid,purchase_receipt_id,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,quantity,unit_cost_usd_cents,line_total_usd_cents,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)`, item.uuid, insertedReceipt.lastInsertRowId, product?.id ?? null, item.product_uuid_snapshot, item.product_name_snapshot, item.barcode_snapshot, item.quantity, item.unit_cost_usd_cents, item.line_total_usd_cents, item.created_at);
+          inserted += 1;
+        }
+      }
+    } else if (payload.purchaseReceipts?.length) skipped += payload.purchaseReceipts.reduce((sum, receipt) => sum + 1 + receipt.items.length, 0);
     if (options.mode === 'full_restore' && options.entities.includes('inventory_balances')) {
       const productRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM products');
       const productIdByUuid = new Map(productRows.map(row => [row.uuid, row.id]));
@@ -303,18 +336,26 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
       if (options.entities.includes('inventory_movements')) {
         const saleItemRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM sale_items');
         const returnItemRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM sale_return_items');
+        const purchaseItemRows = await transaction.getAllAsync<{ id: number; uuid: string; quantity: number; product_uuid_snapshot: string }>('SELECT id,uuid,quantity,product_uuid_snapshot FROM purchase_receipt_items');
         const saleItemIdByUuid = new Map(saleItemRows.map(row => [row.uuid, row.id]));
         const returnItemIdByUuid = new Map(returnItemRows.map(row => [row.uuid, row.id]));
+        const purchaseItemByUuid = new Map(purchaseItemRows.map(row => [row.uuid, row]));
         for (const movement of payload.inventoryMovements ?? []) {
           const productId = productIdByUuid.get(movement.product_uuid);
           const saleItemId = movement.sale_item_uuid ? saleItemIdByUuid.get(movement.sale_item_uuid) : null;
           const returnItemId = movement.return_item_uuid ? returnItemIdByUuid.get(movement.return_item_uuid) : null;
-          if (!productId || (movement.sale_item_uuid && !saleItemId) || (movement.return_item_uuid && !returnItemId)) throw new Error('INVENTORY_MOVEMENT_PARENT_MISSING');
-          await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,return_item_id,note,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, movement.uuid, productId, movement.product_uuid_snapshot, movement.product_name_snapshot, movement.barcode_snapshot,
-          movement.movement_type, movement.quantity_delta, movement.quantity_before, movement.quantity_after, saleItemId ?? null, returnItemId ?? null, movement.note, movement.created_at);
+          const purchaseItem = movement.purchase_receipt_item_uuid ? purchaseItemByUuid.get(movement.purchase_receipt_item_uuid) : null;
+          if (!productId || (movement.sale_item_uuid && !saleItemId) || (movement.return_item_uuid && !returnItemId) || (movement.purchase_receipt_item_uuid && !purchaseItem)) throw new Error('INVENTORY_MOVEMENT_PARENT_MISSING');
+          if (movement.movement_type === 'purchase' && (!purchaseItem || movement.quantity_delta !== purchaseItem.quantity || movement.product_uuid_snapshot !== purchaseItem.product_uuid_snapshot)) throw new Error('INVALID_PURCHASE_MOVEMENT');
+          await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,return_item_id,purchase_receipt_item_id,note,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, movement.uuid, productId, movement.product_uuid_snapshot, movement.product_name_snapshot, movement.barcode_snapshot,
+          movement.movement_type, movement.quantity_delta, movement.quantity_before, movement.quantity_after, saleItemId ?? null, returnItemId ?? null, purchaseItem?.id ?? null, movement.note, movement.created_at);
           inserted += 1;
         }
+        const invalidLedger = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM inventory_movements WHERE quantity_after<>quantity_before+quantity_delta`);
+        const invalidBalances = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM inventory_balances b WHERE EXISTS(SELECT 1 FROM inventory_movements m WHERE m.product_id=b.product_id) AND b.quantity<>(SELECT quantity_after FROM inventory_movements m WHERE m.product_id=b.product_id ORDER BY id DESC LIMIT 1)`);
+        const missingPurchases = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM purchase_receipt_items pi WHERE NOT EXISTS(SELECT 1 FROM inventory_movements m WHERE m.purchase_receipt_item_id=pi.id AND m.movement_type='purchase')`);
+        if ((invalidLedger?.count ?? 0) || (invalidBalances?.count ?? 0) || (missingPurchases?.count ?? 0)) throw new Error('INVALID_INVENTORY_LEDGER');
       }
     } else if ((payload.inventoryBalances?.length ?? 0) || (payload.inventoryMovements?.length ?? 0)) {
       skipped += (payload.inventoryBalances?.length ?? 0) + (payload.inventoryMovements?.length ?? 0);
@@ -353,8 +394,8 @@ export function defaultImportOptions(mode: ImportOptions['mode'] = 'safe_merge')
     mode,
     conflictStrategy: 'newest',
     entities: mode === 'full_restore'
-      ? ['products', 'categories', 'settings', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'inventory_balances', 'inventory_movements', 'product_images', 'sale_drafts', 'sale_draft_items']
-      : ['products', 'categories', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'product_images'],
+      ? ['products', 'categories', 'settings', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'purchase_receipts', 'purchase_receipt_items', 'inventory_balances', 'inventory_movements', 'product_images', 'sale_drafts', 'sale_draft_items']
+      : ['products', 'categories', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'product_images'],
     importSettings: mode === 'full_restore',
   };
 }
@@ -388,10 +429,41 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
     if (!isUuid(balance.product_uuid) || !Number.isSafeInteger(balance.quantity) || balance.quantity < 0 || ![0, 1].includes(balance.tracking_enabled) ||
         (balance.low_stock_threshold != null && (!Number.isSafeInteger(balance.low_stock_threshold) || balance.low_stock_threshold < 0)) || !validDate(balance.created_at) || !validDate(balance.updated_at)) throw new Error('INVALID_INVENTORY_BALANCE');
   }
+  const purchaseItemByUuid = new Map((payload.purchaseReceipts ?? []).flatMap(receipt => receipt.items.map(item => [item.uuid, item] as const)));
   for (const movement of payload.inventoryMovements ?? []) {
-    if (!isUuid(movement.uuid) || !isUuid(movement.product_uuid) || !isUuid(movement.product_uuid_snapshot) || !['opening','stock_in','stock_out','adjustment','sale','return'].includes(movement.movement_type) ||
+    if (!isUuid(movement.uuid) || !isUuid(movement.product_uuid) || !isUuid(movement.product_uuid_snapshot) || !['opening','stock_in','stock_out','adjustment','sale','return','purchase'].includes(movement.movement_type) ||
         !Number.isSafeInteger(movement.quantity_delta) || movement.quantity_delta === 0 || !Number.isSafeInteger(movement.quantity_before) || !Number.isSafeInteger(movement.quantity_after) ||
         movement.quantity_before < 0 || movement.quantity_after < 0 || movement.quantity_after !== movement.quantity_before + movement.quantity_delta || !validDate(movement.created_at)) throw new Error('INVALID_INVENTORY_MOVEMENT');
+    if (movement.purchase_receipt_item_uuid != null && !isUuid(movement.purchase_receipt_item_uuid)) throw new Error('INVALID_PURCHASE_REFERENCE');
+    if (movement.movement_type === 'purchase') {
+      const item = movement.purchase_receipt_item_uuid ? purchaseItemByUuid.get(movement.purchase_receipt_item_uuid) : null;
+      if (!item || movement.quantity_delta !== item.quantity || movement.product_uuid_snapshot !== item.product_uuid_snapshot) throw new Error('INVALID_PURCHASE_MOVEMENT');
+    } else if (movement.purchase_receipt_item_uuid != null) throw new Error('INVALID_PURCHASE_MOVEMENT');
+  }
+  const supplierUuids = new Set<string>();
+  for (const supplier of payload.suppliers ?? []) {
+    if (!isRecord(supplier) || !isUuid(supplier.uuid) || supplierUuids.has(supplier.uuid) || typeof supplier.name !== 'string' || !supplier.name.trim() || supplier.name.length > 120 ||
+        (supplier.phone != null && (typeof supplier.phone !== 'string' || supplier.phone.length > 60)) ||
+        (supplier.address != null && (typeof supplier.address !== 'string' || supplier.address.length > 240)) ||
+        (supplier.note != null && (typeof supplier.note !== 'string' || supplier.note.length > 500)) || ![0, 1].includes(supplier.is_active) ||
+        !validDate(supplier.created_at) || !validDate(supplier.updated_at)) throw new Error('INVALID_SUPPLIER');
+    supplierUuids.add(supplier.uuid);
+  }
+  const receiptUuids = new Set<string>(); const purchaseItemUuids = new Set<string>();
+  for (const receipt of payload.purchaseReceipts ?? []) {
+    if (!isRecord(receipt) || !isUuid(receipt.uuid) || receiptUuids.has(receipt.uuid) || !isUuid(receipt.supplier_uuid_snapshot) ||
+        (receipt.supplier_uuid != null && !isUuid(receipt.supplier_uuid)) || typeof receipt.supplier_name_snapshot !== 'string' || !receipt.supplier_name_snapshot.trim() ||
+        (receipt.reference_number != null && (typeof receipt.reference_number !== 'string' || receipt.reference_number.length > 120)) ||
+        (receipt.note != null && (typeof receipt.note !== 'string' || receipt.note.length > 500)) || !validDate(receipt.received_at) || !validDate(receipt.created_at) || !Array.isArray(receipt.items) || !receipt.items.length) throw new Error('INVALID_PURCHASE_RECEIPT');
+    receiptUuids.add(receipt.uuid);
+    for (const item of receipt.items) {
+      if (!isRecord(item) || !isUuid(item.uuid) || purchaseItemUuids.has(item.uuid) || !isUuid(item.product_uuid_snapshot) ||
+          (item.product_uuid != null && !isUuid(item.product_uuid)) || typeof item.product_name_snapshot !== 'string' || !item.product_name_snapshot.trim() ||
+          (item.barcode_snapshot != null && typeof item.barcode_snapshot !== 'string') || !Number.isSafeInteger(item.quantity) || item.quantity <= 0 ||
+          !Number.isSafeInteger(item.unit_cost_usd_cents) || item.unit_cost_usd_cents < 0 || !Number.isSafeInteger(item.line_total_usd_cents) ||
+          item.line_total_usd_cents !== item.quantity * item.unit_cost_usd_cents || !validDate(item.created_at)) throw new Error('INVALID_PURCHASE_ITEM');
+      purchaseItemUuids.add(item.uuid);
+    }
   }
   for (const sale of payload.sales) {
     if (!sale || !isRecord(sale) || !isUuid(sale.uuid) || typeof sale.invoice_number !== 'string' ||
