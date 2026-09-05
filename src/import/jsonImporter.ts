@@ -39,6 +39,8 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
     if (options.mode === 'full_restore') {
       await transaction.runAsync('DELETE FROM inventory_movements');
       await transaction.runAsync('DELETE FROM inventory_balances');
+      await transaction.runAsync('DELETE FROM purchase_return_items');
+      await transaction.runAsync('DELETE FROM purchase_returns');
       await transaction.runAsync('DELETE FROM purchase_receipt_items');
       await transaction.runAsync('DELETE FROM purchase_receipts');
       await transaction.runAsync('DELETE FROM suppliers');
@@ -323,6 +325,29 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
         }
       }
     } else if (payload.purchaseReceipts?.length) skipped += payload.purchaseReceipts.reduce((sum, receipt) => sum + 1 + receipt.items.length, 0);
+    if (options.mode === 'full_restore' && options.entities.includes('purchase_returns')) {
+      const receiptRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM purchase_receipts');
+      const purchaseItemRows = await transaction.getAllAsync<{ id: number; uuid: string; purchase_receipt_id: number; quantity: number; product_uuid_snapshot: string }>('SELECT id,uuid,purchase_receipt_id,quantity,product_uuid_snapshot FROM purchase_receipt_items');
+      const receiptIdByUuid = new Map(receiptRows.map(row => [row.uuid, row.id])); const itemByUuid = new Map(purchaseItemRows.map(row => [row.uuid, row]));
+      const cumulative = new Map<number, number>();
+      for (const record of payload.purchaseReturns ?? []) {
+        const receiptId = receiptIdByUuid.get(record.purchase_receipt_uuid); if (!receiptId) throw new Error('PURCHASE_RETURN_RECEIPT_PARENT_MISSING');
+        const insertedReturn = await transaction.runAsync(`INSERT INTO purchase_returns(uuid,purchase_receipt_id,supplier_uuid_snapshot,supplier_name_snapshot,created_at,total_quantity,total_value_usd_cents,reference_number,note)
+          VALUES(?,?,?,?,?,?,?,?,?)`, record.uuid, receiptId, record.supplier_uuid_snapshot, record.supplier_name_snapshot, record.created_at, record.total_quantity, record.total_value_usd_cents, record.reference_number, record.note);
+        inserted += 1; let quantityTotal = 0; let valueTotal = 0;
+        for (const item of record.items) {
+          const parent = itemByUuid.get(item.purchase_receipt_item_uuid);
+          if (!parent || parent.purchase_receipt_id !== receiptId) throw new Error('PURCHASE_RETURN_ITEM_PARENT_MISSING');
+          const next = (cumulative.get(parent.id) ?? 0) + item.quantity;
+          if (next > parent.quantity) throw new Error('PURCHASE_OVER_RETURN');
+          cumulative.set(parent.id, next); quantityTotal += item.quantity; valueTotal += item.line_total_usd_cents;
+          await transaction.runAsync(`INSERT INTO purchase_return_items(uuid,purchase_return_id,purchase_receipt_item_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,quantity,unit_cost_usd_cents,line_total_usd_cents,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)`, item.uuid, insertedReturn.lastInsertRowId, parent.id, item.product_uuid_snapshot, item.product_name_snapshot, item.barcode_snapshot, item.quantity, item.unit_cost_usd_cents, item.line_total_usd_cents, item.created_at);
+          inserted += 1;
+        }
+        if (quantityTotal !== record.total_quantity || valueTotal !== record.total_value_usd_cents) throw new Error('INVALID_PURCHASE_RETURN_TOTAL');
+      }
+    } else if (payload.purchaseReturns?.length) skipped += payload.purchaseReturns.reduce((sum, record) => sum + 1 + record.items.length, 0);
     if (options.mode === 'full_restore' && options.entities.includes('inventory_balances')) {
       const productRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM products');
       const productIdByUuid = new Map(productRows.map(row => [row.uuid, row.id]));
@@ -337,25 +362,30 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
         const saleItemRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM sale_items');
         const returnItemRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM sale_return_items');
         const purchaseItemRows = await transaction.getAllAsync<{ id: number; uuid: string; quantity: number; product_uuid_snapshot: string }>('SELECT id,uuid,quantity,product_uuid_snapshot FROM purchase_receipt_items');
+        const purchaseReturnItemRows = await transaction.getAllAsync<{ id: number; uuid: string; quantity: number; product_uuid_snapshot: string }>('SELECT id,uuid,quantity,product_uuid_snapshot FROM purchase_return_items');
         const saleItemIdByUuid = new Map(saleItemRows.map(row => [row.uuid, row.id]));
         const returnItemIdByUuid = new Map(returnItemRows.map(row => [row.uuid, row.id]));
         const purchaseItemByUuid = new Map(purchaseItemRows.map(row => [row.uuid, row]));
+        const purchaseReturnItemByUuid = new Map(purchaseReturnItemRows.map(row => [row.uuid, row]));
         for (const movement of payload.inventoryMovements ?? []) {
           const productId = productIdByUuid.get(movement.product_uuid);
           const saleItemId = movement.sale_item_uuid ? saleItemIdByUuid.get(movement.sale_item_uuid) : null;
           const returnItemId = movement.return_item_uuid ? returnItemIdByUuid.get(movement.return_item_uuid) : null;
           const purchaseItem = movement.purchase_receipt_item_uuid ? purchaseItemByUuid.get(movement.purchase_receipt_item_uuid) : null;
-          if (!productId || (movement.sale_item_uuid && !saleItemId) || (movement.return_item_uuid && !returnItemId) || (movement.purchase_receipt_item_uuid && !purchaseItem)) throw new Error('INVENTORY_MOVEMENT_PARENT_MISSING');
+          const purchaseReturnItem = movement.purchase_return_item_uuid ? purchaseReturnItemByUuid.get(movement.purchase_return_item_uuid) : null;
+          if (!productId || (movement.sale_item_uuid && !saleItemId) || (movement.return_item_uuid && !returnItemId) || (movement.purchase_receipt_item_uuid && !purchaseItem) || (movement.purchase_return_item_uuid && !purchaseReturnItem)) throw new Error('INVENTORY_MOVEMENT_PARENT_MISSING');
           if (movement.movement_type === 'purchase' && (!purchaseItem || movement.quantity_delta !== purchaseItem.quantity || movement.product_uuid_snapshot !== purchaseItem.product_uuid_snapshot)) throw new Error('INVALID_PURCHASE_MOVEMENT');
-          await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,return_item_id,purchase_receipt_item_id,note,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, movement.uuid, productId, movement.product_uuid_snapshot, movement.product_name_snapshot, movement.barcode_snapshot,
-          movement.movement_type, movement.quantity_delta, movement.quantity_before, movement.quantity_after, saleItemId ?? null, returnItemId ?? null, purchaseItem?.id ?? null, movement.note, movement.created_at);
+          if (movement.movement_type === 'purchase_return' && (!purchaseReturnItem || movement.quantity_delta !== -purchaseReturnItem.quantity || movement.product_uuid_snapshot !== purchaseReturnItem.product_uuid_snapshot)) throw new Error('INVALID_PURCHASE_RETURN_MOVEMENT');
+          await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,return_item_id,purchase_receipt_item_id,purchase_return_item_id,note,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, movement.uuid, productId, movement.product_uuid_snapshot, movement.product_name_snapshot, movement.barcode_snapshot,
+          movement.movement_type, movement.quantity_delta, movement.quantity_before, movement.quantity_after, saleItemId ?? null, returnItemId ?? null, purchaseItem?.id ?? null, purchaseReturnItem?.id ?? null, movement.note, movement.created_at);
           inserted += 1;
         }
         const invalidLedger = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM inventory_movements WHERE quantity_after<>quantity_before+quantity_delta`);
         const invalidBalances = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM inventory_balances b WHERE EXISTS(SELECT 1 FROM inventory_movements m WHERE m.product_id=b.product_id) AND b.quantity<>(SELECT quantity_after FROM inventory_movements m WHERE m.product_id=b.product_id ORDER BY id DESC LIMIT 1)`);
         const missingPurchases = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM purchase_receipt_items pi WHERE NOT EXISTS(SELECT 1 FROM inventory_movements m WHERE m.purchase_receipt_item_id=pi.id AND m.movement_type='purchase')`);
-        if ((invalidLedger?.count ?? 0) || (invalidBalances?.count ?? 0) || (missingPurchases?.count ?? 0)) throw new Error('INVALID_INVENTORY_LEDGER');
+        const missingPurchaseReturns = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM purchase_return_items ri WHERE NOT EXISTS(SELECT 1 FROM inventory_movements m WHERE m.purchase_return_item_id=ri.id AND m.movement_type='purchase_return')`);
+        if ((invalidLedger?.count ?? 0) || (invalidBalances?.count ?? 0) || (missingPurchases?.count ?? 0) || (missingPurchaseReturns?.count ?? 0)) throw new Error('INVALID_INVENTORY_LEDGER');
       }
     } else if ((payload.inventoryBalances?.length ?? 0) || (payload.inventoryMovements?.length ?? 0)) {
       skipped += (payload.inventoryBalances?.length ?? 0) + (payload.inventoryMovements?.length ?? 0);
@@ -394,7 +424,7 @@ export function defaultImportOptions(mode: ImportOptions['mode'] = 'safe_merge')
     mode,
     conflictStrategy: 'newest',
     entities: mode === 'full_restore'
-      ? ['products', 'categories', 'settings', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'purchase_receipts', 'purchase_receipt_items', 'inventory_balances', 'inventory_movements', 'product_images', 'sale_drafts', 'sale_draft_items']
+      ? ['products', 'categories', 'settings', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'purchase_receipts', 'purchase_receipt_items', 'purchase_returns', 'purchase_return_items', 'inventory_balances', 'inventory_movements', 'product_images', 'sale_drafts', 'sale_draft_items']
       : ['products', 'categories', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'product_images'],
     importSettings: mode === 'full_restore',
   };
@@ -430,16 +460,26 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
         (balance.low_stock_threshold != null && (!Number.isSafeInteger(balance.low_stock_threshold) || balance.low_stock_threshold < 0)) || !validDate(balance.created_at) || !validDate(balance.updated_at)) throw new Error('INVALID_INVENTORY_BALANCE');
   }
   const purchaseItemByUuid = new Map((payload.purchaseReceipts ?? []).flatMap(receipt => receipt.items.map(item => [item.uuid, item] as const)));
+  const purchaseReturnItemByUuid = new Map((payload.purchaseReturns ?? []).flatMap(record => record.items.map(item => [item.uuid, item] as const)));
+  const purchaseReturnMovementRefs = new Set<string>();
   for (const movement of payload.inventoryMovements ?? []) {
-    if (!isUuid(movement.uuid) || !isUuid(movement.product_uuid) || !isUuid(movement.product_uuid_snapshot) || !['opening','stock_in','stock_out','adjustment','sale','return','purchase'].includes(movement.movement_type) ||
+    if (!isUuid(movement.uuid) || !isUuid(movement.product_uuid) || !isUuid(movement.product_uuid_snapshot) || !['opening','stock_in','stock_out','adjustment','sale','return','purchase','purchase_return'].includes(movement.movement_type) ||
         !Number.isSafeInteger(movement.quantity_delta) || movement.quantity_delta === 0 || !Number.isSafeInteger(movement.quantity_before) || !Number.isSafeInteger(movement.quantity_after) ||
         movement.quantity_before < 0 || movement.quantity_after < 0 || movement.quantity_after !== movement.quantity_before + movement.quantity_delta || !validDate(movement.created_at)) throw new Error('INVALID_INVENTORY_MOVEMENT');
     if (movement.purchase_receipt_item_uuid != null && !isUuid(movement.purchase_receipt_item_uuid)) throw new Error('INVALID_PURCHASE_REFERENCE');
+    if (movement.purchase_return_item_uuid != null && !isUuid(movement.purchase_return_item_uuid)) throw new Error('INVALID_PURCHASE_RETURN_REFERENCE');
     if (movement.movement_type === 'purchase') {
       const item = movement.purchase_receipt_item_uuid ? purchaseItemByUuid.get(movement.purchase_receipt_item_uuid) : null;
       if (!item || movement.quantity_delta !== item.quantity || movement.product_uuid_snapshot !== item.product_uuid_snapshot) throw new Error('INVALID_PURCHASE_MOVEMENT');
     } else if (movement.purchase_receipt_item_uuid != null) throw new Error('INVALID_PURCHASE_MOVEMENT');
+    if (movement.movement_type === 'purchase_return') {
+      const item = movement.purchase_return_item_uuid ? purchaseReturnItemByUuid.get(movement.purchase_return_item_uuid) : null;
+      if (!item || movement.quantity_delta !== -item.quantity || movement.product_uuid_snapshot !== item.product_uuid_snapshot) throw new Error('INVALID_PURCHASE_RETURN_MOVEMENT');
+      if (purchaseReturnMovementRefs.has(item.uuid)) throw new Error('DUPLICATE_PURCHASE_RETURN_MOVEMENT');
+      purchaseReturnMovementRefs.add(item.uuid);
+    } else if (movement.purchase_return_item_uuid != null) throw new Error('INVALID_PURCHASE_RETURN_MOVEMENT');
   }
+  if (purchaseReturnMovementRefs.size !== purchaseReturnItemByUuid.size) throw new Error('MISSING_PURCHASE_RETURN_MOVEMENT');
   const supplierUuids = new Set<string>();
   for (const supplier of payload.suppliers ?? []) {
     if (!isRecord(supplier) || !isUuid(supplier.uuid) || supplierUuids.has(supplier.uuid) || typeof supplier.name !== 'string' || !supplier.name.trim() || supplier.name.length > 120 ||
@@ -464,6 +504,25 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
           item.line_total_usd_cents !== item.quantity * item.unit_cost_usd_cents || !validDate(item.created_at)) throw new Error('INVALID_PURCHASE_ITEM');
       purchaseItemUuids.add(item.uuid);
     }
+  }
+  const returnUuids = new Set<string>(); const purchaseReturnItemUuids = new Set<string>(); const cumulativeReturns = new Map<string, number>();
+  const receiptByUuid = new Map((payload.purchaseReceipts ?? []).map(receipt => [receipt.uuid, receipt]));
+  for (const record of payload.purchaseReturns ?? []) {
+    const parentReceipt = receiptByUuid.get(record.purchase_receipt_uuid);
+    if (!isRecord(record) || !isUuid(record.uuid) || returnUuids.has(record.uuid) || !parentReceipt || !isUuid(record.supplier_uuid_snapshot) || typeof record.supplier_name_snapshot !== 'string' || !record.supplier_name_snapshot.trim() ||
+        !validDate(record.created_at) || !Number.isSafeInteger(record.total_quantity) || record.total_quantity <= 0 || !Number.isSafeInteger(record.total_value_usd_cents) || record.total_value_usd_cents < 0 ||
+        (record.reference_number != null && (typeof record.reference_number !== 'string' || record.reference_number.length > 120)) || (record.note != null && (typeof record.note !== 'string' || record.note.length > 500)) || !Array.isArray(record.items) || !record.items.length) throw new Error('INVALID_PURCHASE_RETURN');
+    returnUuids.add(record.uuid); let quantityTotal = 0; let valueTotal = 0;
+    const parentItems = new Map(parentReceipt.items.map(item => [item.uuid, item]));
+    for (const item of record.items) {
+      const parent = parentItems.get(item.purchase_receipt_item_uuid);
+      if (!isRecord(item) || !isUuid(item.uuid) || purchaseReturnItemUuids.has(item.uuid) || !parent || !isUuid(item.product_uuid_snapshot) || item.product_uuid_snapshot !== parent.product_uuid_snapshot || typeof item.product_name_snapshot !== 'string' || !item.product_name_snapshot.trim() ||
+          !Number.isSafeInteger(item.quantity) || item.quantity <= 0 || !Number.isSafeInteger(item.unit_cost_usd_cents) || item.unit_cost_usd_cents !== parent.unit_cost_usd_cents || !Number.isSafeInteger(item.line_total_usd_cents) || item.line_total_usd_cents !== item.quantity * item.unit_cost_usd_cents || !validDate(item.created_at)) throw new Error('INVALID_PURCHASE_RETURN_ITEM');
+      purchaseReturnItemUuids.add(item.uuid); const cumulative = (cumulativeReturns.get(item.purchase_receipt_item_uuid) ?? 0) + item.quantity;
+      if (cumulative > parent.quantity) throw new Error('PURCHASE_OVER_RETURN'); cumulativeReturns.set(item.purchase_receipt_item_uuid, cumulative);
+      quantityTotal += item.quantity; valueTotal += item.line_total_usd_cents;
+    }
+    if (quantityTotal !== record.total_quantity || valueTotal !== record.total_value_usd_cents) throw new Error('INVALID_PURCHASE_RETURN_TOTAL');
   }
   for (const sale of payload.sales) {
     if (!sale || !isRecord(sale) || !isUuid(sale.uuid) || typeof sale.invoice_number !== 'string' ||

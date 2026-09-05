@@ -3,7 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as XLSX from 'xlsx';
 import { CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryListItem, Product, Sale, SalePayment, Settings } from '@/types';
-import { PortableInventoryMovement, PortablePurchaseReceipt, PortableSupplier } from '@/import/importTypes';
+import { PortableInventoryMovement, PortablePurchaseReceipt, PortablePurchaseReturn, PortableSupplier } from '@/import/importTypes';
 import { exchangeRateChangePercent } from '@/utils/exchangeRate';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
@@ -47,6 +47,7 @@ export async function exportExcel(
   inventoryMovements: PortableInventoryMovement[] = [],
   suppliers: PortableSupplier[] = [],
   purchaseReceipts: PortablePurchaseReceipt[] = [],
+  purchaseReturns: PortablePurchaseReturn[] = [],
 ) {
   const workbook = XLSX.utils.book_new();
   const sessionUuidById = new Map(cashSessions.map(session => [session.id, session.uuid]));
@@ -183,6 +184,12 @@ export async function exportExcel(
   const receiptItemSheet = XLSX.utils.json_to_sheet(purchaseReceipts.flatMap(receipt => receipt.items.map(item => ({ item_uuid: item.uuid, receipt_uuid: receipt.uuid, product_uuid: item.product_uuid ?? '', product_snapshot: item.product_name_snapshot, barcode_snapshot: item.barcode_snapshot ?? '', quantity: item.quantity, unit_cost_usd_cents: item.unit_cost_usd_cents, line_total_usd_cents: item.line_total_usd_cents }))));
   receiptItemSheet['!cols'] = [{ wch: 38 }, { wch: 38 }, { wch: 38 }, { wch: 30 }, { wch: 22 }, { wch: 14 }, { wch: 22 }, { wch: 22 }];
   XLSX.utils.book_append_sheet(workbook, receiptItemSheet, 'Purchase Receipt Items');
+  const purchaseReturnSheet = XLSX.utils.json_to_sheet(purchaseReturns.map(record => ({ return_uuid: record.uuid, original_receipt_uuid: record.purchase_receipt_uuid, supplier_uuid: record.supplier_uuid_snapshot, supplier_snapshot: record.supplier_name_snapshot, date: record.created_at, reference: record.reference_number ?? '', total_quantity: record.total_quantity, total_historical_value_usd_cents: record.total_value_usd_cents })));
+  purchaseReturnSheet['!cols'] = [{ wch: 38 }, { wch: 38 }, { wch: 38 }, { wch: 30 }, { wch: 24 }, { wch: 24 }, { wch: 16 }, { wch: 28 }];
+  XLSX.utils.book_append_sheet(workbook, purchaseReturnSheet, 'Purchase Returns');
+  const purchaseReturnItemSheet = XLSX.utils.json_to_sheet(purchaseReturns.flatMap(record => record.items.map(item => ({ item_uuid: item.uuid, return_uuid: record.uuid, purchase_item_uuid: item.purchase_receipt_item_uuid, product_uuid: item.product_uuid_snapshot, product_snapshot: item.product_name_snapshot, quantity: item.quantity, unit_cost_usd_cents: item.unit_cost_usd_cents, line_value_usd_cents: item.line_total_usd_cents }))));
+  purchaseReturnItemSheet['!cols'] = [{ wch: 38 }, { wch: 38 }, { wch: 38 }, { wch: 38 }, { wch: 30 }, { wch: 14 }, { wch: 22 }, { wch: 22 }];
+  XLSX.utils.book_append_sheet(workbook, purchaseReturnItemSheet, 'Purchase Return Items');
 
   const filename = `sarafy-products-${new Date().toISOString().slice(0, 10)}.xlsx`;
   const uri = `${FileSystem.cacheDirectory}${filename}`;

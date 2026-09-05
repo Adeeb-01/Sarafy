@@ -157,7 +157,7 @@ export interface SaleItemInput {
   unitCostSyp: number;
 }
 
-export type InventoryMovementType = 'opening' | 'stock_in' | 'stock_out' | 'adjustment' | 'sale' | 'return' | 'purchase';
+export type InventoryMovementType = 'opening' | 'stock_in' | 'stock_out' | 'adjustment' | 'sale' | 'return' | 'purchase' | 'purchase_return';
 export type InventoryStockStatus = 'in_stock' | 'low_stock' | 'out_of_stock';
 
 export interface InventoryBalance {
@@ -192,6 +192,7 @@ export interface InventoryMovement {
   sale_item_id: number | null;
   return_item_id: number | null;
   purchase_receipt_item_id: number | null;
+  purchase_return_item_id: number | null;
   note: string | null;
   created_at: string;
 }
@@ -217,6 +218,11 @@ export interface InventoryHealthReport {
   duplicatePurchaseMovements: number;
   invalidPurchaseMovements: number;
   missingPurchaseMovements: number;
+  duplicatePurchaseReturnMovements: number;
+  invalidPurchaseReturnMovements: number;
+  missingPurchaseReturnMovements: number;
+  cumulativePurchaseOverReturns: number;
+  orphanPurchaseReturnItems: number;
 }
 
 export interface Supplier {
@@ -231,6 +237,8 @@ export interface Supplier {
   updated_at: string;
   receipt_count?: number;
   latest_receipt_at?: string | null;
+  return_count?: number;
+  latest_return_at?: string | null;
 }
 
 export type SupplierInput = Pick<Supplier, 'name' | 'phone' | 'address' | 'note'>;
@@ -248,6 +256,10 @@ export interface PurchaseReceiptItem {
   unit_cost_usd_cents: number;
   line_total_usd_cents: number;
   created_at: string;
+  returned_quantity?: number;
+  remaining_returnable_quantity?: number;
+  inventory_quantity?: number;
+  max_return_now?: number;
 }
 
 export interface PurchaseReceipt {
@@ -263,12 +275,49 @@ export interface PurchaseReceipt {
   item_count: number;
   total_quantity: number;
   total_cost_usd_cents: number;
+  returned_quantity?: number;
+  returned_value_usd_cents?: number;
+  return_status?: 'none' | 'partial' | 'full';
   items?: PurchaseReceiptItem[];
+  returns?: PurchaseReturn[];
 }
 
 export interface PurchaseReceiptInputItem { productId: number; quantity: number; unitCostUsdCents: number }
 export interface PurchaseReceiptInput { supplierId: number; referenceNumber?: string | null; note?: string | null; items: PurchaseReceiptInputItem[] }
 export interface PurchaseReceiptQuery { search?: string; period?: 'all' | 'today' | 'week' | 'month'; supplierId?: number; sort?: 'newest' | 'oldest' | 'highest' | 'lowest'; limit?: number }
+
+export interface PurchaseReturnItem {
+  id: number;
+  uuid: string;
+  purchase_return_id: number;
+  purchase_receipt_item_id: number;
+  product_uuid_snapshot: string;
+  product_name_snapshot: string;
+  barcode_snapshot: string | null;
+  quantity: number;
+  unit_cost_usd_cents: number;
+  line_total_usd_cents: number;
+  created_at: string;
+}
+
+export interface PurchaseReturn {
+  id: number;
+  uuid: string;
+  purchase_receipt_id: number;
+  purchase_receipt_uuid?: string;
+  supplier_uuid_snapshot: string;
+  supplier_name_snapshot: string;
+  created_at: string;
+  total_quantity: number;
+  total_value_usd_cents: number;
+  reference_number: string | null;
+  note: string | null;
+  items?: PurchaseReturnItem[];
+}
+
+export interface PurchaseReturnInputItem { purchaseReceiptItemId: number; quantity: number }
+export interface PurchaseReturnInput { purchaseReceiptId: number; referenceNumber?: string | null; note?: string | null; items: PurchaseReturnInputItem[] }
+export interface PurchaseReturnQuery { search?: string; period?: 'all' | 'today' | 'week' | 'month'; supplierId?: number; purchaseReceiptId?: number; sort?: 'newest' | 'oldest' | 'highest' | 'lowest'; limit?: number }
 
 export interface PaymentInfo {
   amountPaidSyp: number;

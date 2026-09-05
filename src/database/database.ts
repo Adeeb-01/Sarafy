@@ -1,5 +1,5 @@
 import * as SQLite from 'expo-sqlite';
-import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryMovement, InventoryMovementType, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptQuery, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierInput, SupplierSort, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
+import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryMovement, InventoryMovementType, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptItem, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierInput, SupplierSort, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
 import { createDeterministicUuid, createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
@@ -9,7 +9,7 @@ import { calculateSettlement } from '@/utils/multiCurrency';
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 
 export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
@@ -395,6 +395,81 @@ async function migratePurchasesV15() {
   });
 }
 
+async function migratePurchaseReturnsV16() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 16) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    await transaction.execAsync(`
+      CREATE TABLE purchase_returns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        purchase_receipt_id INTEGER NOT NULL REFERENCES purchase_receipts(id) ON DELETE RESTRICT,
+        supplier_uuid_snapshot TEXT NOT NULL,
+        supplier_name_snapshot TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        total_quantity INTEGER NOT NULL CHECK(total_quantity > 0),
+        total_value_usd_cents INTEGER NOT NULL CHECK(total_value_usd_cents >= 0),
+        reference_number TEXT,
+        note TEXT
+      );
+      CREATE TABLE purchase_return_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        purchase_return_id INTEGER NOT NULL REFERENCES purchase_returns(id) ON DELETE RESTRICT,
+        purchase_receipt_item_id INTEGER NOT NULL REFERENCES purchase_receipt_items(id) ON DELETE RESTRICT,
+        product_uuid_snapshot TEXT NOT NULL,
+        product_name_snapshot TEXT NOT NULL,
+        barcode_snapshot TEXT,
+        quantity INTEGER NOT NULL CHECK(quantity > 0),
+        unit_cost_usd_cents INTEGER NOT NULL CHECK(unit_cost_usd_cents >= 0),
+        line_total_usd_cents INTEGER NOT NULL CHECK(line_total_usd_cents >= 0),
+        created_at TEXT NOT NULL,
+        UNIQUE(purchase_return_id,purchase_receipt_item_id),
+        CHECK(line_total_usd_cents = quantity * unit_cost_usd_cents)
+      );
+      ALTER TABLE inventory_movements RENAME TO inventory_movements_v15;
+      CREATE TABLE inventory_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+        product_uuid_snapshot TEXT NOT NULL,
+        product_name_snapshot TEXT NOT NULL,
+        barcode_snapshot TEXT,
+        movement_type TEXT NOT NULL CHECK(movement_type IN ('opening','stock_in','stock_out','adjustment','sale','return','purchase','purchase_return')),
+        quantity_delta INTEGER NOT NULL CHECK(quantity_delta <> 0),
+        quantity_before INTEGER NOT NULL CHECK(quantity_before >= 0),
+        quantity_after INTEGER NOT NULL CHECK(quantity_after >= 0),
+        sale_item_id INTEGER REFERENCES sale_items(id) ON DELETE RESTRICT,
+        return_item_id INTEGER REFERENCES sale_return_items(id) ON DELETE RESTRICT,
+        purchase_receipt_item_id INTEGER REFERENCES purchase_receipt_items(id) ON DELETE RESTRICT,
+        purchase_return_item_id INTEGER REFERENCES purchase_return_items(id) ON DELETE RESTRICT,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        CHECK(quantity_after = quantity_before + quantity_delta),
+        CHECK((movement_type='purchase' AND purchase_receipt_item_id IS NOT NULL AND purchase_return_item_id IS NULL AND sale_item_id IS NULL AND return_item_id IS NULL) OR
+              (movement_type='purchase_return' AND purchase_return_item_id IS NOT NULL AND purchase_receipt_item_id IS NULL AND sale_item_id IS NULL AND return_item_id IS NULL) OR
+              (movement_type NOT IN ('purchase','purchase_return') AND purchase_receipt_item_id IS NULL AND purchase_return_item_id IS NULL))
+      );
+      INSERT INTO inventory_movements(id,uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,return_item_id,purchase_receipt_item_id,note,created_at)
+        SELECT id,uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,return_item_id,purchase_receipt_item_id,note,created_at FROM inventory_movements_v15;
+      DROP TABLE inventory_movements_v15;
+      CREATE INDEX idx_purchase_returns_receipt_id ON purchase_returns(purchase_receipt_id);
+      CREATE INDEX idx_purchase_returns_created_at ON purchase_returns(created_at DESC,id DESC);
+      CREATE INDEX idx_purchase_return_items_return_id ON purchase_return_items(purchase_return_id);
+      CREATE INDEX idx_purchase_return_items_purchase_item_id ON purchase_return_items(purchase_receipt_item_id);
+      CREATE INDEX IF NOT EXISTS idx_inventory_balances_tracking_quantity ON inventory_balances(tracking_enabled,quantity);
+      CREATE INDEX idx_inventory_movements_product_created ON inventory_movements(product_id,created_at DESC,id DESC);
+      CREATE UNIQUE INDEX idx_inventory_movements_sale_item ON inventory_movements(sale_item_id) WHERE sale_item_id IS NOT NULL AND movement_type='sale';
+      CREATE UNIQUE INDEX idx_inventory_movements_return_item ON inventory_movements(return_item_id) WHERE return_item_id IS NOT NULL AND movement_type='return';
+      CREATE UNIQUE INDEX idx_inventory_movements_purchase_item ON inventory_movements(purchase_receipt_item_id) WHERE purchase_receipt_item_id IS NOT NULL AND movement_type='purchase';
+      CREATE UNIQUE INDEX idx_inventory_movements_purchase_return_item ON inventory_movements(purchase_return_item_id) WHERE purchase_return_item_id IS NOT NULL AND movement_type='purchase_return';
+      PRAGMA user_version = 16;
+    `);
+  });
+}
+
 export async function initializeDatabase() {
   const db = await dbPromise;
   await db.execAsync(`
@@ -467,6 +542,7 @@ export async function initializeDatabase() {
   await migrateMultiCurrencyV13();
   await migrateInventoryV14();
   await migratePurchasesV15();
+  await migratePurchaseReturnsV16();
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
   if (integrity?.integrity_check !== 'ok') throw new Error('DATABASE_INTEGRITY_CHECK_FAILED');
   const foreignKeys = await db.getAllAsync<{ table: string; rowid: number }>('PRAGMA foreign_key_check');
@@ -670,7 +746,7 @@ export async function updateInventoryThreshold(productId: number, threshold: num
 
 export async function auditInventoryHealth(): Promise<InventoryHealthReport> {
   const db = await dbPromise;
-  const row = await db.getFirstAsync<{ negative: number; arithmetic: number; latest: number; sale_duplicates: number; return_duplicates: number; purchase_duplicates: number; purchase_invalid: number; purchase_missing: number }>(`SELECT
+  const row = await db.getFirstAsync<{ negative: number; arithmetic: number; latest: number; sale_duplicates: number; return_duplicates: number; purchase_duplicates: number; purchase_invalid: number; purchase_missing: number; purchase_return_duplicates: number; purchase_return_invalid: number; purchase_return_missing: number; purchase_over_return: number; purchase_return_orphans: number }>(`SELECT
     (SELECT COUNT(*) FROM inventory_balances WHERE quantity<0) AS negative,
     (SELECT COUNT(*) FROM inventory_movements WHERE quantity_after<>quantity_before+quantity_delta OR quantity_before<0 OR quantity_after<0) AS arithmetic,
     (SELECT COUNT(*) FROM inventory_balances b WHERE b.tracking_enabled=1 AND EXISTS(SELECT 1 FROM inventory_movements m WHERE m.product_id=b.product_id) AND b.quantity<>(SELECT m.quantity_after FROM inventory_movements m WHERE m.product_id=b.product_id ORDER BY m.id DESC LIMIT 1)) AS latest,
@@ -679,8 +755,14 @@ export async function auditInventoryHealth(): Promise<InventoryHealthReport> {
     (SELECT COUNT(*) FROM (SELECT purchase_receipt_item_id FROM inventory_movements WHERE purchase_receipt_item_id IS NOT NULL GROUP BY purchase_receipt_item_id HAVING COUNT(*)>1)) AS purchase_duplicates,
     (SELECT COUNT(*) FROM inventory_movements m LEFT JOIN purchase_receipt_items pi ON pi.id=m.purchase_receipt_item_id
       WHERE (m.movement_type='purchase' AND (pi.id IS NULL OR m.quantity_delta<>pi.quantity OR m.product_uuid_snapshot<>pi.product_uuid_snapshot)) OR (m.purchase_receipt_item_id IS NOT NULL AND m.movement_type<>'purchase')) AS purchase_invalid,
-    (SELECT COUNT(*) FROM purchase_receipt_items pi WHERE NOT EXISTS(SELECT 1 FROM inventory_movements m WHERE m.purchase_receipt_item_id=pi.id AND m.movement_type='purchase')) AS purchase_missing`);
-  return { negativeBalances: row?.negative ?? 0, arithmeticMismatches: row?.arithmetic ?? 0, latestBalanceMismatches: row?.latest ?? 0, duplicateSaleMovements: row?.sale_duplicates ?? 0, duplicateReturnMovements: row?.return_duplicates ?? 0, duplicatePurchaseMovements: row?.purchase_duplicates ?? 0, invalidPurchaseMovements: row?.purchase_invalid ?? 0, missingPurchaseMovements: row?.purchase_missing ?? 0 };
+    (SELECT COUNT(*) FROM purchase_receipt_items pi WHERE NOT EXISTS(SELECT 1 FROM inventory_movements m WHERE m.purchase_receipt_item_id=pi.id AND m.movement_type='purchase')) AS purchase_missing,
+    (SELECT COUNT(*) FROM (SELECT purchase_return_item_id FROM inventory_movements WHERE purchase_return_item_id IS NOT NULL GROUP BY purchase_return_item_id HAVING COUNT(*)>1)) AS purchase_return_duplicates,
+    (SELECT COUNT(*) FROM inventory_movements m LEFT JOIN purchase_return_items ri ON ri.id=m.purchase_return_item_id
+      WHERE (m.movement_type='purchase_return' AND (ri.id IS NULL OR m.quantity_delta<>-ri.quantity OR m.product_uuid_snapshot<>ri.product_uuid_snapshot)) OR (m.purchase_return_item_id IS NOT NULL AND m.movement_type<>'purchase_return')) AS purchase_return_invalid,
+    (SELECT COUNT(*) FROM purchase_return_items ri WHERE NOT EXISTS(SELECT 1 FROM inventory_movements m WHERE m.purchase_return_item_id=ri.id AND m.movement_type='purchase_return')) AS purchase_return_missing,
+    (SELECT COUNT(*) FROM purchase_receipt_items pi WHERE COALESCE((SELECT SUM(ri.quantity) FROM purchase_return_items ri WHERE ri.purchase_receipt_item_id=pi.id),0)>pi.quantity) AS purchase_over_return,
+    (SELECT COUNT(*) FROM purchase_return_items ri LEFT JOIN purchase_receipt_items pi ON pi.id=ri.purchase_receipt_item_id WHERE pi.id IS NULL) AS purchase_return_orphans`);
+  return { negativeBalances: row?.negative ?? 0, arithmeticMismatches: row?.arithmetic ?? 0, latestBalanceMismatches: row?.latest ?? 0, duplicateSaleMovements: row?.sale_duplicates ?? 0, duplicateReturnMovements: row?.return_duplicates ?? 0, duplicatePurchaseMovements: row?.purchase_duplicates ?? 0, invalidPurchaseMovements: row?.purchase_invalid ?? 0, missingPurchaseMovements: row?.purchase_missing ?? 0, duplicatePurchaseReturnMovements: row?.purchase_return_duplicates ?? 0, invalidPurchaseReturnMovements: row?.purchase_return_invalid ?? 0, missingPurchaseReturnMovements: row?.purchase_return_missing ?? 0, cumulativePurchaseOverReturns: row?.purchase_over_return ?? 0, orphanPurchaseReturnItems: row?.purchase_return_orphans ?? 0 };
 }
 
 function normalizeOptionalText(value: string | null | undefined, maxLength: number) {
@@ -695,7 +777,9 @@ export async function getSuppliers(search = '', sort: SupplierSort = 'name', inc
   if (term) { where.push('(s.name LIKE ? COLLATE NOCASE OR COALESCE(s.phone,\'\') LIKE ?)'); parameters.push(`%${term}%`, `%${term}%`); }
   if (!includeInactive) where.push('s.is_active=1');
   const order = sort === 'newest' ? 's.created_at DESC,s.id DESC' : 's.name COLLATE NOCASE ASC,s.id ASC';
-  return db.getAllAsync<Supplier>(`SELECT s.*,COUNT(pr.id) AS receipt_count,MAX(pr.received_at) AS latest_receipt_at
+  return db.getAllAsync<Supplier>(`SELECT s.*,COUNT(pr.id) AS receipt_count,MAX(pr.received_at) AS latest_receipt_at,
+    (SELECT COUNT(*) FROM purchase_returns sr WHERE sr.supplier_uuid_snapshot=s.uuid) AS return_count,
+    (SELECT MAX(created_at) FROM purchase_returns sr WHERE sr.supplier_uuid_snapshot=s.uuid) AS latest_return_at
     FROM suppliers s LEFT JOIN purchase_receipts pr ON pr.supplier_id=s.id${where.length ? ` WHERE ${where.join(' AND ')}` : ''}
     GROUP BY s.id ORDER BY ${order}`, ...parameters);
 }
@@ -732,7 +816,11 @@ function purchaseDateStart(period: PurchaseReceiptQuery['period']) {
 }
 
 const purchaseSummarySelect = `SELECT pr.id,pr.uuid,pr.supplier_id,pr.supplier_uuid_snapshot,pr.supplier_name_snapshot,pr.reference_number,pr.note,pr.received_at,pr.created_at,
-  COUNT(pi.id) AS item_count,COALESCE(SUM(pi.quantity),0) AS total_quantity,COALESCE(SUM(pi.line_total_usd_cents),0) AS total_cost_usd_cents
+  COUNT(pi.id) AS item_count,COALESCE(SUM(pi.quantity),0) AS total_quantity,COALESCE(SUM(pi.line_total_usd_cents),0) AS total_cost_usd_cents,
+  COALESCE((SELECT SUM(ri.quantity) FROM purchase_returns sr JOIN purchase_return_items ri ON ri.purchase_return_id=sr.id WHERE sr.purchase_receipt_id=pr.id),0) AS returned_quantity,
+  COALESCE((SELECT SUM(sr.total_value_usd_cents) FROM purchase_returns sr WHERE sr.purchase_receipt_id=pr.id),0) AS returned_value_usd_cents,
+  CASE WHEN COALESCE((SELECT SUM(ri.quantity) FROM purchase_returns sr JOIN purchase_return_items ri ON ri.purchase_return_id=sr.id WHERE sr.purchase_receipt_id=pr.id),0)=0 THEN 'none'
+       WHEN COALESCE((SELECT SUM(ri.quantity) FROM purchase_returns sr JOIN purchase_return_items ri ON ri.purchase_return_id=sr.id WHERE sr.purchase_receipt_id=pr.id),0)=SUM(pi.quantity) THEN 'full' ELSE 'partial' END AS return_status
   FROM purchase_receipts pr JOIN purchase_receipt_items pi ON pi.purchase_receipt_id=pr.id`;
 
 export async function queryPurchaseReceipts(query: PurchaseReceiptQuery = {}): Promise<PurchaseReceipt[]> {
@@ -749,8 +837,15 @@ export async function getPurchaseReceiptDetail(id: number): Promise<PurchaseRece
   const db = await dbPromise;
   const receipt = await db.getFirstAsync<PurchaseReceipt>(`${purchaseSummarySelect} WHERE pr.id=? GROUP BY pr.id`, id);
   if (!receipt) return null;
-  const items = await db.getAllAsync<PurchaseReceipt['items'] extends Array<infer T> ? T : never>('SELECT * FROM purchase_receipt_items WHERE purchase_receipt_id=? ORDER BY id', id);
-  return { ...receipt, items };
+  const items = await db.getAllAsync<PurchaseReceipt['items'] extends Array<infer T> ? T : never>(`SELECT pi.*,
+    COALESCE(SUM(ri.quantity),0) AS returned_quantity,pi.quantity-COALESCE(SUM(ri.quantity),0) AS remaining_returnable_quantity,
+    COALESCE(b.quantity,0) AS inventory_quantity,MIN(pi.quantity-COALESCE(SUM(ri.quantity),0),COALESCE(b.quantity,0)) AS max_return_now
+    FROM purchase_receipt_items pi
+    LEFT JOIN purchase_return_items ri ON ri.purchase_receipt_item_id=pi.id
+    LEFT JOIN inventory_balances b ON b.product_id=pi.product_id AND b.tracking_enabled=1
+    WHERE pi.purchase_receipt_id=? GROUP BY pi.id ORDER BY pi.id`, id);
+  const returns = await queryPurchaseReturns({ purchaseReceiptId: id, sort: 'newest' });
+  return { ...receipt, items, returns };
 }
 
 export async function createPurchaseReceipt(input: PurchaseReceiptInput): Promise<PurchaseReceipt> {
@@ -783,6 +878,79 @@ export async function createPurchaseReceipt(input: PurchaseReceiptInput): Promis
     }
   });
   const receipt = await getPurchaseReceiptDetail(receiptId); if (!receipt) throw new Error('PURCHASE_RECEIPT_NOT_FOUND'); return receipt;
+}
+
+function purchaseReturnDateStart(period: PurchaseReturnQuery['period']) {
+  return purchaseDateStart(period);
+}
+
+const purchaseReturnSummarySelect = `SELECT sr.id,sr.uuid,sr.purchase_receipt_id,pr.uuid AS purchase_receipt_uuid,
+  sr.supplier_uuid_snapshot,sr.supplier_name_snapshot,sr.created_at,sr.total_quantity,sr.total_value_usd_cents,sr.reference_number,sr.note
+  FROM purchase_returns sr JOIN purchase_receipts pr ON pr.id=sr.purchase_receipt_id`;
+
+export async function queryPurchaseReturns(query: PurchaseReturnQuery = {}): Promise<PurchaseReturn[]> {
+  const db = await dbPromise; const where: string[] = []; const parameters: Array<string | number> = [];
+  if (query.limit != null && (!Number.isSafeInteger(query.limit) || query.limit <= 0 || query.limit > 10000)) throw new Error('INVALID_PURCHASE_RETURN_QUERY');
+  const search = query.search?.trim();
+  if (search) { const like = `%${search}%`; where.push(`(sr.supplier_name_snapshot LIKE ? COLLATE NOCASE OR COALESCE(sr.reference_number,'') LIKE ? OR EXISTS(SELECT 1 FROM purchase_return_items ri WHERE ri.purchase_return_id=sr.id AND ri.product_name_snapshot LIKE ? COLLATE NOCASE))`); parameters.push(like, like, like); }
+  const start = purchaseReturnDateStart(query.period); if (start) { where.push('sr.created_at>=?'); parameters.push(start); }
+  if (query.supplierId != null) { where.push('pr.supplier_id=?'); parameters.push(query.supplierId); }
+  if (query.purchaseReceiptId != null) { where.push('sr.purchase_receipt_id=?'); parameters.push(query.purchaseReceiptId); }
+  const order = { newest: 'sr.created_at DESC,sr.id DESC', oldest: 'sr.created_at ASC,sr.id ASC', highest: 'sr.total_value_usd_cents DESC,sr.id DESC', lowest: 'sr.total_value_usd_cents ASC,sr.id DESC' }[query.sort ?? 'newest'];
+  return db.getAllAsync<PurchaseReturn>(`${purchaseReturnSummarySelect}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${order}${query.limit ? ' LIMIT ?' : ''}`, ...parameters, ...(query.limit ? [query.limit] : []));
+}
+
+export async function getPurchaseReturnDetail(id: number): Promise<PurchaseReturn | null> {
+  const db = await dbPromise;
+  const record = await db.getFirstAsync<PurchaseReturn>(`${purchaseReturnSummarySelect} WHERE sr.id=?`, id);
+  if (!record) return null;
+  const items = await db.getAllAsync<NonNullable<PurchaseReturn['items']>[number]>('SELECT * FROM purchase_return_items WHERE purchase_return_id=? ORDER BY id', id);
+  return { ...record, items };
+}
+
+export async function createPurchaseReturn(input: PurchaseReturnInput): Promise<PurchaseReturn> {
+  if (!Number.isSafeInteger(input.purchaseReceiptId) || input.purchaseReceiptId <= 0 || !input.items.length) throw new Error('INVALID_PURCHASE_RETURN');
+  const reference = normalizeOptionalText(input.referenceNumber, 120); const note = normalizeOptionalText(input.note, 500);
+  const requested = new Map<number, number>();
+  for (const item of input.items) {
+    if (!Number.isSafeInteger(item.purchaseReceiptItemId) || item.purchaseReceiptItemId <= 0 || !Number.isSafeInteger(item.quantity) || item.quantity <= 0 || requested.has(item.purchaseReceiptItemId)) throw new Error('INVALID_PURCHASE_RETURN_ITEM');
+    requested.set(item.purchaseReceiptItemId, item.quantity);
+  }
+  const db = await dbPromise; const now = new Date().toISOString(); let returnId = 0;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const receipt = await transaction.getFirstAsync<PurchaseReceipt>('SELECT * FROM purchase_receipts WHERE id=?', input.purchaseReceiptId);
+    if (!receipt) throw new Error('PURCHASE_RECEIPT_NOT_FOUND');
+    const rows = await transaction.getAllAsync<PurchaseReceiptItem & { returned_quantity: number; inventory_quantity: number; tracking_enabled: number }>(`SELECT pi.*,
+      COALESCE(SUM(ri.quantity),0) AS returned_quantity,COALESCE(b.quantity,0) AS inventory_quantity,COALESCE(b.tracking_enabled,0) AS tracking_enabled
+      FROM purchase_receipt_items pi LEFT JOIN purchase_return_items ri ON ri.purchase_receipt_item_id=pi.id
+      LEFT JOIN inventory_balances b ON b.product_id=pi.product_id
+      WHERE pi.purchase_receipt_id=? GROUP BY pi.id`, input.purchaseReceiptId);
+    const byId = new Map(rows.map(row => [row.id, row])); let totalQuantity = 0; let totalValue = 0;
+    for (const [itemId, quantity] of requested) {
+      const item = byId.get(itemId); if (!item) throw new Error('PURCHASE_RETURN_ITEM_NOT_FOUND');
+      if (!item.product_id || item.tracking_enabled !== 1) throw new Error('PURCHASE_RETURN_PRODUCT_UNAVAILABLE');
+      const remaining = item.quantity - item.returned_quantity;
+      if (quantity > remaining) throw new Error('PURCHASE_OVER_RETURN');
+      if (quantity > item.inventory_quantity) throw new Error('INSUFFICIENT_STOCK');
+      const lineTotal = BigInt(quantity) * BigInt(item.unit_cost_usd_cents);
+      if (lineTotal > BigInt(Number.MAX_SAFE_INTEGER) || !Number.isSafeInteger(totalQuantity + quantity) || BigInt(totalValue) + lineTotal > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('INVALID_PURCHASE_RETURN_ITEM');
+      totalQuantity += quantity; totalValue += Number(lineTotal);
+    }
+    const header = await transaction.runAsync(`INSERT INTO purchase_returns(uuid,purchase_receipt_id,supplier_uuid_snapshot,supplier_name_snapshot,created_at,total_quantity,total_value_usd_cents,reference_number,note)
+      VALUES(?,?,?,?,?,?,?,?,?)`, createUuid(), receipt.id, receipt.supplier_uuid_snapshot, receipt.supplier_name_snapshot, now, totalQuantity, totalValue, reference, note);
+    returnId = header.lastInsertRowId;
+    for (const [itemId, quantity] of requested) {
+      const item = byId.get(itemId)!; const after = item.inventory_quantity - quantity;
+      const changed = await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND tracking_enabled=1 AND quantity=?', after, now, item.product_id, item.inventory_quantity);
+      if (!changed.changes) throw new Error('INVENTORY_CONCURRENT_UPDATE');
+      const lineTotal = quantity * item.unit_cost_usd_cents;
+      const inserted = await transaction.runAsync(`INSERT INTO purchase_return_items(uuid,purchase_return_id,purchase_receipt_item_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,quantity,unit_cost_usd_cents,line_total_usd_cents,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`, createUuid(), returnId, item.id, item.product_uuid_snapshot, item.product_name_snapshot, item.barcode_snapshot, quantity, item.unit_cost_usd_cents, lineTotal, now);
+      await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,purchase_return_item_id,note,created_at)
+        VALUES(?,?,?,?,?,'purchase_return',?,?,?,?,?,?)`, createUuid(), item.product_id, item.product_uuid_snapshot, item.product_name_snapshot, item.barcode_snapshot, -quantity, item.inventory_quantity, after, inserted.lastInsertRowId, reference, now);
+    }
+  });
+  const record = await getPurchaseReturnDetail(returnId); if (!record) throw new Error('PURCHASE_RETURN_NOT_FOUND'); return record;
 }
 
 export async function getCategories() {

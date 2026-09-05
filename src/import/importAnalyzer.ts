@@ -25,6 +25,9 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
   if (options.mode !== 'full_restore' && (payload.purchaseReceipts?.length ?? 0) > 0) {
     issues.push({ entity: 'purchase_receipts', row: 0, code: 'PURCHASE_HISTORY_SKIPPED_SAFE_MERGE', action: 'skipped' });
   }
+  if (options.mode !== 'full_restore' && (payload.purchaseReturns?.length ?? 0) > 0) {
+    issues.push({ entity: 'purchase_returns', row: 0, code: 'SUPPLIER_PURCHASE_RETURN_SKIPPED_OPERATIONAL_INVENTORY', action: 'skipped' });
+  }
   const localCashSessions = await db.getAllAsync<Record<string, unknown> & { uuid: string }>('SELECT * FROM cash_sessions');
   const localSessionByUuid = new Map(localCashSessions.map(row => [row.uuid, row]));
   const localSessions = new Set(localSessionByUuid.keys());

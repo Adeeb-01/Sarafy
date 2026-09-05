@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptQuery, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, Supplier, SupplierInput, SupplierSort, SuspendedSale, SuspendedSaleSummary } from '@/types';
+import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, Supplier, SupplierInput, SupplierSort, SuspendedSale, SuspendedSaleSummary } from '@/types';
 import * as database from '@/database/database';
 
 const defaults: Settings = {
@@ -82,6 +82,9 @@ interface AppState extends Settings {
   queryPurchaseReceipts: (query?: PurchaseReceiptQuery) => Promise<PurchaseReceipt[]>;
   getPurchaseReceiptDetail: (id: number) => Promise<PurchaseReceipt | null>;
   createPurchaseReceipt: (input: PurchaseReceiptInput) => Promise<PurchaseReceipt>;
+  queryPurchaseReturns: (query?: PurchaseReturnQuery) => Promise<PurchaseReturn[]>;
+  getPurchaseReturnDetail: (id: number) => Promise<PurchaseReturn | null>;
+  createPurchaseReturn: (input: PurchaseReturnInput) => Promise<PurchaseReturn>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -210,5 +213,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     const receipt = await database.createPurchaseReceipt(input);
     set({ products: await database.getProducts() });
     return receipt;
+  },
+  queryPurchaseReturns: database.queryPurchaseReturns,
+  getPurchaseReturnDetail: database.getPurchaseReturnDetail,
+  createPurchaseReturn: async input => {
+    const record = await database.createPurchaseReturn(input);
+    set({ products: await database.getProducts() });
+    return record;
   },
 }));
