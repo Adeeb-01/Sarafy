@@ -37,6 +37,8 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
   const { payload, options } = preview;
   await db.withExclusiveTransactionAsync(async transaction => {
     if (options.mode === 'full_restore') {
+      await transaction.runAsync('DELETE FROM inventory_movements');
+      await transaction.runAsync('DELETE FROM inventory_balances');
       await transaction.runAsync('DELETE FROM sale_payments');
       await transaction.runAsync('DELETE FROM sale_return_items');
       await transaction.runAsync('DELETE FROM sale_returns');
@@ -288,6 +290,35 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
         inserted += 1;
       }
     }
+    if (options.mode === 'full_restore' && options.entities.includes('inventory_balances')) {
+      const productRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM products');
+      const productIdByUuid = new Map(productRows.map(row => [row.uuid, row.id]));
+      for (const balance of payload.inventoryBalances ?? []) {
+        const productId = productIdByUuid.get(balance.product_uuid);
+        if (!productId) throw new Error('INVENTORY_PRODUCT_PARENT_MISSING');
+        await transaction.runAsync(`INSERT INTO inventory_balances(product_id,tracking_enabled,quantity,low_stock_threshold,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
+          productId, balance.tracking_enabled ? 1 : 0, balance.quantity, balance.low_stock_threshold, balance.created_at, balance.updated_at);
+        inserted += 1;
+      }
+      if (options.entities.includes('inventory_movements')) {
+        const saleItemRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM sale_items');
+        const returnItemRows = await transaction.getAllAsync<{ id: number; uuid: string }>('SELECT id,uuid FROM sale_return_items');
+        const saleItemIdByUuid = new Map(saleItemRows.map(row => [row.uuid, row.id]));
+        const returnItemIdByUuid = new Map(returnItemRows.map(row => [row.uuid, row.id]));
+        for (const movement of payload.inventoryMovements ?? []) {
+          const productId = productIdByUuid.get(movement.product_uuid);
+          const saleItemId = movement.sale_item_uuid ? saleItemIdByUuid.get(movement.sale_item_uuid) : null;
+          const returnItemId = movement.return_item_uuid ? returnItemIdByUuid.get(movement.return_item_uuid) : null;
+          if (!productId || (movement.sale_item_uuid && !saleItemId) || (movement.return_item_uuid && !returnItemId)) throw new Error('INVENTORY_MOVEMENT_PARENT_MISSING');
+          await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,return_item_id,note,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, movement.uuid, productId, movement.product_uuid_snapshot, movement.product_name_snapshot, movement.barcode_snapshot,
+          movement.movement_type, movement.quantity_delta, movement.quantity_before, movement.quantity_after, saleItemId ?? null, returnItemId ?? null, movement.note, movement.created_at);
+          inserted += 1;
+        }
+      }
+    } else if ((payload.inventoryBalances?.length ?? 0) || (payload.inventoryMovements?.length ?? 0)) {
+      skipped += (payload.inventoryBalances?.length ?? 0) + (payload.inventoryMovements?.length ?? 0);
+    }
     if (options.entities.includes('settings') && options.importSettings) {
       for (const key of SETTING_KEYS) {
         await transaction.runAsync(
@@ -322,7 +353,7 @@ export function defaultImportOptions(mode: ImportOptions['mode'] = 'safe_merge')
     mode,
     conflictStrategy: 'newest',
     entities: mode === 'full_restore'
-      ? ['products', 'categories', 'settings', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'product_images', 'sale_drafts', 'sale_draft_items']
+      ? ['products', 'categories', 'settings', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'inventory_balances', 'inventory_movements', 'product_images', 'sale_drafts', 'sale_draft_items']
       : ['products', 'categories', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'product_images'],
     importSettings: mode === 'full_restore',
   };
@@ -334,7 +365,7 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
   if (!Array.isArray(payload.products) || !Array.isArray(payload.categories) ||
       !Array.isArray(payload.sales) || !Array.isArray(payload.expenses) ||
       !payload.settings || typeof payload.version !== 'number') throw new Error('INVALID_BACKUP');
-  if (payload.version > 7) throw new Error('BACKUP_NEWER_THAN_APP');
+  if (payload.version > 8) throw new Error('BACKUP_NEWER_THAN_APP');
   const validDate = (input: unknown) => typeof input === 'string' && Number.isFinite(Date.parse(input));
   const finite = (input: unknown) => typeof input === 'number' && Number.isFinite(input);
   for (const product of payload.products) {
@@ -352,6 +383,15 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
         !category.name.trim() || !validDate(category.created_at) || !validDate(category.updated_at)) {
       throw new Error('INVALID_CATEGORY');
     }
+  }
+  for (const balance of payload.inventoryBalances ?? []) {
+    if (!isUuid(balance.product_uuid) || !Number.isSafeInteger(balance.quantity) || balance.quantity < 0 || ![0, 1].includes(balance.tracking_enabled) ||
+        (balance.low_stock_threshold != null && (!Number.isSafeInteger(balance.low_stock_threshold) || balance.low_stock_threshold < 0)) || !validDate(balance.created_at) || !validDate(balance.updated_at)) throw new Error('INVALID_INVENTORY_BALANCE');
+  }
+  for (const movement of payload.inventoryMovements ?? []) {
+    if (!isUuid(movement.uuid) || !isUuid(movement.product_uuid) || !isUuid(movement.product_uuid_snapshot) || !['opening','stock_in','stock_out','adjustment','sale','return'].includes(movement.movement_type) ||
+        !Number.isSafeInteger(movement.quantity_delta) || movement.quantity_delta === 0 || !Number.isSafeInteger(movement.quantity_before) || !Number.isSafeInteger(movement.quantity_after) ||
+        movement.quantity_before < 0 || movement.quantity_after < 0 || movement.quantity_after !== movement.quantity_before + movement.quantity_delta || !validDate(movement.created_at)) throw new Error('INVALID_INVENTORY_MOVEMENT');
   }
   for (const sale of payload.sales) {
     if (!sale || !isRecord(sale) || !isUuid(sale.uuid) || typeof sale.invoice_number !== 'string' ||

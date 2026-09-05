@@ -10,6 +10,7 @@ import { MainCatalogScreen } from '@/screens/MainCatalogScreen';
 import { ProductManagementScreen } from '@/screens/ProductManagementScreen';
 import { SettingsAndBackupScreen } from '@/screens/SettingsAndBackupScreen';
 import { SalesScreen } from '@/screens/SalesScreen';
+import { InventoryScreen } from '@/screens/InventoryScreen';
 import { useAppStore } from '@/store/useAppStore';
 import { configureDefaultTypography } from '@/theme/typography';
 import { layout, spacing, ThemeProvider, typography, useAppTheme } from '@/theme';
@@ -18,7 +19,7 @@ import { t, uiText } from '@/i18n';
 import { cleanupStaleBackupFiles } from '@/backup/backupStorage';
 import { haptics } from '@/utils/haptics';
 
-type Tab = 'catalog' | 'sales' | 'manage' | 'settings';
+type Tab = 'catalog' | 'sales' | 'manage' | 'inventory' | 'settings';
 configureDefaultTypography();
 
 const nativeSplashHold = SplashScreen.preventAutoHideAsync().catch(error => {
@@ -94,12 +95,12 @@ function AppContent({ retainStartupError, retrying, onStartupFailure, onStartupR
 
   const rtl = language === 'ar';
   const tabs: { key: Tab; icon: keyof typeof Feather.glyphMap }[] = [
-    { key: 'catalog', icon: 'grid' }, { key: 'sales', icon: 'trending-up' }, { key: 'manage', icon: 'package' }, { key: 'settings', icon: 'settings' },
+    { key: 'catalog', icon: 'grid' }, { key: 'sales', icon: 'trending-up' }, { key: 'manage', icon: 'package' }, { key: 'inventory', icon: 'archive' }, { key: 'settings', icon: 'settings' },
   ];
   return <SnackbarProvider bottomInset={bottomNavigationHeight}><View onLayout={onMainLayout} style={[styles.app, { backgroundColor: colors.background }]}> 
     <StatusBar style={isDark ? 'light' : 'dark'} />
     <Animated.View key={tab} entering={FadeIn.duration(180).reduceMotion(ReduceMotion.System)} style={[styles.screen, tab !== 'manage' && tab !== 'sales' && { paddingBottom: bottomNavigationHeight }]}>
-      {tab === 'catalog' && <MainCatalogScreen onManageProducts={() => setTab('manage')} />}{tab === 'sales' && <SalesScreen bottomNavigationInset={bottomNavigationHeight} />}{tab === 'manage' && <ProductManagementScreen bottomNavigationInset={bottomNavigationHeight} />}{tab === 'settings' && <SettingsAndBackupScreen />}
+      {tab === 'catalog' && <MainCatalogScreen onManageProducts={() => setTab('manage')} />}{tab === 'sales' && <SalesScreen bottomNavigationInset={bottomNavigationHeight} />}{tab === 'manage' && <ProductManagementScreen bottomNavigationInset={bottomNavigationHeight} />}{tab === 'inventory' && <InventoryScreen bottomNavigationInset={bottomNavigationHeight} />}{tab === 'settings' && <SettingsAndBackupScreen />}
     </Animated.View>
     <SafeAreaView edges={['bottom']} onLayout={event => setBottomNavigationHeight(event.nativeEvent.layout.height)} style={[styles.navSafe, { backgroundColor: colors.navBackground, borderTopColor: colors.border }]}> 
       <View accessibilityRole="tablist" style={[styles.nav, { flexDirection: rtl ? 'row-reverse' : 'row' }]}>

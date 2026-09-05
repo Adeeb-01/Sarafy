@@ -19,6 +19,9 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
   const db = await getDatabase();
   const summary = emptySummary();
   const issues: ImportIssue[] = [];
+  if (options.mode !== 'full_restore' && ((payload.inventoryBalances?.length ?? 0) || (payload.inventoryMovements?.length ?? 0))) {
+    issues.push({ entity: 'inventory_balances', row: 0, code: 'OPERATIONAL_STOCK_SKIPPED_SAFE_MERGE', action: 'skipped' });
+  }
   const localCashSessions = await db.getAllAsync<Record<string, unknown> & { uuid: string }>('SELECT * FROM cash_sessions');
   const localSessionByUuid = new Map(localCashSessions.map(row => [row.uuid, row]));
   const localSessions = new Set(localSessionByUuid.keys());

@@ -2,7 +2,8 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as XLSX from 'xlsx';
-import { CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, Product, Sale, SalePayment, Settings } from '@/types';
+import { CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryListItem, Product, Sale, SalePayment, Settings } from '@/types';
+import { PortableInventoryMovement } from '@/import/importTypes';
 import { exchangeRateChangePercent } from '@/utils/exchangeRate';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
@@ -42,6 +43,8 @@ export async function exportExcel(
   exchangeRateHistory: ExchangeRateHistoryEntry[] = [],
   cashSessions: CashSessionSummary[] = [],
   salePayments: Array<Omit<SalePayment, 'id' | 'sale_id'> & { sale_uuid: string }> = [],
+  inventory: InventoryListItem[] = [],
+  inventoryMovements: PortableInventoryMovement[] = [],
 ) {
   const workbook = XLSX.utils.book_new();
   const sessionUuidById = new Map(cashSessions.map(session => [session.id, session.uuid]));
@@ -163,6 +166,12 @@ export async function exportExcel(
   })));
   cashSessionsSheet['!cols'] = [{ wch: 38 }, { wch: 24 }, { wch: 24 }, ...Array.from({ length: 16 }, () => ({ wch: 20 }))];
   XLSX.utils.book_append_sheet(workbook, cashSessionsSheet, 'Cash Sessions');
+  const inventorySheet = XLSX.utils.json_to_sheet(inventory.map(item => ({ product_uuid: item.product_uuid, product_name: item.product_name, barcode: item.barcode ?? '', quantity: item.quantity, low_stock_threshold: item.low_stock_threshold ?? '', status: item.status, active: item.is_active })));
+  inventorySheet['!cols'] = [{ wch: 38 }, { wch: 30 }, { wch: 22 }, { wch: 14 }, { wch: 20 }, { wch: 18 }, { wch: 10 }];
+  XLSX.utils.book_append_sheet(workbook, inventorySheet, 'Inventory');
+  const movementSheet = XLSX.utils.json_to_sheet(inventoryMovements.map(item => ({ movement_uuid: item.uuid, product_uuid: item.product_uuid_snapshot, product_name: item.product_name_snapshot, barcode: item.barcode_snapshot ?? '', type: item.movement_type, quantity_delta: item.quantity_delta, quantity_before: item.quantity_before, quantity_after: item.quantity_after, note: item.note ?? '', created_at: item.created_at })));
+  movementSheet['!cols'] = [{ wch: 38 }, { wch: 38 }, { wch: 30 }, { wch: 22 }, { wch: 15 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 36 }, { wch: 24 }];
+  XLSX.utils.book_append_sheet(workbook, movementSheet, 'Inventory Movements');
 
   const filename = `sarafy-products-${new Date().toISOString().slice(0, 10)}.xlsx`;
   const uri = `${FileSystem.cacheDirectory}${filename}`;

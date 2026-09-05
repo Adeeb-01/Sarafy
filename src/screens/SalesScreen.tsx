@@ -83,6 +83,8 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   }, [copy.sales, discount, parsedDiscount, state.language, subtotal]);
 
   const addProduct = useCallback((product: Product) => {
+    const currentQuantity = cart.find(line => line.productId === product.id)?.quantity ?? 0;
+    if (product.inventory_tracking_enabled && currentQuantity >= (product.inventory_quantity ?? 0)) { snackbar.show({ text: copy.inventory.insufficient, tone: 'info' }); return; }
     haptics.tap();
     setCompletedSale(null);
     const rate = cartExchangeRate ?? state.exchangeRate;
@@ -97,15 +99,19 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
         unitPriceSyp: calculateSypPrice({ priceUsd: product.price_usd, exchangeRate: rate, isRoundingEnabled: settings.isRoundingEnabled, roundingTarget: settings.roundingTarget }),
         unitCostSyp: product.cost_usd * rate,
       }));
-  }, [cartExchangeRate, settings.isRoundingEnabled, settings.roundingTarget, state.exchangeRate]);
+  }, [cart, cartExchangeRate, copy.inventory.insufficient, settings.isRoundingEnabled, settings.roundingTarget, snackbar, state.exchangeRate]);
 
   const setQuantity = useCallback((key: string | number, quantity: number) => {
-    setCart(current => setCartLineQuantity(current, key, quantity));
-  }, []);
+    const line = cart.find(item => item.cartKey === key || item.productId === key); const product = line?.productId == null ? undefined : state.products.find(item => item.id === line.productId);
+    const capped = product?.inventory_tracking_enabled ? Math.min(quantity, product.inventory_quantity ?? 0) : quantity;
+    setCart(current => setCartLineQuantity(current, key, capped));
+  }, [cart, state.products]);
 
   const changeQuantity = useCallback((key: string | number, delta: number) => {
+    const line = cart.find(item => item.cartKey === key || item.productId === key); const product = line?.productId == null ? undefined : state.products.find(item => item.id === line.productId);
+    if (delta > 0 && product?.inventory_tracking_enabled && (line?.quantity ?? 0) >= (product.inventory_quantity ?? 0)) { snackbar.show({ text: copy.inventory.insufficient, tone: 'info' }); return; }
     setCart(current => changeCartLineQuantity(current, key, delta));
-  }, []);
+  }, [cart, copy.inventory.insufficient, snackbar, state.products]);
 
   const requestComplete = useCallback(() => {
     if (!cart.length || discountError || !payment?.valid || cart.some(line => !line.isAvailable) || savingRef.current) return;
@@ -256,7 +262,9 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       const product = findProductByExactBarcode(productsByBarcode, barcode);
       if (!product) return { kind: 'unknown', barcode };
       if (product.is_active === 0) return { kind: 'inactive', title: product.name };
-      const nextQuantity = Math.min(999, (cart.find(line => line.productId === product.id)?.quantity ?? 0) + 1);
+      const currentQuantity = cart.find(line => line.productId === product.id)?.quantity ?? 0;
+      if (product.inventory_tracking_enabled && currentQuantity >= (product.inventory_quantity ?? 0)) return { kind: 'inactive', title: copy.inventory.outOfStock };
+      const nextQuantity = Math.min(999, currentQuantity + 1);
       const rate = cartExchangeRate ?? settings.exchangeRate;
       const amount = calculateSypPrice({ priceUsd: product.price_usd, exchangeRate: rate, isRoundingEnabled: settings.isRoundingEnabled, roundingTarget: settings.roundingTarget });
       addProduct(product);

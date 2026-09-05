@@ -1,8 +1,8 @@
-import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, Product, Sale, Settings, SuspendedSale } from '@/types';
+import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryMovementType, Product, Sale, Settings, SuspendedSale } from '@/types';
 
 export type ImportMode = 'safe_merge' | 'selective' | 'full_restore';
 export type ConflictStrategy = 'newest' | 'keep_local' | 'use_imported' | 'manual';
-export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_payments' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
+export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_payments' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'inventory_balances' | 'inventory_movements' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
 
 export interface PortableSalePayment {
   uuid: string; sale_uuid: string; currency: 'SYP' | 'USD'; amount_minor: number;
@@ -21,6 +21,13 @@ export interface PortableSaleReturn {
 }
 
 export type PortableCashSession = Omit<CashSession, 'id'>;
+
+export interface PortableInventoryBalance { product_uuid: string; tracking_enabled: number; quantity: number; low_stock_threshold: number | null; created_at: string; updated_at: string }
+export interface PortableInventoryMovement {
+  uuid: string; product_uuid: string; product_uuid_snapshot: string; product_name_snapshot: string; barcode_snapshot: string | null;
+  movement_type: InventoryMovementType; quantity_delta: number; quantity_before: number; quantity_after: number;
+  sale_item_uuid: string | null; return_item_uuid: string | null; note: string | null; created_at: string;
+}
 
 export interface PortableCategory {
   id?: number;
@@ -44,6 +51,8 @@ export interface ImportPayload {
   expenseCategories?: ExpenseCategory[];
   exchangeRateHistory?: ExchangeRateHistoryEntry[];
   cashSessions?: PortableCashSession[];
+  inventoryBalances?: PortableInventoryBalance[];
+  inventoryMovements?: PortableInventoryMovement[];
 }
 
 export interface ImportOptions {

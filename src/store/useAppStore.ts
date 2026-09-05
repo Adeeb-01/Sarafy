@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
+import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, SuspendedSale, SuspendedSaleSummary } from '@/types';
 import * as database from '@/database/database';
 
 const defaults: Settings = {
@@ -68,6 +68,13 @@ interface AppState extends Settings {
   getCashSessionSales: (id: number) => Promise<Sale[]>;
   getCashSessionExpenses: (id: number) => Promise<Expense[]>;
   getCashSessionReturns: (id: number) => Promise<CashSessionReturnSummary[]>;
+  queryInventory: (query?: InventoryQuery) => Promise<InventoryListItem[]>;
+  getInventoryMetrics: () => Promise<InventoryMetrics>;
+  getInventoryDetail: (productId: number) => Promise<InventoryDetail | null>;
+  enableInventoryTracking: (productId: number, openingQuantity: number, threshold: number | null, note?: string | null) => Promise<void>;
+  adjustInventory: (productId: number, mode: 'stock_in' | 'stock_out' | 'physical_count', quantity: number, note?: string | null) => Promise<void>;
+  updateInventoryThreshold: (productId: number, threshold: number | null) => Promise<void>;
+  auditInventoryHealth: () => Promise<InventoryHealthReport>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -122,12 +129,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   completeSale: async (items, discountSyp = 0, payment, exchangeRate = get().exchangeRate, draftId) => {
     const sale = await database.createSale(items, exchangeRate, discountSyp, payment, draftId);
-    set({ sales: [sale, ...get().sales], suspendedSales: draftId == null ? get().suspendedSales : get().suspendedSales.filter(draft => draft.id !== draftId), activeCashSession: await database.getActiveCashSession() });
+    set({ products: await database.getProducts(), sales: [sale, ...get().sales], suspendedSales: draftId == null ? get().suspendedSales : get().suspendedSales.filter(draft => draft.id !== draftId), activeCashSession: await database.getActiveCashSession() });
     return sale;
   },
   createReturn: async (saleId, selections) => {
     const record = await database.createSaleReturn(saleId, selections);
-    set({ sales: await database.getSales(), activeCashSession: await database.getActiveCashSession() });
+    set({ products: await database.getProducts(), sales: await database.getSales(), activeCashSession: await database.getActiveCashSession() });
     return record;
   },
   suspendSale: async (items, discountSyp, exchangeRate, replaceDraftId) => {
@@ -179,4 +186,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   getCashSessionSales: database.getCashSessionSales,
   getCashSessionExpenses: database.getCashSessionExpenses,
   getCashSessionReturns: database.getCashSessionReturns,
+  queryInventory: database.getInventory,
+  getInventoryMetrics: database.getInventoryMetrics,
+  getInventoryDetail: database.getInventoryDetail,
+  enableInventoryTracking: database.enableInventoryTracking,
+  adjustInventory: database.adjustInventory,
+  updateInventoryThreshold: database.updateInventoryThreshold,
+  auditInventoryHealth: database.auditInventoryHealth,
 }));

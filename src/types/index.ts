@@ -12,9 +12,12 @@ export interface Product {
   created_at: string;
   updated_at: string;
   is_active: number;
+  inventory_tracking_enabled?: number;
+  inventory_quantity?: number | null;
+  low_stock_threshold?: number | null;
 }
 
-export type ProductInput = Omit<Product, 'id' | 'uuid' | 'created_at' | 'updated_at' | 'is_active'>;
+export type ProductInput = Omit<Product, 'id' | 'uuid' | 'created_at' | 'updated_at' | 'is_active' | 'inventory_tracking_enabled' | 'inventory_quantity' | 'low_stock_threshold'>;
 
 export interface Settings {
   exchangeRate: number;
@@ -37,6 +40,7 @@ export interface SaleItem {
   line_cost_syp: number;
   created_at: string;
   updated_at: string;
+  inventory_sale_movement?: number;
 }
 
 export type ReturnStatus = 'none' | 'partial' | 'full';
@@ -136,7 +140,7 @@ export interface ReturnableSaleItem extends SaleItem {
   previewRefundSyp: number;
 }
 
-export interface ReturnSelection { saleItemId: number; quantity: number }
+export interface ReturnSelection { saleItemId: number; quantity: number; restockQuantity?: number }
 
 export interface ReturnPreview {
   items: Array<{ saleItemId: number; quantity: number; refundAmountSyp: number; costReversalSyp: number }>;
@@ -151,6 +155,64 @@ export interface SaleItemInput {
   quantity: number;
   unitPriceSyp: number;
   unitCostSyp: number;
+}
+
+export type InventoryMovementType = 'opening' | 'stock_in' | 'stock_out' | 'adjustment' | 'sale' | 'return';
+export type InventoryStockStatus = 'in_stock' | 'low_stock' | 'out_of_stock';
+
+export interface InventoryBalance {
+  id: number;
+  product_id: number;
+  tracking_enabled: number;
+  quantity: number;
+  low_stock_threshold: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InventoryListItem extends InventoryBalance {
+  product_uuid: string;
+  product_name: string;
+  barcode: string | null;
+  is_active: number;
+  status: InventoryStockStatus;
+}
+
+export interface InventoryMovement {
+  id: number;
+  uuid: string;
+  product_id: number | null;
+  product_uuid_snapshot: string;
+  product_name_snapshot: string;
+  barcode_snapshot: string | null;
+  movement_type: InventoryMovementType;
+  quantity_delta: number;
+  quantity_before: number;
+  quantity_after: number;
+  sale_item_id: number | null;
+  return_item_id: number | null;
+  note: string | null;
+  created_at: string;
+}
+
+export interface InventoryDetail extends InventoryListItem {
+  movements: InventoryMovement[];
+}
+
+export interface InventoryQuery {
+  search?: string;
+  status?: 'all' | InventoryStockStatus;
+  sort?: 'name' | 'lowest' | 'highest';
+}
+
+export interface InventoryMetrics { tracked: number; lowStock: number; outOfStock: number }
+
+export interface InventoryHealthReport {
+  negativeBalances: number;
+  arithmeticMismatches: number;
+  latestBalanceMismatches: number;
+  duplicateSaleMovements: number;
+  duplicateReturnMovements: number;
 }
 
 export interface PaymentInfo {

@@ -1,5 +1,5 @@
 import * as SQLite from 'expo-sqlite';
-import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
+import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryMovement, InventoryMovementType, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
 import { createDeterministicUuid, createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
@@ -9,7 +9,7 @@ import { calculateSettlement } from '@/utils/multiCurrency';
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
@@ -269,6 +269,48 @@ async function migrateMultiCurrencyV13() {
   });
 }
 
+async function migrateInventoryV14() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 14) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    await transaction.execAsync(`
+      CREATE TABLE inventory_balances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER NOT NULL UNIQUE REFERENCES products(id) ON DELETE RESTRICT,
+        tracking_enabled INTEGER NOT NULL DEFAULT 0 CHECK(tracking_enabled IN (0,1)),
+        quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity >= 0),
+        low_stock_threshold INTEGER CHECK(low_stock_threshold IS NULL OR low_stock_threshold >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE inventory_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+        product_uuid_snapshot TEXT NOT NULL,
+        product_name_snapshot TEXT NOT NULL,
+        barcode_snapshot TEXT,
+        movement_type TEXT NOT NULL CHECK(movement_type IN ('opening','stock_in','stock_out','adjustment','sale','return')),
+        quantity_delta INTEGER NOT NULL CHECK(quantity_delta <> 0),
+        quantity_before INTEGER NOT NULL CHECK(quantity_before >= 0),
+        quantity_after INTEGER NOT NULL CHECK(quantity_after >= 0),
+        sale_item_id INTEGER REFERENCES sale_items(id) ON DELETE RESTRICT,
+        return_item_id INTEGER REFERENCES sale_return_items(id) ON DELETE RESTRICT,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        CHECK(quantity_after = quantity_before + quantity_delta)
+      );
+      CREATE INDEX idx_inventory_balances_tracking_quantity ON inventory_balances(tracking_enabled,quantity);
+      CREATE INDEX idx_inventory_movements_product_created ON inventory_movements(product_id,created_at DESC,id DESC);
+      CREATE UNIQUE INDEX idx_inventory_movements_sale_item ON inventory_movements(sale_item_id) WHERE sale_item_id IS NOT NULL AND movement_type='sale';
+      CREATE UNIQUE INDEX idx_inventory_movements_return_item ON inventory_movements(return_item_id) WHERE return_item_id IS NOT NULL AND movement_type='return';
+      PRAGMA user_version = 14;
+    `);
+  });
+}
+
 export async function initializeDatabase() {
   const db = await dbPromise;
   await db.execAsync(`
@@ -339,6 +381,7 @@ export async function initializeDatabase() {
   await migrateExpensesAndRatesV11();
   await migrateCashSessionsV12();
   await migrateMultiCurrencyV13();
+  await migrateInventoryV14();
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
   if (integrity?.integrity_check !== 'ok') throw new Error('DATABASE_INTEGRITY_CHECK_FAILED');
   const foreignKeys = await db.getAllAsync<{ table: string; rowid: number }>('PRAGMA foreign_key_check');
@@ -360,7 +403,8 @@ export async function initializeDatabase() {
 
 export async function getProducts() {
   const db = await dbPromise;
-  return db.getAllAsync<Product>('SELECT * FROM products ORDER BY created_at DESC');
+  return db.getAllAsync<Product>(`SELECT p.*,COALESCE(b.tracking_enabled,0) AS inventory_tracking_enabled,b.quantity AS inventory_quantity,b.low_stock_threshold
+    FROM products p LEFT JOIN inventory_balances b ON b.product_id=p.id ORDER BY p.created_at DESC`);
 }
 
 export class ProductBarcodeConflictError extends Error {
@@ -374,7 +418,8 @@ export async function getProductByBarcode(barcodeValue: string) {
   const barcode = normalizeBarcode(barcodeValue);
   if (!barcode) return null;
   const db = await dbPromise;
-  return db.getFirstAsync<Product>('SELECT * FROM products WHERE barcode = ? LIMIT 1', barcode);
+  return db.getFirstAsync<Product>(`SELECT p.*,COALESCE(b.tracking_enabled,0) AS inventory_tracking_enabled,b.quantity AS inventory_quantity,b.low_stock_threshold
+    FROM products p LEFT JOIN inventory_balances b ON b.product_id=p.id WHERE p.barcode = ? LIMIT 1`, barcode);
 }
 
 export async function addProduct(input: ProductInput) {
@@ -443,9 +488,16 @@ export async function updateProduct(id: number, input: ProductInput) {
 
 export async function deleteProduct(id: number) {
   const db = await dbPromise;
-  const current = await db.getFirstAsync<{ image_uri: string | null }>(
-    'SELECT image_uri FROM products WHERE id=?', id,
+  const current = await db.getFirstAsync<{ image_uri: string | null; has_inventory: number }>(
+    `SELECT p.image_uri,CASE WHEN EXISTS(SELECT 1 FROM inventory_balances b WHERE b.product_id=p.id)
+      OR EXISTS(SELECT 1 FROM inventory_movements m WHERE m.product_id=p.id) THEN 1 ELSE 0 END AS has_inventory
+     FROM products p WHERE p.id=?`, id,
   );
+  if (!current) return;
+  if (current.has_inventory) {
+    await db.runAsync('UPDATE products SET is_active=0,updated_at=? WHERE id=?', new Date().toISOString(), id);
+    return;
+  }
   await db.runAsync('DELETE FROM products WHERE id = ?', id);
   const imageUri = current?.image_uri ?? null;
   if (!isStoredProductImagePath(imageUri)) return;
@@ -457,6 +509,89 @@ export async function deleteProduct(id: number) {
       if (__DEV__) console.error('[ProductImageCleanupFailed]', error);
     });
   }
+}
+
+function inventoryStatusSql(alias = 'b') {
+  return `CASE WHEN ${alias}.quantity=0 THEN 'out_of_stock' WHEN ${alias}.low_stock_threshold IS NOT NULL AND ${alias}.quantity<=${alias}.low_stock_threshold THEN 'low_stock' ELSE 'in_stock' END`;
+}
+
+export async function getInventory(query: InventoryQuery = {}): Promise<InventoryListItem[]> {
+  const db = await dbPromise;
+  const where = ['b.tracking_enabled=1'];
+  const parameters: Array<string | number> = [];
+  const search = query.search?.trim();
+  if (search) { where.push('(p.name LIKE ? COLLATE NOCASE OR p.barcode=?)'); parameters.push(`%${search}%`, normalizeBarcode(search) ?? search); }
+  if (query.status && query.status !== 'all') { where.push(`${inventoryStatusSql()}=?`); parameters.push(query.status); }
+  const orderBy = { name: 'p.name COLLATE NOCASE ASC,p.id ASC', lowest: 'b.quantity ASC,p.name COLLATE NOCASE ASC', highest: 'b.quantity DESC,p.name COLLATE NOCASE ASC' }[query.sort ?? 'name'];
+  return db.getAllAsync<InventoryListItem>(`SELECT b.*,p.uuid AS product_uuid,p.name AS product_name,p.barcode,p.is_active,${inventoryStatusSql()} AS status
+    FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE ${where.join(' AND ')} ORDER BY ${orderBy}`, ...parameters);
+}
+
+export async function getInventoryMetrics(): Promise<InventoryMetrics> {
+  const db = await dbPromise;
+  const row = await db.getFirstAsync<{ tracked: number; low_stock: number; out_of_stock: number }>(`SELECT COUNT(*) AS tracked,
+    SUM(CASE WHEN quantity>0 AND low_stock_threshold IS NOT NULL AND quantity<=low_stock_threshold THEN 1 ELSE 0 END) AS low_stock,
+    SUM(CASE WHEN quantity=0 THEN 1 ELSE 0 END) AS out_of_stock FROM inventory_balances WHERE tracking_enabled=1`);
+  return { tracked: row?.tracked ?? 0, lowStock: row?.low_stock ?? 0, outOfStock: row?.out_of_stock ?? 0 };
+}
+
+export async function getInventoryDetail(productId: number): Promise<InventoryDetail | null> {
+  const db = await dbPromise;
+  const balance = await db.getFirstAsync<InventoryListItem>(`SELECT b.*,p.uuid AS product_uuid,p.name AS product_name,p.barcode,p.is_active,${inventoryStatusSql()} AS status
+    FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE b.product_id=? AND b.tracking_enabled=1`, productId);
+  if (!balance) return null;
+  const movements = await db.getAllAsync<InventoryMovement>('SELECT * FROM inventory_movements WHERE product_id=? ORDER BY created_at DESC,id DESC LIMIT 100', productId);
+  return { ...balance, movements };
+}
+
+export async function enableInventoryTracking(productId: number, openingQuantity: number, threshold: number | null, note?: string | null) {
+  if (![productId, openingQuantity].every(Number.isSafeInteger) || productId <= 0 || openingQuantity < 0 || (threshold != null && (!Number.isSafeInteger(threshold) || threshold < 0))) throw new Error('INVALID_INVENTORY_INPUT');
+  const db = await dbPromise; const now = new Date().toISOString();
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const product = await transaction.getFirstAsync<Product>('SELECT * FROM products WHERE id=? AND is_active<>0', productId);
+    if (!product) throw new Error('PRODUCT_NOT_FOUND');
+    const existing = await transaction.getFirstAsync<{ tracking_enabled: number }>('SELECT tracking_enabled FROM inventory_balances WHERE product_id=?', productId);
+    if (existing?.tracking_enabled) throw new Error('INVENTORY_ALREADY_ENABLED');
+    await transaction.runAsync(`INSERT INTO inventory_balances(product_id,tracking_enabled,quantity,low_stock_threshold,created_at,updated_at) VALUES(?,1,?,?,?,?)
+      ON CONFLICT(product_id) DO UPDATE SET tracking_enabled=1,quantity=excluded.quantity,low_stock_threshold=excluded.low_stock_threshold,updated_at=excluded.updated_at`, productId, openingQuantity, threshold, now, now);
+    if (openingQuantity > 0) await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,note,created_at)
+      VALUES(?,?,?,?,?,'opening',?,0,?,?,?)`, createUuid(), product.id, product.uuid, product.name, product.barcode, openingQuantity, openingQuantity, note?.trim() || null, now);
+  });
+}
+
+export async function adjustInventory(productId: number, mode: 'stock_in' | 'stock_out' | 'physical_count', quantity: number, note?: string | null) {
+  if (!Number.isSafeInteger(productId) || productId <= 0 || !Number.isSafeInteger(quantity) || quantity < 0 || (mode !== 'physical_count' && quantity === 0)) throw new Error('INVALID_INVENTORY_INPUT');
+  const db = await dbPromise; const now = new Date().toISOString();
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const row = await transaction.getFirstAsync<InventoryListItem>(`SELECT b.*,p.uuid AS product_uuid,p.name AS product_name,p.barcode,p.is_active,'in_stock' AS status FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE b.product_id=? AND b.tracking_enabled=1`, productId);
+    if (!row) throw new Error('INVENTORY_NOT_TRACKED');
+    const after = mode === 'stock_in' ? row.quantity + quantity : mode === 'stock_out' ? row.quantity - quantity : quantity;
+    if (!Number.isSafeInteger(after) || after < 0) throw new Error('INSUFFICIENT_STOCK');
+    const delta = after - row.quantity;
+    if (delta === 0) return;
+    const movementType: InventoryMovementType = mode === 'physical_count' ? 'adjustment' : mode;
+    await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND quantity=?', after, now, productId, row.quantity);
+    await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,note,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, createUuid(), productId, row.product_uuid, row.product_name, row.barcode, movementType, delta, row.quantity, after, note?.trim() || null, now);
+  });
+}
+
+export async function updateInventoryThreshold(productId: number, threshold: number | null) {
+  if (threshold != null && (!Number.isSafeInteger(threshold) || threshold < 0)) throw new Error('INVALID_INVENTORY_INPUT');
+  const db = await dbPromise;
+  const result = await db.runAsync('UPDATE inventory_balances SET low_stock_threshold=?,updated_at=? WHERE product_id=? AND tracking_enabled=1', threshold, new Date().toISOString(), productId);
+  if (!result.changes) throw new Error('INVENTORY_NOT_TRACKED');
+}
+
+export async function auditInventoryHealth(): Promise<InventoryHealthReport> {
+  const db = await dbPromise;
+  const row = await db.getFirstAsync<{ negative: number; arithmetic: number; latest: number; sale_duplicates: number; return_duplicates: number }>(`SELECT
+    (SELECT COUNT(*) FROM inventory_balances WHERE quantity<0) AS negative,
+    (SELECT COUNT(*) FROM inventory_movements WHERE quantity_after<>quantity_before+quantity_delta OR quantity_before<0 OR quantity_after<0) AS arithmetic,
+    (SELECT COUNT(*) FROM inventory_balances b WHERE b.tracking_enabled=1 AND EXISTS(SELECT 1 FROM inventory_movements m WHERE m.product_id=b.product_id) AND b.quantity<>(SELECT m.quantity_after FROM inventory_movements m WHERE m.product_id=b.product_id ORDER BY m.id DESC LIMIT 1)) AS latest,
+    (SELECT COUNT(*) FROM (SELECT sale_item_id FROM inventory_movements WHERE sale_item_id IS NOT NULL GROUP BY sale_item_id HAVING COUNT(*)>1)) AS sale_duplicates,
+    (SELECT COUNT(*) FROM (SELECT return_item_id FROM inventory_movements WHERE return_item_id IS NOT NULL GROUP BY return_item_id HAVING COUNT(*)>1)) AS return_duplicates`);
+  return { negativeBalances: row?.negative ?? 0, arithmeticMismatches: row?.arithmetic ?? 0, latestBalanceMismatches: row?.latest ?? 0, duplicateSaleMovements: row?.sale_duplicates ?? 0, duplicateReturnMovements: row?.return_duplicates ?? 0 };
 }
 
 export async function getCategories() {
@@ -630,7 +765,8 @@ async function attachSaleItems(sales: Omit<Sale, 'items'>[]): Promise<Sale[]> {
   for (let offset = 0; offset < ids.length; offset += 800) {
     const chunk = ids.slice(offset, offset + 800);
     items.push(...await db.getAllAsync<SaleItem>(
-      `SELECT * FROM sale_items WHERE sale_id IN (${chunk.map(() => '?').join(',')}) ORDER BY id`,
+      `SELECT si.*,EXISTS(SELECT 1 FROM inventory_movements im WHERE im.sale_item_id=si.id AND im.movement_type='sale') AS inventory_sale_movement
+       FROM sale_items si WHERE sale_id IN (${chunk.map(() => '?').join(',')}) ORDER BY si.id`,
       ...chunk,
     ));
   }
@@ -761,6 +897,18 @@ export async function createSale(
       ) : { count: 0 };
       if ((available?.count ?? 0) !== productIds.length) throw new Error('DRAFT_HAS_UNAVAILABLE_ITEMS');
     }
+    const requestedByProduct = new Map<number, number>();
+    for (const item of items) if (item.productId != null) requestedByProduct.set(item.productId, (requestedByProduct.get(item.productId) ?? 0) + item.quantity);
+    const requestedIds = [...requestedByProduct.keys()];
+    const trackedRows = requestedIds.length ? await transaction.getAllAsync<{ product_id: number; quantity: number; product_uuid: string; product_name: string; barcode: string | null }>(
+      `SELECT b.product_id,b.quantity,p.uuid AS product_uuid,p.name AS product_name,p.barcode FROM inventory_balances b JOIN products p ON p.id=b.product_id
+       WHERE b.tracking_enabled=1 AND b.product_id IN (${requestedIds.map(() => '?').join(',')})`, ...requestedIds,
+    ) : [];
+    const tracked = new Map(trackedRows.map(row => [row.product_id, row]));
+    for (const [productId, requested] of requestedByProduct) {
+      const stock = tracked.get(productId);
+      if (stock && stock.quantity < requested) throw new Error('INSUFFICIENT_STOCK');
+    }
     const result = await transaction.runAsync(
       `INSERT INTO sales
        (uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,amount_paid_syp,change_syp,created_at,updated_at,cash_session_id)
@@ -769,7 +917,7 @@ export async function createSale(
     );
     saleId = result.lastInsertRowId;
     for (const [index, item] of items.entries()) {
-      await transaction.runAsync(
+      const insertedItem = await transaction.runAsync(
         `INSERT INTO sale_items
          (uuid,sale_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,line_total_syp,line_cost_syp,created_at,updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -777,6 +925,18 @@ export async function createSale(
         item.unitPriceSyp, item.unitCostSyp,
         item.unitPriceSyp * item.quantity, lineCosts[index] ?? 0, createdAt, createdAt,
       );
+      if (item.productId != null) {
+        const stock = tracked.get(item.productId);
+        if (stock) {
+          const before = stock.quantity; const after = before - item.quantity;
+          if (after < 0) throw new Error('INSUFFICIENT_STOCK');
+          const changed = await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND quantity=?', after, createdAt, item.productId, before);
+          if (changed.changes !== 1) throw new Error('INVENTORY_CONCURRENT_CHANGE');
+          await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,note,created_at)
+            VALUES(?,?,?,?,?,'sale',?,?,?,?,NULL,?)`, createUuid(), item.productId, stock.product_uuid, item.productName, item.barcodeSnapshot, -item.quantity, before, after, insertedItem.lastInsertRowId, createdAt);
+          stock.quantity = after;
+        }
+      }
     }
     for (const payment of settlement.payments) await transaction.runAsync(
       `INSERT INTO sale_payments(uuid,sale_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,created_at)
@@ -819,10 +979,28 @@ export async function createSaleReturn(saleId: number, selections: ReturnSelecti
       createUuid(), saleId, preview.refundTotalSyp, preview.returnedCostSyp, now, now, activeSession.id,
     );
     returnId = inserted.lastInsertRowId;
-    for (const item of preview.items) await transaction.runAsync(
-      `INSERT INTO sale_return_items(uuid,return_id,sale_item_id,quantity,refund_amount_syp,cost_reversal_syp,created_at,updated_at)
-       VALUES(?,?,?,?,?,?,?,?)`, createUuid(), returnId, item.saleItemId, item.quantity, item.refundAmountSyp, item.costReversalSyp, now, now,
-    );
+    const selectionByItem = new Map(selections.map(selection => [selection.saleItemId, selection]));
+    for (const item of preview.items) {
+      const selectedRestock = selectionByItem.get(item.saleItemId)?.restockQuantity ?? item.quantity;
+      if (!Number.isSafeInteger(selectedRestock) || selectedRestock < 0 || selectedRestock > item.quantity) throw new Error('INVALID_RESTOCK_QUANTITY');
+      const insertedItem = await transaction.runAsync(
+        `INSERT INTO sale_return_items(uuid,return_id,sale_item_id,quantity,refund_amount_syp,cost_reversal_syp,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?)`, createUuid(), returnId, item.saleItemId, item.quantity, item.refundAmountSyp, item.costReversalSyp, now, now,
+      );
+      if (selectedRestock === 0) continue;
+      const sold = saleItems.find(saleItem => saleItem.id === item.saleItemId);
+      if (!sold?.product_id) continue;
+      const eligible = await transaction.getFirstAsync<{ product_id: number }>("SELECT product_id FROM inventory_movements WHERE sale_item_id=? AND movement_type='sale' LIMIT 1", sold.id);
+      if (!eligible) continue;
+      const balance = await transaction.getFirstAsync<{ quantity: number; product_uuid: string; product_name: string; barcode: string | null }>(`SELECT b.quantity,p.uuid AS product_uuid,p.name AS product_name,p.barcode FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE b.product_id=? AND b.tracking_enabled=1`, sold.product_id);
+      if (!balance) continue;
+      const after = balance.quantity + selectedRestock;
+      if (!Number.isSafeInteger(after)) throw new Error('INVALID_RESTOCK_QUANTITY');
+      const changed = await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND quantity=?', after, now, sold.product_id, balance.quantity);
+      if (changed.changes !== 1) throw new Error('INVENTORY_CONCURRENT_CHANGE');
+      await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,return_item_id,note,created_at)
+        VALUES(?,?,?,?,?,'return',?,?,?,?,NULL,?)`, createUuid(), sold.product_id, balance.product_uuid, sold.product_name, sold.barcode_snapshot, selectedRestock, balance.quantity, after, insertedItem.lastInsertRowId, now);
+    }
   });
   const record = (await getReturns()).find(item => item.id === returnId);
   if (!record) throw new Error('RETURN_NOT_FOUND');

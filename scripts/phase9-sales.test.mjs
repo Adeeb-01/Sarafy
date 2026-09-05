@@ -111,7 +111,7 @@ test('repeat sale architecture uses current product pricing/rate, retains quanti
 
 test('backup v10 retains phase 9 drafts semantics while accepting v8 payload fields', async () => {
   const [backup, importer, types] = await Promise.all([read('src/backup/backupManager.ts'), read('src/import/jsonImporter.ts'), read('src/import/importTypes.ts')]);
-  assert.match(backup, /const SCHEMA_VERSION = 13/); assert.match(backup, /drafts: draftRows\.map/); assert.match(backup, /counts\.drafts != null/);
+  assert.match(backup, /const SCHEMA_VERSION = 14/); assert.match(backup, /drafts: draftRows\.map/); assert.match(backup, /counts\.drafts != null/);
   assert.match(importer, /options\.mode === 'full_restore' && options\.entities\.includes\('sale_drafts'\)/);
   assert.match(importer, /sale\.amount_paid_syp \?\? null/); assert.match(importer, /item\.barcode_snapshot \?\? null/);
   assert.match(types, /drafts\?: SuspendedSale\[\]/);

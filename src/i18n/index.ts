@@ -3,7 +3,7 @@ import { Language } from '@/types';
 const messages = {
   ar: {
     appName: 'صَرّافي', appTagline: 'أسعار المتجر، لحظياً وبدون إنترنت', offlineStatus: 'يعمل دون إنترنت',
-    catalog: 'الأسعار', sales: 'المبيعات', manage: 'المنتجات', settings: 'الإعدادات',
+    catalog: 'الأسعار', sales: 'المبيعات', manage: 'المنتجات', inventory: 'المخزون', settings: 'الإعدادات',
     rate: 'سعر صرف الدولار', editRate: 'تعديل سعر الصرف', rounding: 'تقريب السعر',
     catalogTitle: 'الأسعار الحالية', catalogSubtitle: 'اختر منتجاً لقراءة سعره بسرعة',
     search: 'ابحث بالاسم أو الباركود', all: 'الكل', syp: 'ل.س',
@@ -52,7 +52,7 @@ const messages = {
   },
   en: {
     appName: 'Sarafy', appTagline: 'Store prices, instantly and offline', offlineStatus: 'Offline ready',
-    catalog: 'Catalog', sales: 'Sales', manage: 'Products', settings: 'Settings',
+    catalog: 'Catalog', sales: 'Sales', manage: 'Products', inventory: 'Inventory', settings: 'Settings',
     rate: 'Exchange rate', editRate: 'Edit rate', rounding: 'Rounding',
     catalogTitle: 'Current prices', catalogSubtitle: 'Find a product and read its price instantly',
     search: 'Search name or barcode', all: 'All', syp: 'SYP',
