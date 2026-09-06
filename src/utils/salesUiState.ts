@@ -22,6 +22,10 @@ export function calculateCartSubtotal(cart: QuantityLine[]) {
   return cart.reduce((sum, line) => sum + line.unitPriceSyp * line.quantity, 0);
 }
 
+export function isCartLineUnavailable(line: { isAvailable: boolean; quantity: number; availableQuantity?: number }) {
+  return !line.isAvailable || (line.availableQuantity != null && line.quantity > line.availableQuantity);
+}
+
 export function clampCartDiscount(discount: number, subtotal: number) {
   return Number.isFinite(discount) ? Math.max(0, Math.min(discount, subtotal)) : 0;
 }

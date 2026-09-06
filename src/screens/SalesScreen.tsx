@@ -13,7 +13,7 @@ import { calculateSypPrice } from '@/utils/priceCalculator';
 import { formatNumber } from '@/utils/formatters';
 import { shareInvoicePdf } from '@/utils/invoice';
 import { haptics } from '@/utils/haptics';
-import { addCartLine, calculateCartSubtotal, changeCartLineQuantity, clampCartDiscount, parseLocalizedNumber, setCartLineQuantity } from '@/utils/salesUiState';
+import { addCartLine, calculateCartSubtotal, changeCartLineQuantity, clampCartDiscount, isCartLineUnavailable, parseLocalizedNumber, setCartLineQuantity } from '@/utils/salesUiState';
 import { calculateSettlement, formatUsdCents, minimumUsdCentsToCover, parseUsdToCents } from '@/utils/multiCurrency';
 import { uiText } from '@/i18n';
 import { BarcodeScannerScreen } from '@/components/barcode/BarcodeScannerScreen';
@@ -95,6 +95,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
         productName: product.name,
         barcodeSnapshot: product.barcode,
         isAvailable: product.is_active !== 0,
+        availableQuantity: product.inventory_tracking_enabled ? product.inventory_quantity ?? 0 : undefined,
         quantity: 1,
         unitPriceSyp: calculateSypPrice({ priceUsd: product.price_usd, exchangeRate: rate, isRoundingEnabled: settings.isRoundingEnabled, roundingTarget: settings.roundingTarget }),
         unitCostSyp: product.cost_usd * rate,
@@ -114,14 +115,14 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   }, [cart, copy.inventory.insufficient, snackbar, state.products]);
 
   const requestComplete = useCallback(() => {
-    if (!cart.length || discountError || !payment?.valid || cart.some(line => !line.isAvailable) || savingRef.current) return;
+    if (!cart.length || discountError || !payment?.valid || cart.some(isCartLineUnavailable) || savingRef.current) return;
     if (!state.activeCashSession) { snackbar.show({ text: copy.cashSession.cashRequired, tone: 'info' }); setSection('cash'); return; }
     haptics.warning();
     setConfirmOpen(true);
   }, [cart, copy.cashSession.cashRequired, discountError, payment?.valid, snackbar, state.activeCashSession]);
 
   const completeSale = async () => {
-    if (!cart.length || discountError || !payment?.valid || cart.some(line => !line.isAvailable) || savingRef.current) return;
+    if (!cart.length || discountError || !payment?.valid || cart.some(isCartLineUnavailable) || savingRef.current) return;
     savingRef.current = true;
     setSaving(true);
     try {
@@ -170,7 +171,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       const products = new Map(state.products.map(product => [product.id, product]));
       const restored: CartLine[] = full.items.map(item => {
         const product = item.product_id == null ? undefined : products.get(item.product_id);
-        return { productId: item.product_id, cartKey: item.product_id == null ? `draft:${item.uuid}` : `product:${item.product_id}`, productName: item.product_name, barcodeSnapshot: item.barcode_snapshot, quantity: item.quantity, unitPriceSyp: item.unit_price_syp, unitCostSyp: item.unit_cost_syp, isAvailable: Boolean(product && product.is_active !== 0) };
+        return { productId: item.product_id, cartKey: item.product_id == null ? `draft:${item.uuid}` : `product:${item.product_id}`, productName: item.product_name, barcodeSnapshot: item.barcode_snapshot, quantity: item.quantity, unitPriceSyp: item.unit_price_syp, unitCostSyp: item.unit_cost_syp, isAvailable: Boolean(product && product.is_active !== 0), availableQuantity: product?.inventory_tracking_enabled ? product.inventory_quantity ?? 0 : undefined };
       });
       setCart(restored); setDiscount(full.discount_syp ? String(full.discount_syp) : ''); setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true);
       setCartExchangeRate(full.exchange_rate); setActiveDraftId(full.id); setCompletedSale(null); setSection('sale'); setReviewOpen(true); setDraftToResume(null);

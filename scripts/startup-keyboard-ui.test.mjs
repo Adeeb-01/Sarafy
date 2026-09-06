@@ -23,6 +23,19 @@ test('keyboard hidden produces no bottom-sheet inset', () => {
   assert.equal(calculateKeyboardInset({ y: 0, height: 844 }, null), 0);
 });
 
+test('full-screen product modal resizes its sticky save action above Android IME', async () => {
+  const source = await readFile(new URL('../src/components/ProductFormModal.tsx', import.meta.url), 'utf8');
+  // Android 12 physical-device regression: the modal window stayed full height
+  // despite activity adjustResize; an undefined Android behavior hid the CTA.
+  assert.match(source, /<KeyboardAvoidingView behavior=\{Platform\.OS === 'ios' \? 'padding' : 'height'\}/);
+  const start = source.indexOf('<KeyboardAvoidingView');
+  const end = source.indexOf('</KeyboardAvoidingView>', start);
+  const body = source.slice(start, end);
+  assert.match(body, /styles\.footer/);
+  assert.match(body, /copy\.productForm\.saveProduct/);
+  assert.match(body, /keyboardShouldPersistTaps="handled"/);
+});
+
 test('keyboard overlap is measured against the modal viewport', () => {
   assert.equal(calculateKeyboardInset({ y: 0, height: 844 }, { screenY: 520, height: 324 }), 324);
   assert.equal(calculateKeyboardInset({ y: 24, height: 820 }, { screenY: 520, height: 324 }), 324);

@@ -95,3 +95,10 @@ test('native and shared scanner configuration include camera, exclude audio, and
   assert.match(management, /product\.barcode === exactScanBarcode/);
   assert.match(analyzer, /existingByUuid\.uuid !== existingByBarcode\.uuid/);
 });
+test('scanner refreshes external permission changes on reopen and foreground', async () => {
+  const source = await readFile(new URL('../src/components/barcode/BarcodeScannerScreen.tsx', import.meta.url), 'utf8');
+  assert.match(source, /\[permission, requestPermission, getPermission\] = useCameraPermissions\(\)/);
+  assert.match(source, /if \(visible\) \{ resetSession\(\); refreshPermission\(\); \}/);
+  assert.match(source, /if \(active\) refreshPermission\(\)/);
+  assert.match(source, /void getPermission\(\)\.catch/);
+});

@@ -164,7 +164,7 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
         <View style={styles.headerCopy}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.productForm.subtitle}</Text></View>
         <IconButton icon="x" label={copy.common.close} onPress={onClose} disabled={saving} />
       </View>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.flex}>
         <ScrollView ref={scrollRef} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={[styles.scroll, { paddingBottom: stickyActionHeight + insets.bottom + spacing.md }]} scrollIndicatorInsets={{ bottom: stickyActionHeight + insets.bottom }}>
           <FormSection title={copy.productForm.basic} icon="package" rtl={rtl} onLayout={setSectionOffset('details')}>
             <AppInput label={copy.productForm.productName} value={name} onChangeText={value => { setName(value); clearError('name'); }} error={errors.name} placeholder={copy.productForm.nameExample} accessibilityLabel={copy.productForm.productName} rtl={rtl} autoCapitalize="sentences" returnKeyType="next" />

@@ -33,7 +33,7 @@ export function BarcodeScannerScreen({ visible, mode, language, onClose, onScan,
   const insets = useSafeAreaInsets();
   const copy = uiText(language);
   const rtl = language === 'ar';
-  const [permission, requestPermission] = useCameraPermissions();
+  const [permission, requestPermission, getPermission] = useCameraPermissions();
   const [torch, setTorch] = useState(false);
   const [cameraError, setCameraError] = useState(false);
   const [cameraKey, setCameraKey] = useState(0);
@@ -42,6 +42,13 @@ export function BarcodeScannerScreen({ visible, mode, language, onClose, onScan,
   const gateRef = useRef(createBarcodeScanGate());
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pausedRef = useRef(false);
+
+  const refreshPermission = useCallback(() => {
+    void getPermission().catch(error => {
+      if (__DEV__) console.error('[BarcodePermissionRefreshFailed]', error);
+      setCameraError(true);
+    });
+  }, [getPermission]);
 
   const clearFeedbackTimer = useCallback(() => {
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
@@ -58,20 +65,21 @@ export function BarcodeScannerScreen({ visible, mode, language, onClose, onScan,
   }, [clearFeedbackTimer]);
 
   useEffect(() => {
-    if (visible) resetSession();
+    if (visible) { resetSession(); refreshPermission(); }
     return () => { clearFeedbackTimer(); gateRef.current.reset(); };
-  }, [clearFeedbackTimer, resetSession, visible]);
+  }, [clearFeedbackTimer, refreshPermission, resetSession, visible]);
 
   useEffect(() => {
     if (!visible) return undefined;
     const subscription = AppState.addEventListener('change', state => {
       const active = state === 'active';
       setAppActive(active);
+      if (active) refreshPermission();
       gateRef.current.reset();
       pausedRef.current = !active || Boolean(outcome && outcome.kind !== 'success');
     });
     return () => subscription.remove();
-  }, [outcome, visible]);
+  }, [outcome, refreshPermission, visible]);
 
   useEffect(() => {
     if (!visible) return undefined;

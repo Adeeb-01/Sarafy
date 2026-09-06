@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { calculateCartSubtotal, changeCartLineQuantity, clampCartDiscount, parseLocalizedNumber, setCartLineQuantity } from '../src/utils/salesUiState.ts';
+import { calculateCartSubtotal, changeCartLineQuantity, clampCartDiscount, isCartLineUnavailable, parseLocalizedNumber, setCartLineQuantity } from '../src/utils/salesUiState.ts';
 
 const makeCart = count => Array.from({ length: count }, (_, index) => ({ productId: index + 1, quantity: 1, unitPriceSyp: (index + 1) * 100 }));
 
@@ -28,6 +28,13 @@ test('localized number input and fixed SYP discount retain existing clamp behavi
   assert.equal(parseLocalizedNumber('15,500'), 15_500);
   assert.equal(clampCartDiscount(-10, 1_000), 0);
   assert.equal(clampCartDiscount(1_500, 1_000), 1_000);
+});
+
+test('resumed cart line is blocked above current stock and becomes valid at the limit', () => {
+  assert.equal(isCartLineUnavailable({ isAvailable: true, quantity: 8, availableQuantity: 5 }), true);
+  assert.equal(isCartLineUnavailable({ isAvailable: true, quantity: 5, availableQuantity: 5 }), false);
+  assert.equal(isCartLineUnavailable({ isAvailable: false, quantity: 1 }), true);
+  assert.equal(isCartLineUnavailable({ isAvailable: true, quantity: 999 }), false);
 });
 
 test('completed invoice UI uses persisted snapshots and sale creation remains transactional', async () => {
