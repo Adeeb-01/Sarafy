@@ -272,7 +272,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       return { kind: 'success', title: product.name, quantity: formatNumber(nextQuantity, state.language), amount };
     }} />
     <ProductFormModal visible={unknownProductBarcode !== null} product={null} mode="create" initialSection="identity" initialBarcode={unknownProductBarcode ?? undefined} onClose={() => setUnknownProductBarcode(null)} />
-    <ReturnFlowScreen sale={returnSale} language={state.language} hasActiveCashSession={!!state.activeCashSession} onRequireCashSession={() => { setReturnSale(null); setSection('cash'); snackbar.show({ text: copy.cashSession.cashRequired, tone: 'info' }); }} onClose={() => setReturnSale(null)} onCreate={createReturn} onShare={shareReturn} />
+    <ReturnFlowScreen key={returnSale?.id ?? 'closed'} sale={returnSale} language={state.language} hasActiveCashSession={!!state.activeCashSession} onRequireCashSession={() => { setReturnSale(null); setSection('cash'); snackbar.show({ text: copy.cashSession.cashRequired, tone: 'info' }); }} onClose={() => setReturnSale(null)} onCreate={createReturn} onShare={shareReturn} />
   </ScreenContainer>;
 }
 

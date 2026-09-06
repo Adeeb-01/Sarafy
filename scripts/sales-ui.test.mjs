@@ -57,3 +57,13 @@ test('completed invoice UI uses persisted snapshots and sale creation remains tr
   assert.match(invoice, /item\.line_total_syp/);
   assert.doesNotMatch(invoice, /import\s+\{[^}]*\bProduct\b[^}]*\}\s+from/);
 });
+
+test('invoice detail conditional actions do not emit raw text nodes', async () => {
+  const views = await readFile(new URL('../src/components/sales/SalesViews.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(views, /\}\s+\{canReturn &&/);
+});
+
+test('each invoice return flow starts with fresh selection state', async () => {
+  const screen = await readFile(new URL('../src/screens/SalesScreen.tsx', import.meta.url), 'utf8');
+  assert.match(screen, /<ReturnFlowScreen key=\{returnSale\?\.id \?\? 'closed'\}/);
+});
