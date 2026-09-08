@@ -6,7 +6,7 @@ import { spacing, useAppTheme } from '@/theme';
 export function ScreenContainer({ children, scroll = false, padded = false, keyboard = false }: PropsWithChildren<{ scroll?: boolean; padded?: boolean; keyboard?: boolean }>) {
   const { colors } = useAppTheme();
   const body = scroll ? <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={[styles.scroll, padded && styles.padded]}>{children}</ScrollView> : <View style={[styles.content, padded && styles.padded]}>{children}</View>;
-  const wrapped = keyboard ? <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.content}>{body}</KeyboardAvoidingView> : body;
+  const wrapped = keyboard ? <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.content}>{body}</KeyboardAvoidingView> : body;
   return <SafeAreaView edges={['top']} style={[styles.safe, { backgroundColor: colors.background }]}>{wrapped}</SafeAreaView>;
 }
 

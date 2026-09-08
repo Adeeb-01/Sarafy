@@ -85,6 +85,20 @@ test('failed completed-sale transaction keeps resumed draft and no partial invoi
   assert.equal(db.prepare('SELECT COUNT(*) count FROM sale_drafts').get().count, 0); db.close();
 });
 
+test('draft deletion is explicit and startup removes only unreachable draft items', async () => {
+  const database = await read('src/database/database.ts');
+  assert.match(database, /DELETE FROM sale_draft_items WHERE draft_id=\?/);
+  assert.match(database, /DELETE FROM sale_draft_items\s+WHERE NOT EXISTS \(SELECT 1 FROM sale_drafts WHERE sale_drafts\.id=sale_draft_items\.draft_id\)/);
+
+  const db = draftDatabase(); const now = '2026-09-06T09:41:31.506Z';
+  db.exec('PRAGMA foreign_keys=OFF');
+  db.prepare('INSERT INTO sale_draft_items VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(1, 'orphan', 99, 2, 'B', '175000000002', 8, 30000, 15000, now, now);
+  assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 1);
+  db.prepare('DELETE FROM sale_draft_items WHERE NOT EXISTS (SELECT 1 FROM sale_drafts WHERE sale_drafts.id=sale_draft_items.draft_id)').run();
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+  db.close();
+});
+
 test('invoice SQL searches/sorts/filters 5k invoices and 25k items with bound parameters', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(`CREATE TABLE products(id INTEGER PRIMARY KEY,barcode TEXT); CREATE TABLE sales(id INTEGER PRIMARY KEY,invoice_number TEXT,created_at TEXT,net_total_syp REAL);

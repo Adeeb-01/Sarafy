@@ -36,6 +36,15 @@ test('full-screen product modal resizes its sticky save action above Android IME
   assert.match(body, /keyboardShouldPersistTaps="handled"/);
 });
 
+test('full-screen data-entry containers keep actions above the Android IME', async () => {
+  const [container, purchases] = await Promise.all([
+    readFile(new URL('../src/components/ui/ScreenContainer.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/screens/PurchasesScreen.tsx', import.meta.url), 'utf8'),
+  ]);
+  assert.match(container, /<KeyboardAvoidingView behavior=\{Platform\.OS === 'ios' \? 'padding' : 'height'\}/);
+  assert.match(purchases, /function PurchaseReturnEditor[\s\S]*?<ScreenContainer keyboard>/);
+});
+
 test('keyboard overlap is measured against the modal viewport', () => {
   assert.equal(calculateKeyboardInset({ y: 0, height: 844 }, { screenY: 520, height: 324 }), 324);
   assert.equal(calculateKeyboardInset({ y: 24, height: 820 }, { screenY: 520, height: 324 }), 324);

@@ -67,3 +67,9 @@ test('each invoice return flow starts with fresh selection state', async () => {
   const screen = await readFile(new URL('../src/screens/SalesScreen.tsx', import.meta.url), 'utf8');
   assert.match(screen, /<ReturnFlowScreen key=\{returnSale\?\.id \?\? 'closed'\}/);
 });
+
+test('numeric inventory flags cannot render as raw return-flow text', async () => {
+  const flow = await readFile(new URL('../src/components/sales/ReturnFlowScreen.tsx', import.meta.url), 'utf8');
+  assert.match(flow, /item\.inventory_sale_movement === 1 && value > 0/);
+  assert.doesNotMatch(flow, /\{item\.inventory_sale_movement &&/);
+});

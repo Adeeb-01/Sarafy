@@ -543,6 +543,8 @@ export async function initializeDatabase() {
   await migrateInventoryV14();
   await migratePurchasesV15();
   await migratePurchaseReturnsV16();
+  await db.runAsync(`DELETE FROM sale_draft_items
+    WHERE NOT EXISTS (SELECT 1 FROM sale_drafts WHERE sale_drafts.id=sale_draft_items.draft_id)`);
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
   if (integrity?.integrity_check !== 'ok') throw new Error('DATABASE_INTEGRITY_CHECK_FAILED');
   const foreignKeys = await db.getAllAsync<{ table: string; rowid: number }>('PRAGMA foreign_key_check');
@@ -1301,7 +1303,10 @@ export async function createSale(
       `INSERT INTO sale_payments(uuid,sale_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,created_at)
        VALUES(?,?,?,?,?,?,?)`, createUuid(), saleId, payment.currency, payment.amount_minor, payment.syp_equivalent, payment.exchange_rate_syp_per_usd, createdAt,
     );
-    if (draftId != null) await transaction.runAsync('DELETE FROM sale_drafts WHERE id=?', draftId);
+    if (draftId != null) {
+      await transaction.runAsync('DELETE FROM sale_draft_items WHERE draft_id=?', draftId);
+      await transaction.runAsync('DELETE FROM sale_drafts WHERE id=?', draftId);
+    }
   });
   const sale = await getInvoiceDetails(saleId);
   if (!sale) throw new Error('SALE_NOT_FOUND');
@@ -1394,7 +1399,10 @@ export async function suspendSale(items: SaleItemInput[], exchangeRate: number, 
         item.quantity, item.unitPriceSyp, item.unitCostSyp, now, now,
       );
     }
-    if (replaceDraftId != null) await transaction.runAsync('DELETE FROM sale_drafts WHERE id=?', replaceDraftId);
+    if (replaceDraftId != null) {
+      await transaction.runAsync('DELETE FROM sale_draft_items WHERE draft_id=?', replaceDraftId);
+      await transaction.runAsync('DELETE FROM sale_drafts WHERE id=?', replaceDraftId);
+    }
   });
   return draftId;
 }
@@ -1421,8 +1429,12 @@ export async function getSuspendedSale(id: number): Promise<SuspendedSale | null
 
 export async function deleteSuspendedSale(id: number) {
   const db = await dbPromise;
-  const result = await db.runAsync('DELETE FROM sale_drafts WHERE id=?', id);
-  if (!result.changes) throw new Error('DRAFT_NOT_FOUND');
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const draft = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_drafts WHERE id=?', id);
+    if (!draft) throw new Error('DRAFT_NOT_FOUND');
+    await transaction.runAsync('DELETE FROM sale_draft_items WHERE draft_id=?', id);
+    await transaction.runAsync('DELETE FROM sale_drafts WHERE id=?', id);
+  });
 }
 
 const expenseSelect = `SELECT e.*,c.uuid AS category_uuid,c.name_ar AS category_name_ar,c.name_en AS category_name_en
