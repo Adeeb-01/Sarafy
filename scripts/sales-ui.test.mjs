@@ -68,8 +68,25 @@ test('each invoice return flow starts with fresh selection state', async () => {
   assert.match(screen, /<ReturnFlowScreen key=\{returnSale\?\.id \?\? 'closed'\}/);
 });
 
+test('cash and suspended screens leave sales segments reselectable', async () => {
+  const screen = await readFile(new URL('../src/screens/SalesScreen.tsx', import.meta.url), 'utf8');
+  assert.match(screen, /<SegmentedControl value=\{section\} onChange=\{setSection\}/);
+  assert.doesNotMatch(screen, /section === 'cash' \|\| section === 'suspended' \? 'sale'/);
+});
+
+test('checkout footer preserves 44dp actions above compact-screen safe areas', async () => {
+  const views = await readFile(new URL('../src/components/sales/SalesViews.tsx', import.meta.url), 'utf8');
+  assert.match(views, /<KeyboardAvoidingView behavior=\{Platform\.OS === 'ios' \? 'padding' : 'height'\}/);
+  assert.match(views, /reviewFooter:\s*\{[^}]*flexShrink:\s*0[^}]*minHeight:\s*60/);
+  assert.doesNotMatch(views, /reviewFooter:\s*\{[^}]*position:\s*'absolute'/);
+  assert.match(views, /reviewFooterAction:\s*\{[^}]*flexShrink:\s*0[^}]*minHeight:\s*60/);
+  assert.match(views, /reviewPage:\s*\{[^}]*paddingBottom:\s*spacing\.md/);
+});
+
 test('numeric inventory flags cannot render as raw return-flow text', async () => {
   const flow = await readFile(new URL('../src/components/sales/ReturnFlowScreen.tsx', import.meta.url), 'utf8');
   assert.match(flow, /item\.inventory_sale_movement === 1 && value > 0/);
   assert.doesNotMatch(flow, /\{item\.inventory_sale_movement &&/);
+  assert.match(flow, /footer:\s*\{[^}]*minHeight:\s*112/, '320dp return footer must preserve its summary and 44dp confirmation target');
+  assert.match(flow, /footer:\s*\{[^}]*bottom:\s*spacing\.md/, 'return confirmation must stay above compact-screen navigation insets');
 });

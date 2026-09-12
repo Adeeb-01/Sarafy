@@ -34,6 +34,9 @@ test('full-screen product modal resizes its sticky save action above Android IME
   assert.match(body, /styles\.footer/);
   assert.match(body, /copy\.productForm\.saveProduct/);
   assert.match(body, /keyboardShouldPersistTaps="handled"/);
+  assert.match(source, /style=\{\[styles\.flex, styles\.keyboardArea\]\}/);
+  assert.match(source, /footer:\s*\{\s*flexShrink:\s*0/);
+  assert.doesNotMatch(source, /footer:\s*\{[^}]*position:\s*'absolute'/);
 });
 
 test('full-screen data-entry containers keep actions above the Android IME', async () => {
@@ -60,18 +63,21 @@ test('keyboard-aware max height respects keyboard and safe areas on small screen
 });
 
 test('input sheets opt into the centralized keyboard-aware behavior', async () => {
-  const [bottomSheet, rate, sales, category] = await Promise.all([
+  const [bottomSheet, rate, sales, category, cashSession] = await Promise.all([
     readFile(new URL('../src/components/ui/BottomSheet.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/RateControl.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/sales/SalesViews.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/CategoryPickerSheet.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/cash/CashSessionScreen.tsx', import.meta.url), 'utf8'),
   ]);
   assert.match(bottomSheet, /keyboardAware\?: boolean/);
   assert.match(bottomSheet, /Keyboard\.dismiss\(\)/);
-  assert.match(bottomSheet, /keyboardDismissMode="on-drag"/);
+  assert.match(bottomSheet, /keyboardDismissMode=\{Platform\.OS === 'ios' \? 'interactive' : 'none'\}/);
+  assert.match(bottomSheet, /scrollContent:\s*\{[^}]*flexShrink:\s*0/, 'compact sheets must preserve full scroll-content height instead of clipping the CTA');
   assert.match(rate, /keyboardAware/);
   assert.match(sales, /keyboardAware/);
   assert.match(category, /keyboardAware/);
+  assert.match(cashSession, /form:\s*\{\s*flexShrink:\s*0/, 'cash-session forms must preserve intrinsic height so their CTA can scroll into view at 320dp');
 });
 
 test('native splash uses the Sarafy launcher icon, theme backgrounds, and post-splash theme', async () => {

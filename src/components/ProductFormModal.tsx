@@ -49,7 +49,6 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const [stickyActionHeight, setStickyActionHeight] = useState(0);
   const [removeImageConfirmOpen, setRemoveImageConfirmOpen] = useState(false);
   const [errors, setErrors] = useState<Errors>({});
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -164,8 +163,8 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
         <View style={styles.headerCopy}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.productForm.subtitle}</Text></View>
         <IconButton icon="x" label={copy.common.close} onPress={onClose} disabled={saving} />
       </View>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.flex}>
-        <ScrollView ref={scrollRef} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={[styles.scroll, { paddingBottom: stickyActionHeight + insets.bottom + spacing.md }]} scrollIndicatorInsets={{ bottom: stickyActionHeight + insets.bottom }}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={[styles.flex, styles.keyboardArea]}>
+        <ScrollView ref={scrollRef} style={styles.flex} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
           <FormSection title={copy.productForm.basic} icon="package" rtl={rtl} onLayout={setSectionOffset('details')}>
             <AppInput label={copy.productForm.productName} value={name} onChangeText={value => { setName(value); clearError('name'); }} error={errors.name} placeholder={copy.productForm.nameExample} accessibilityLabel={copy.productForm.productName} rtl={rtl} autoCapitalize="sentences" returnKeyType="next" />
             <View style={styles.fieldGroup}>
@@ -201,7 +200,7 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
           </FormSection>
         </ScrollView>
         <View style={[styles.footer, { backgroundColor: colors.surface, borderTopColor: colors.border, paddingBottom: insets.bottom }]}> 
-          <View onLayout={event => setStickyActionHeight(event.nativeEvent.layout.height)} style={styles.footerAction}>
+          <View style={styles.footerAction}>
             <AppButton label={saving ? copy.productForm.saving : copy.productForm.saveProduct} icon="check" onPress={() => void save()} loading={saving} style={styles.saveButton} />
           </View>
         </View>
@@ -231,7 +230,7 @@ function parseNumeric(value: string) {
 }
 
 const styles = StyleSheet.create({
-  page: { flex: 1 }, flex: { flex: 1 },
+  page: { flex: 1 }, flex: { flex: 1 }, keyboardArea: { paddingBottom: spacing.md },
   header: { minHeight: 66, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderBottomWidth: StyleSheet.hairlineWidth, alignItems: 'center', gap: spacing.sm }, headerCopy: { minWidth: 0, flex: 1 },
   scroll: { width: '100%', maxWidth: 720, alignSelf: 'center', padding: spacing.md, gap: spacing.xs },
   section: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.lg, gap: spacing.sm }, sectionHeader: { alignItems: 'center', gap: spacing.xs }, fieldGroup: { gap: spacing.xxs },
@@ -240,6 +239,6 @@ const styles = StyleSheet.create({
   scanButton: { backgroundColor: 'transparent' },
   imageFrame: { height: 156, borderWidth: 1, borderStyle: 'dashed', borderRadius: radius.md, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }, imagePlaceholder: { alignItems: 'center', gap: spacing.xs },
   imageActions: { gap: spacing.xs }, flexButton: { flex: 1 }, removeButton: { minWidth: 104 },
-  footer: { position: 'absolute', left: 0, right: 0, bottom: 0, borderTopWidth: StyleSheet.hairlineWidth }, footerAction: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs }, saveButton: { width: '100%', maxWidth: 688, alignSelf: 'center', minHeight: 50 },
+  footer: { flexShrink: 0, borderTopWidth: StyleSheet.hairlineWidth }, footerAction: { flexShrink: 0, paddingHorizontal: spacing.md, paddingVertical: spacing.xs }, saveButton: { width: '100%', maxWidth: 688, alignSelf: 'center', minHeight: 50 },
   pressed: { opacity: 0.76 },
 });

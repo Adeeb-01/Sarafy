@@ -69,14 +69,15 @@ test('raw modals are limited to shared sheet infrastructure and full-screen work
   ]);
 });
 
-test('measured navigation and sticky-action insets remain wired to scroll content', async () => {
+test('measured navigation and keyboard-safe action insets remain wired to scroll content', async () => {
   const [products, form, sales, analytics, snackbar, app] = await Promise.all([
     read('src/screens/ProductManagementScreen.tsx'), read('src/components/ProductFormModal.tsx'),
     read('src/screens/SalesScreen.tsx'), read('src/components/analytics/AnalyticsDashboard.tsx'),
     read('src/components/ui/Snackbar.tsx'), read('App.tsx'),
   ]);
   assert.match(products, /bottomNavigationInset/);
-  assert.match(form, /stickyActionHeight/);
+  assert.match(form, /behavior=\{Platform\.OS === 'ios' \? 'padding' : 'height'\}/);
+  assert.match(form, /footer: \{ flexShrink: 0/);
   assert.match(form, /insets\.bottom/);
   assert.match(sales, /bottomNavigationInset/);
   assert.match(analytics, /paddingBottom: bottomNavigationInset \+ spacing\.xl/);
