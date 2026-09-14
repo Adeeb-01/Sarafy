@@ -16,6 +16,7 @@ export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 async function migratePortableIdentity() {
   const db = await dbPromise;
   const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) >= 8) return;
   const tables = ['products', 'categories', 'sales', 'sale_items', 'expenses'] as const;
   await db.withExclusiveTransactionAsync(async transaction => {
     for (const table of tables) {

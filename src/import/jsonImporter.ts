@@ -6,6 +6,7 @@ import { isStoredProductImagePath } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
 import { calculateCashDifference, calculateExpectedCash } from '@/utils/cashSession';
 import { usdCentsToSyp } from '@/utils/multiCurrency';
+import { insertFullRestorePayload } from './fullRestoreInserter';
 
 const SETTING_KEYS = ['exchangeRate', 'isRoundingEnabled', 'roundingTarget', 'language'] as const;
 
@@ -35,8 +36,9 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
   let updated = 0;
   let skipped = 0;
   const { payload, options } = preview;
+  const isFullRestore = options.mode === 'full_restore';
   await db.withExclusiveTransactionAsync(async transaction => {
-    if (options.mode === 'full_restore') {
+    if (isFullRestore) {
       await transaction.runAsync('DELETE FROM inventory_movements');
       await transaction.runAsync('DELETE FROM inventory_balances');
       await transaction.runAsync('DELETE FROM purchase_return_items');
@@ -59,6 +61,10 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
       await transaction.runAsync('DELETE FROM products');
       await transaction.runAsync('DELETE FROM categories');
       if (options.entities.includes('settings')) await transaction.runAsync('DELETE FROM settings');
+      inserted += await insertFullRestorePayload(transaction, payload, options.entities);
+      const fk = await transaction.getAllAsync<{ table: string; rowid: number }>('PRAGMA foreign_key_check');
+      if (fk.length) throw new Error('FOREIGN_KEY_CHECK_FAILED');
+      return;
     }
     if (options.entities.includes('cash_sessions')) {
       const openCount = (payload.cashSessions ?? []).filter(session => session.closed_at == null).length;

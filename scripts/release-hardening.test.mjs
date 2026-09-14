@@ -62,6 +62,40 @@ test('storage writes keep bounded inputs, safe paths, checksums, and free-space 
   assert.match(excel, /assertAvailableDiskSpace/);
 });
 
+test('full restore batches portable rows and resolves UUID maps once per table', async () => {
+  const [importer, fullRestore] = await Promise.all([
+    read('src/import/jsonImporter.ts'),
+    read('src/import/fullRestoreInserter.ts'),
+  ]);
+  assert.match(importer, /insertFullRestorePayload\(transaction, payload, options\.entities\)/);
+  assert.ok(importer.indexOf('insertFullRestorePayload(transaction') < importer.indexOf("if (options.entities.includes('cash_sessions'))"));
+  assert.match(fullRestore, /const MAX_BATCH_BINDINGS = 900/);
+  assert.match(fullRestore, /for \(let offset = 0; offset < rows\.length; offset \+= batchSize\)/);
+  assert.match(fullRestore, /INSERT INTO \$\{table\}.*batch\.map/s);
+  assert.match(fullRestore, /loadIdByUuid\(transaction, 'sale_items'\)/);
+  assert.match(fullRestore, /loadIdByUuid\(transaction, 'purchase_receipt_items'\)/);
+  assert.match(fullRestore, /PAYMENT_SETTLEMENT_CONFLICT/);
+  assert.match(fullRestore, /RETURN_QUANTITY_EXCEEDED/);
+  assert.match(fullRestore, /INVALID_INVENTORY_LEDGER/);
+  assert.doesNotMatch(fullRestore, /for \([^)]*\) \{[\s\S]{0,240}getFirstAsync/);
+});
+
+test('completed portable identity migration is not replayed on every large-database startup', async () => {
+  const database = await read('src/database/database.ts');
+  const start = database.indexOf('async function migratePortableIdentity()');
+  const transaction = database.indexOf('withExclusiveTransactionAsync', start);
+  const guard = database.indexOf("if ((version?.user_version ?? 0) >= 8) return", start);
+  assert.ok(start >= 0 && guard > start && guard < transaction);
+});
+
+test('purchase history virtualizes the high-volume supplier filter strip', async () => {
+  const purchases = await read('src/screens/PurchasesScreen.tsx');
+  assert.match(purchases, /const supplierFilters = useMemo<\(Supplier \| null\)\[]>/);
+  assert.match(purchases, /<FlatList horizontal data=\{supplierFilters\}/);
+  assert.match(purchases, /keyExtractor=\{item => item\?\.uuid \?\? 'all'\}/);
+  assert.match(purchases, /initialNumToRender=\{12\} maxToRenderPerBatch=\{12\} windowSize=\{5\} removeClippedSubviews/);
+});
+
 test('sensitive runtime errors stay development-only and timers clean up', async () => {
   const [database, backups, snackbar] = await Promise.all([
     read('src/database/database.ts'), read('src/backup/backupManager.ts'), read('src/components/ui/Snackbar.tsx'),
