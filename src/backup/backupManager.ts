@@ -3,7 +3,7 @@ import { File, Paths } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { getDatabase } from '@/database/database';
-import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryBalance, InventoryMovement, Product, PurchaseReceipt, PurchaseReceiptItem, PurchaseReturn, PurchaseReturnItem, Sale, SaleItem, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SuspendedSale, SuspendedSaleItem } from '@/types';
+import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryBalance, InventoryMovement, Product, PurchaseReceipt, PurchaseReceiptItem, PurchaseReturn, PurchaseReturnItem, Sale, SaleItem, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierAccountBalance, SupplierAccountEntry, SupplierPayment, SupplierPaymentTender, SuspendedSale, SuspendedSaleItem } from '@/types';
 import { ImportPayload, PortableCategory } from '@/import/importTypes';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { readSarafyArchive, writeSarafyArchive } from './backupArchive';
@@ -11,7 +11,7 @@ import { assertReadableNonEmptyFile, ensureBackupDirectory, getBackupDirectory }
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 
 const BACKUP_VERSION = 8;
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
 const APPLICATION_ID = 'com.sarafy.catalog';
 const ROOT = getBackupDirectory().uri;
 const PRE_IMPORT_LIMIT = 5;
@@ -26,7 +26,7 @@ export interface BackupManifest {
   backupType: 'manual' | 'pre-import';
   reason: string;
   includes: { dataJson: true; productImages: boolean; drafts?: boolean };
-  counts: { products: number; categories: number; sales: number; saleItems: number; salePayments?: number; expenses: number; images: number; drafts?: number; draftItems?: number; returns?: number; returnItems?: number; expenseCategories?: number; exchangeRateHistory?: number; cashSessions?: number; inventoryBalances?: number; inventoryMovements?: number; suppliers?: number; purchaseReceipts?: number; purchaseReceiptItems?: number; purchaseReturns?: number; purchaseReturnItems?: number };
+  counts: { products: number; categories: number; sales: number; saleItems: number; salePayments?: number; expenses: number; images: number; drafts?: number; draftItems?: number; returns?: number; returnItems?: number; expenseCategories?: number; exchangeRateHistory?: number; cashSessions?: number; inventoryBalances?: number; inventoryMovements?: number; suppliers?: number; purchaseReceipts?: number; purchaseReceiptItems?: number; purchaseReturns?: number; purchaseReturnItems?: number; supplierAccountBalances?: number; supplierAccountEntries?: number; supplierPayments?: number; supplierPaymentTenders?: number };
 }
 
 export interface SarafyBackup {
@@ -37,7 +37,7 @@ export interface SarafyBackup {
 
 export async function collectPortableData(): Promise<ImportPayload> {
   const db = await getDatabase();
-  const [products, categories, settingsRows, salesRows, saleItems, salePayments, expenses, draftRows, draftItems, returnRows, returnItems, expenseCategories, exchangeRateHistory, cashSessions, inventoryBalances, inventoryMovements, suppliers, purchaseReceipts, purchaseReceiptItems, purchaseReturns, purchaseReturnItems] = await Promise.all([
+  const [products, categories, settingsRows, salesRows, saleItems, salePayments, expenses, draftRows, draftItems, returnRows, returnItems, expenseCategories, exchangeRateHistory, cashSessions, inventoryBalances, inventoryMovements, suppliers, purchaseReceipts, purchaseReceiptItems, purchaseReturns, purchaseReturnItems, supplierAccountBalances, supplierAccountEntries, supplierPayments, supplierPaymentTenders] = await Promise.all([
     db.getAllAsync<Product>('SELECT * FROM products ORDER BY id'),
     db.getAllAsync<PortableCategory>('SELECT id,uuid,name,created_at,updated_at FROM categories ORDER BY id'),
     db.getAllAsync<{ key: string; value: string }>('SELECT key,value FROM settings'),
@@ -59,6 +59,10 @@ export async function collectPortableData(): Promise<ImportPayload> {
     db.getAllAsync<PurchaseReceiptItem>('SELECT * FROM purchase_receipt_items ORDER BY id'),
     db.getAllAsync<PurchaseReturn>('SELECT * FROM purchase_returns ORDER BY id'),
     db.getAllAsync<PurchaseReturnItem>('SELECT * FROM purchase_return_items ORDER BY id'),
+    db.getAllAsync<SupplierAccountBalance>('SELECT * FROM supplier_account_balances ORDER BY supplier_id'),
+    db.getAllAsync<SupplierAccountEntry>('SELECT * FROM supplier_account_entries ORDER BY id'),
+    db.getAllAsync<SupplierPayment>('SELECT * FROM supplier_payments ORDER BY id'),
+    db.getAllAsync<SupplierPaymentTender>('SELECT * FROM supplier_payment_tenders ORDER BY id'),
   ]);
   const stored = Object.fromEntries(settingsRows.map(row => [row.key, JSON.parse(row.value)])) as Partial<Settings>;
   const settings: Settings = {
@@ -87,6 +91,10 @@ export async function collectPortableData(): Promise<ImportPayload> {
   const purchaseReceiptUuidById = new Map(purchaseReceipts.map(item => [item.id, item.uuid]));
   const productUuidById = new Map(products.map(product => [product.id, product.uuid]));
   const supplierUuidById = new Map(suppliers.map(supplier => [supplier.id, supplier.uuid]));
+  const purchaseReturnUuidById = new Map(purchaseReturns.map(item => [item.id, item.uuid]));
+  const supplierPaymentUuidById = new Map(supplierPayments.map(item => [item.id, item.uuid]));
+  const paymentTendersByPayment = new Map<number, SupplierPaymentTender[]>();
+  for (const tender of supplierPaymentTenders) paymentTendersByPayment.set(tender.supplier_payment_id, [...(paymentTendersByPayment.get(tender.supplier_payment_id) ?? []), tender]);
   const purchaseItemsByReceipt = new Map<number, PurchaseReceiptItem[]>();
   for (const item of purchaseReceiptItems) purchaseItemsByReceipt.set(item.purchase_receipt_id, [...(purchaseItemsByReceipt.get(item.purchase_receipt_id) ?? []), item]);
   const purchaseReturnItemsByReturn = new Map<number, PurchaseReturnItem[]>();
@@ -105,6 +113,16 @@ suppliers: suppliers.map(({ id: _id, receipt_count: _count, latest_receipt_at: _
     purchaseReturns: purchaseReturns.map(({ id, purchase_receipt_id, purchase_receipt_uuid: _receiptUuid, items: _items, ...record }) => ({
       ...record, purchase_receipt_uuid: purchaseReceiptUuidById.get(purchase_receipt_id) ?? '',
       items: (purchaseReturnItemsByReturn.get(id) ?? []).map(({ id: _id, purchase_return_id: _returnId, purchase_receipt_item_id, ...item }) => ({ ...item, purchase_receipt_item_uuid: purchaseItemUuidById.get(purchase_receipt_item_id) ?? '' })),
+    })),
+    supplierAccountBalances: supplierAccountBalances.map(balance => ({ supplier_uuid: supplierUuidById.get(balance.supplier_id) ?? '', balance_usd_cents: balance.balance_usd_cents, updated_at: balance.updated_at })),
+    supplierPayments: supplierPayments.map(({ id, supplier_id, cash_session_id, tenders: _tenders, ...payment }) => ({
+      ...payment, supplier_uuid: supplierUuidById.get(supplier_id) ?? '', cash_session_uuid: sessionUuidById.get(cash_session_id) ?? '',
+      tenders: (paymentTendersByPayment.get(id) ?? []).map(({ id: _id, supplier_payment_id: _paymentId, ...tender }) => tender),
+    })),
+    supplierAccountEntries: supplierAccountEntries.map(({ id: _id, supplier_id, purchase_receipt_id, purchase_return_id, supplier_payment_id, reference: _reference, running_balance_usd_cents: _running, ...entry }) => ({
+      ...entry, supplier_uuid: supplierUuidById.get(supplier_id) ?? '', purchase_receipt_uuid: purchase_receipt_id ? purchaseReceiptUuidById.get(purchase_receipt_id) ?? null : null,
+      purchase_return_uuid: purchase_return_id ? purchaseReturnUuidById.get(purchase_return_id) ?? null : null,
+      supplier_payment_uuid: supplier_payment_id ? supplierPaymentUuidById.get(supplier_payment_id) ?? null : null,
     })),
     inventoryBalances: inventoryBalances.map(({ id: _id, product_id, ...balance }) => ({ ...balance, product_uuid: productUuidById.get(product_id) ?? '' })),
     inventoryMovements: inventoryMovements.map(({ id: _id, product_id, sale_item_id, return_item_id, purchase_receipt_item_id, purchase_return_item_id, ...movement }) => ({ ...movement, product_uuid: product_id ? productUuidById.get(product_id) ?? movement.product_uuid_snapshot : movement.product_uuid_snapshot, sale_item_uuid: sale_item_id ? saleItemUuidById.get(sale_item_id) ?? null : null, return_item_uuid: return_item_id ? returnItemUuidById.get(return_item_id) ?? null : null, purchase_receipt_item_uuid: purchase_receipt_item_id ? purchaseItemUuidById.get(purchase_receipt_item_id) ?? null : null, purchase_return_item_uuid: purchase_return_item_id ? purchaseReturnItemUuidById.get(purchase_return_item_id) ?? null : null })),
@@ -155,6 +173,10 @@ async function buildBackup(type: BackupManifest['backupType'], reason: string): 
         purchaseReceiptItems: data.purchaseReceipts?.reduce((sum, receipt) => sum + receipt.items.length, 0) ?? 0,
         purchaseReturns: data.purchaseReturns?.length ?? 0,
         purchaseReturnItems: data.purchaseReturns?.reduce((sum, record) => sum + record.items.length, 0) ?? 0,
+        supplierAccountBalances: data.supplierAccountBalances?.length ?? 0,
+        supplierAccountEntries: data.supplierAccountEntries?.length ?? 0,
+        supplierPayments: data.supplierPayments?.length ?? 0,
+        supplierPaymentTenders: data.supplierPayments?.reduce((sum, payment) => sum + payment.tenders.length, 0) ?? 0,
       },
     },
     data,
@@ -304,7 +326,11 @@ export async function pickSarafyBackup(): Promise<SarafyBackup | null> {
       (candidate.manifest.counts.purchaseReceipts != null && candidate.manifest.counts.purchaseReceipts !== (candidate.data.purchaseReceipts?.length ?? 0)) ||
       (candidate.manifest.counts.purchaseReceiptItems != null && candidate.manifest.counts.purchaseReceiptItems !== (candidate.data.purchaseReceipts?.reduce((sum, receipt) => sum + receipt.items.length, 0) ?? 0)) ||
       (candidate.manifest.counts.purchaseReturns != null && candidate.manifest.counts.purchaseReturns !== (candidate.data.purchaseReturns?.length ?? 0)) ||
-      (candidate.manifest.counts.purchaseReturnItems != null && candidate.manifest.counts.purchaseReturnItems !== (candidate.data.purchaseReturns?.reduce((sum, record) => sum + record.items.length, 0) ?? 0))) {
+      (candidate.manifest.counts.purchaseReturnItems != null && candidate.manifest.counts.purchaseReturnItems !== (candidate.data.purchaseReturns?.reduce((sum, record) => sum + record.items.length, 0) ?? 0)) ||
+      (candidate.manifest.counts.supplierAccountBalances != null && candidate.manifest.counts.supplierAccountBalances !== (candidate.data.supplierAccountBalances?.length ?? 0)) ||
+      (candidate.manifest.counts.supplierAccountEntries != null && candidate.manifest.counts.supplierAccountEntries !== (candidate.data.supplierAccountEntries?.length ?? 0)) ||
+      (candidate.manifest.counts.supplierPayments != null && candidate.manifest.counts.supplierPayments !== (candidate.data.supplierPayments?.length ?? 0)) ||
+      (candidate.manifest.counts.supplierPaymentTenders != null && candidate.manifest.counts.supplierPaymentTenders !== (candidate.data.supplierPayments?.reduce((sum, payment) => sum + payment.tenders.length, 0) ?? 0))) {
     throw new Error('BACKUP_COUNT_MISMATCH');
   }
   return candidate as SarafyBackup;

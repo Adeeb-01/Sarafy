@@ -66,6 +66,7 @@ export async function insertFullRestorePayload(
       'closing_refunds_total_syp', 'closing_expenses_total_syp', 'closing_expected_cash_syp',
       'closing_difference_syp', 'closing_expected_cash_usd_cents', 'closing_difference_usd_cents',
       'closing_cash_received_syp', 'closing_cash_received_usd_cents', 'closing_change_given_syp',
+      'closing_supplier_payments_syp', 'closing_supplier_payments_usd_cents',
       'opening_note', 'closing_note', 'created_at', 'updated_at',
     ], sessions.map(session => [
       session.uuid, session.opened_at, session.closed_at, session.opening_cash_syp,
@@ -75,7 +76,7 @@ export async function insertFullRestorePayload(
       session.closing_expected_cash_syp, session.closing_difference_syp,
       session.closing_expected_cash_usd_cents ?? null, session.closing_difference_usd_cents ?? null,
       session.closing_cash_received_syp ?? null, session.closing_cash_received_usd_cents ?? null,
-      session.closing_change_given_syp ?? null, session.opening_note, session.closing_note,
+      session.closing_change_given_syp ?? null, session.closing_supplier_payments_syp ?? 0, session.closing_supplier_payments_usd_cents ?? 0, session.opening_note, session.closing_note,
       session.created_at, session.updated_at,
     ]));
   }
@@ -118,10 +119,10 @@ export async function insertFullRestorePayload(
 
   if (entities.has('suppliers')) {
     inserted += await insertRows(transaction, 'suppliers', [
-      'uuid', 'name', 'phone', 'address', 'note', 'is_active', 'created_at', 'updated_at',
+      'uuid', 'name', 'phone', 'address', 'note', 'is_active', 'accounting_enabled', 'accounting_started_at', 'created_at', 'updated_at',
     ], (payload.suppliers ?? []).map(item => [
       item.uuid, item.name, item.phone, item.address, item.note, item.is_active ? 1 : 0,
-      item.created_at, item.updated_at,
+      item.accounting_enabled ? 1 : 0, item.accounting_started_at ?? null, item.created_at, item.updated_at,
     ]));
   }
   const supplierIdByUuid = await loadIdByUuid(transaction, 'suppliers');
@@ -331,6 +332,52 @@ export async function insertFullRestorePayload(
     ], rows);
   }
   const purchaseReturnItemIdByUuid = await loadIdByUuid(transaction, 'purchase_return_items');
+
+  if (entities.has('supplier_payments')) {
+    inserted += await insertRows(transaction, 'supplier_payments', [
+      'uuid', 'supplier_id', 'cash_session_id', 'payment_mode', 'total_usd_equivalent_cents',
+      'exchange_rate_syp_per_usd', 'supplier_name_snapshot', 'note', 'occurred_at', 'created_at', 'balance_after_usd_cents',
+    ], (payload.supplierPayments ?? []).map(payment => [
+      payment.uuid, requireId(supplierIdByUuid, payment.supplier_uuid, 'SUPPLIER_PAYMENT_SUPPLIER_MISSING'),
+      requireId(sessionIdByUuid, payment.cash_session_uuid, 'SUPPLIER_PAYMENT_SESSION_MISSING'), payment.payment_mode,
+      payment.total_usd_equivalent_cents, payment.exchange_rate_syp_per_usd, payment.supplier_name_snapshot,
+      payment.note, payment.occurred_at, payment.created_at, payment.balance_after_usd_cents,
+    ]));
+  }
+  const supplierPaymentIdByUuid = await loadIdByUuid(transaction, 'supplier_payments');
+  if (entities.has('supplier_payment_tenders')) {
+    const tenderRows: SQLiteBindValue[][] = [];
+    for (const payment of payload.supplierPayments ?? []) for (const tender of payment.tenders) tenderRows.push([
+      tender.uuid, requireId(supplierPaymentIdByUuid, payment.uuid, 'SUPPLIER_PAYMENT_PARENT_MISSING'), tender.currency,
+      tender.amount_minor, tender.usd_equivalent_cents, tender.exchange_rate_syp_per_usd, tender.created_at,
+    ]);
+    inserted += await insertRows(transaction, 'supplier_payment_tenders', [
+      'uuid', 'supplier_payment_id', 'currency', 'amount_minor', 'usd_equivalent_cents', 'exchange_rate_syp_per_usd', 'created_at',
+    ], tenderRows);
+  }
+  if (entities.has('supplier_account_entries')) {
+    inserted += await insertRows(transaction, 'supplier_account_entries', [
+      'uuid', 'supplier_id', 'type', 'delta_usd_cents', 'occurred_at', 'created_at', 'supplier_name_snapshot',
+      'purchase_receipt_id', 'purchase_return_id', 'supplier_payment_id', 'note_snapshot',
+    ], (payload.supplierAccountEntries ?? []).map(entry => [
+      entry.uuid, requireId(supplierIdByUuid, entry.supplier_uuid, 'SUPPLIER_ACCOUNT_SUPPLIER_MISSING'), entry.type,
+      entry.delta_usd_cents, entry.occurred_at, entry.created_at, entry.supplier_name_snapshot,
+      entry.purchase_receipt_uuid ? requireId(purchaseReceiptIdByUuid, entry.purchase_receipt_uuid, 'SUPPLIER_ACCOUNT_SOURCE_MISSING') : null,
+      entry.purchase_return_uuid ? requireId(purchaseReturnIdByUuid, entry.purchase_return_uuid, 'SUPPLIER_ACCOUNT_SOURCE_MISSING') : null,
+      entry.supplier_payment_uuid ? requireId(supplierPaymentIdByUuid, entry.supplier_payment_uuid, 'SUPPLIER_ACCOUNT_SOURCE_MISSING') : null,
+      entry.note_snapshot,
+    ]));
+  }
+  if (entities.has('supplier_account_balances')) {
+    inserted += await insertRows(transaction, 'supplier_account_balances', ['supplier_id', 'balance_usd_cents', 'updated_at'],
+      (payload.supplierAccountBalances ?? []).map(balance => [requireId(supplierIdByUuid, balance.supplier_uuid, 'SUPPLIER_ACCOUNT_SUPPLIER_MISSING'), balance.balance_usd_cents, balance.updated_at]));
+    const mismatch = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) count FROM supplier_account_balances b
+      WHERE b.balance_usd_cents<>COALESCE((SELECT SUM(delta_usd_cents) FROM supplier_account_entries e WHERE e.supplier_id=b.supplier_id),0)`);
+    const incomplete = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) count FROM suppliers s WHERE s.accounting_enabled=1 AND
+      (NOT EXISTS(SELECT 1 FROM supplier_account_balances b WHERE b.supplier_id=s.id) OR
+       1<>(SELECT COUNT(*) FROM supplier_account_entries e WHERE e.supplier_id=s.id AND e.type='opening'))`);
+    if ((mismatch?.count ?? 0) > 0 || (incomplete?.count ?? 0) > 0) throw new Error('SUPPLIER_ACCOUNT_BALANCE_MISMATCH');
+  }
 
   if (entities.has('inventory_balances')) {
     inserted += await insertRows(transaction, 'inventory_balances', [

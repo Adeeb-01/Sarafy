@@ -39,6 +39,10 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
   const isFullRestore = options.mode === 'full_restore';
   await db.withExclusiveTransactionAsync(async transaction => {
     if (isFullRestore) {
+      await transaction.runAsync('DELETE FROM supplier_payment_tenders');
+      await transaction.runAsync('DELETE FROM supplier_account_entries');
+      await transaction.runAsync('DELETE FROM supplier_account_balances');
+      await transaction.runAsync('DELETE FROM supplier_payments');
       await transaction.runAsync('DELETE FROM inventory_movements');
       await transaction.runAsync('DELETE FROM inventory_balances');
       await transaction.runAsync('DELETE FROM purchase_return_items');
@@ -67,9 +71,14 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
       return;
     }
     if (options.entities.includes('cash_sessions')) {
+      const supplierFinanceSessionUuids = new Set((payload.supplierPayments ?? []).map(payment => payment.cash_session_uuid));
       const openCount = (payload.cashSessions ?? []).filter(session => session.closed_at == null).length;
       if (options.mode === 'full_restore' && openCount > 1) throw new Error('MULTIPLE_OPEN_CASH_SESSIONS');
       for (const session of payload.cashSessions ?? []) {
+        const hasSupplierFinance = supplierFinanceSessionUuids.has(session.uuid) ||
+          (session.closing_supplier_payments_syp ?? 0) !== 0 ||
+          (session.closing_supplier_payments_usd_cents ?? 0) !== 0;
+        if (options.mode !== 'full_restore' && hasSupplierFinance) { skipped += 1; continue; }
         if (options.mode !== 'full_restore' && session.closed_at == null) throw new Error('OPEN_CASH_SESSION_CONFLICT');
         const local = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE uuid=?', session.uuid);
         if (local) { skipped += 1; continue; }
@@ -430,7 +439,7 @@ export function defaultImportOptions(mode: ImportOptions['mode'] = 'safe_merge')
     mode,
     conflictStrategy: 'newest',
     entities: mode === 'full_restore'
-      ? ['products', 'categories', 'settings', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'purchase_receipts', 'purchase_receipt_items', 'purchase_returns', 'purchase_return_items', 'inventory_balances', 'inventory_movements', 'product_images', 'sale_drafts', 'sale_draft_items']
+      ? ['products', 'categories', 'settings', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'purchase_receipts', 'purchase_receipt_items', 'purchase_returns', 'purchase_return_items', 'supplier_account_balances', 'supplier_account_entries', 'supplier_payments', 'supplier_payment_tenders', 'inventory_balances', 'inventory_movements', 'product_images', 'sale_drafts', 'sale_draft_items']
       : ['products', 'categories', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'product_images'],
     importSettings: mode === 'full_restore',
   };
@@ -492,6 +501,8 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
         (supplier.phone != null && (typeof supplier.phone !== 'string' || supplier.phone.length > 60)) ||
         (supplier.address != null && (typeof supplier.address !== 'string' || supplier.address.length > 240)) ||
         (supplier.note != null && (typeof supplier.note !== 'string' || supplier.note.length > 500)) || ![0, 1].includes(supplier.is_active) ||
+        (supplier.accounting_enabled != null && ![0, 1].includes(supplier.accounting_enabled)) ||
+        (supplier.accounting_started_at != null && !validDate(supplier.accounting_started_at)) ||
         !validDate(supplier.created_at) || !validDate(supplier.updated_at)) throw new Error('INVALID_SUPPLIER');
     supplierUuids.add(supplier.uuid);
   }
@@ -529,6 +540,55 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
       quantityTotal += item.quantity; valueTotal += item.line_total_usd_cents;
     }
     if (quantityTotal !== record.total_quantity || valueTotal !== record.total_value_usd_cents) throw new Error('INVALID_PURCHASE_RETURN_TOTAL');
+  }
+  const supplierByUuid = new Map((payload.suppliers ?? []).map(supplier => [supplier.uuid, supplier]));
+  const supplierPaymentByUuid = new Map<string, NonNullable<ImportPayload['supplierPayments']>[number]>();
+  const supplierPaymentSypBySession = new Map<string, number>(); const supplierPaymentUsdBySession = new Map<string, number>();
+  for (const payment of payload.supplierPayments ?? []) {
+    if (!isUuid(payment.uuid) || supplierPaymentByUuid.has(payment.uuid) || !supplierByUuid.has(payment.supplier_uuid) || !isUuid(payment.cash_session_uuid) || !['SYP','USD','MIXED'].includes(payment.payment_mode) ||
+        !Number.isSafeInteger(payment.total_usd_equivalent_cents) || payment.total_usd_equivalent_cents <= 0 || !validDate(payment.occurred_at) || !validDate(payment.created_at) || !Array.isArray(payment.tenders) || !payment.tenders.length || !Number.isSafeInteger(payment.balance_after_usd_cents) ||
+        typeof payment.supplier_name_snapshot !== 'string' || !payment.supplier_name_snapshot.trim() || (payment.note != null && (typeof payment.note !== 'string' || payment.note.length > 500)) ||
+        (payment.payment_mode === 'USD' ? payment.exchange_rate_syp_per_usd != null : !Number.isSafeInteger(payment.exchange_rate_syp_per_usd) || (payment.exchange_rate_syp_per_usd ?? 0) <= 0)) throw new Error('INVALID_SUPPLIER_PAYMENT');
+    let total = 0; let syp = 0; let usd = 0; const currencies = new Set<string>();
+    for (const tender of payment.tenders) {
+      if (!isUuid(tender.uuid) || currencies.has(tender.currency) || !['SYP','USD'].includes(tender.currency) || !Number.isSafeInteger(tender.amount_minor) || tender.amount_minor <= 0 || !Number.isSafeInteger(tender.usd_equivalent_cents) || tender.usd_equivalent_cents <= 0 || !validDate(tender.created_at)) throw new Error('INVALID_SUPPLIER_PAYMENT_TENDER');
+      if (tender.currency === 'USD' ? tender.amount_minor !== tender.usd_equivalent_cents || tender.exchange_rate_syp_per_usd != null : !Number.isSafeInteger(tender.exchange_rate_syp_per_usd) || tender.exchange_rate_syp_per_usd !== payment.exchange_rate_syp_per_usd) throw new Error('INVALID_SUPPLIER_PAYMENT_TENDER');
+      currencies.add(tender.currency); total += tender.usd_equivalent_cents;
+      if (tender.currency === 'SYP') syp += tender.amount_minor; else usd += tender.amount_minor;
+    }
+    const mode = syp > 0 && usd > 0 ? 'MIXED' : usd > 0 ? 'USD' : 'SYP';
+    if (mode !== payment.payment_mode || total !== payment.total_usd_equivalent_cents) throw new Error('INVALID_SUPPLIER_PAYMENT_TOTAL');
+    supplierPaymentByUuid.set(payment.uuid, payment);
+    supplierPaymentSypBySession.set(payment.cash_session_uuid, (supplierPaymentSypBySession.get(payment.cash_session_uuid) ?? 0) + syp);
+    supplierPaymentUsdBySession.set(payment.cash_session_uuid, (supplierPaymentUsdBySession.get(payment.cash_session_uuid) ?? 0) + usd);
+  }
+  const entrySumBySupplier = new Map<string, number>(); const entrySourceKeys = new Set<string>(); const entryUuids = new Set<string>(); const openingCountBySupplier = new Map<string, number>(); const runningBySupplier = new Map<string, number>();
+  for (const entry of payload.supplierAccountEntries ?? []) {
+    if (!isUuid(entry.uuid) || entryUuids.has(entry.uuid) || !supplierByUuid.has(entry.supplier_uuid) || !['opening','purchase','purchase_return','payment'].includes(entry.type) || !Number.isSafeInteger(entry.delta_usd_cents) || !validDate(entry.occurred_at) || !validDate(entry.created_at)) throw new Error('INVALID_SUPPLIER_ACCOUNT_ENTRY');
+    entryUuids.add(entry.uuid);
+    const sources = [entry.purchase_receipt_uuid, entry.purchase_return_uuid, entry.supplier_payment_uuid].filter(Boolean);
+    if ((entry.type === 'opening' && sources.length) || (entry.type !== 'opening' && sources.length !== 1)) throw new Error('INVALID_SUPPLIER_ACCOUNT_ENTRY');
+    const sourceKey = `${entry.type}:${sources[0] ?? entry.supplier_uuid}`; if (entrySourceKeys.has(sourceKey)) throw new Error('DUPLICATE_SUPPLIER_ACCOUNT_SOURCE'); entrySourceKeys.add(sourceKey);
+    if (entry.type === 'opening') openingCountBySupplier.set(entry.supplier_uuid, (openingCountBySupplier.get(entry.supplier_uuid) ?? 0) + 1);
+    if (entry.type === 'purchase') { const receipt = (payload.purchaseReceipts ?? []).find(item => item.uuid === entry.purchase_receipt_uuid); const value = receipt?.items.reduce((sum, item) => sum + item.line_total_usd_cents, 0); if (value == null || entry.delta_usd_cents !== value) throw new Error('INVALID_SUPPLIER_ACCOUNT_ENTRY'); }
+    if (entry.type === 'purchase_return') { const record = (payload.purchaseReturns ?? []).find(item => item.uuid === entry.purchase_return_uuid); if (!record || entry.delta_usd_cents !== -record.total_value_usd_cents) throw new Error('INVALID_SUPPLIER_ACCOUNT_ENTRY'); }
+    if (entry.type === 'payment') { const payment = entry.supplier_payment_uuid ? supplierPaymentByUuid.get(entry.supplier_payment_uuid) : null; if (!payment || entry.delta_usd_cents !== -payment.total_usd_equivalent_cents) throw new Error('INVALID_SUPPLIER_ACCOUNT_ENTRY'); }
+    const running = (runningBySupplier.get(entry.supplier_uuid) ?? 0) + entry.delta_usd_cents;
+    if (!Number.isSafeInteger(running)) throw new Error('INVALID_SUPPLIER_ACCOUNT_ENTRY');
+    if (entry.type === 'payment' && supplierPaymentByUuid.get(entry.supplier_payment_uuid!)?.balance_after_usd_cents !== running) throw new Error('SUPPLIER_PAYMENT_BALANCE_MISMATCH');
+    runningBySupplier.set(entry.supplier_uuid, running);
+    entrySumBySupplier.set(entry.supplier_uuid, (entrySumBySupplier.get(entry.supplier_uuid) ?? 0) + entry.delta_usd_cents);
+  }
+  const balancedSuppliers = new Set<string>();
+  for (const balance of payload.supplierAccountBalances ?? []) {
+    const supplier = supplierByUuid.get(balance.supplier_uuid);
+    if (!supplier || !supplier.accounting_enabled || balancedSuppliers.has(balance.supplier_uuid) || !Number.isSafeInteger(balance.balance_usd_cents) || balance.balance_usd_cents !== (entrySumBySupplier.get(balance.supplier_uuid) ?? 0) || !validDate(balance.updated_at)) throw new Error('SUPPLIER_ACCOUNT_BALANCE_MISMATCH');
+    balancedSuppliers.add(balance.supplier_uuid);
+  }
+  for (const supplier of payload.suppliers ?? []) {
+    const enabled = supplier.accounting_enabled ?? 0;
+    if (enabled && (!balancedSuppliers.has(supplier.uuid) || openingCountBySupplier.get(supplier.uuid) !== 1 || !supplier.accounting_started_at)) throw new Error('SUPPLIER_ACCOUNT_INCOMPLETE');
+    if (!enabled && (balancedSuppliers.has(supplier.uuid) || entrySumBySupplier.has(supplier.uuid) || supplier.accounting_started_at != null)) throw new Error('SUPPLIER_ACCOUNT_INACTIVE_DATA');
   }
   for (const sale of payload.sales) {
     if (!sale || !isRecord(sale) || !isUuid(sale.uuid) || typeof sale.invoice_number !== 'string' ||
@@ -627,16 +687,19 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
         (session.closing_actual_cash_syp ?? -1) < 0 || (session.closing_sales_total_syp ?? -1) < 0 ||
         (session.closing_refunds_total_syp ?? -1) < 0 || (session.closing_expenses_total_syp ?? -1) < 0) throw new Error('INVALID_CLOSED_CASH_SESSION');
     const hasV13Snapshot = Number.isSafeInteger(session.closing_cash_received_syp) && Number.isSafeInteger(session.closing_change_given_syp);
-    const expected = hasV13Snapshot
-      ? session.opening_cash_syp + session.closing_cash_received_syp! - session.closing_change_given_syp! - session.closing_refunds_total_syp! - session.closing_expenses_total_syp!
+      const supplierSyp = session.closing_supplier_payments_syp ?? 0; const supplierUsd = session.closing_supplier_payments_usd_cents ?? 0;
+      if (supplierSyp !== (supplierPaymentSypBySession.get(session.uuid) ?? 0) || supplierUsd !== (supplierPaymentUsdBySession.get(session.uuid) ?? 0)) throw new Error('INVALID_CASH_SESSION_SUPPLIER_PAYMENT_SNAPSHOT');
+      const expected = hasV13Snapshot
+      ? session.opening_cash_syp + session.closing_cash_received_syp! - session.closing_change_given_syp! - session.closing_refunds_total_syp! - session.closing_expenses_total_syp! - supplierSyp
       : calculateExpectedCash(session.opening_cash_syp, session.closing_sales_total_syp!, session.closing_refunds_total_syp!, session.closing_expenses_total_syp!);
     const difference = calculateCashDifference(session.closing_actual_cash_syp!, expected);
     if (session.closing_expected_cash_syp !== expected || session.closing_difference_syp !== difference) throw new Error('INVALID_CASH_SESSION_SNAPSHOT');
     if (hasV13Snapshot) {
-      const expectedUsd = (session.opening_cash_usd_cents ?? 0) + (session.closing_cash_received_usd_cents ?? 0);
+      const expectedUsd = (session.opening_cash_usd_cents ?? 0) + (session.closing_cash_received_usd_cents ?? 0) - supplierUsd;
       if (session.closing_expected_cash_usd_cents !== expectedUsd || session.closing_difference_usd_cents !== (session.closing_actual_cash_usd_cents! - expectedUsd)) throw new Error('INVALID_CASH_SESSION_SNAPSHOT');
     }
   }
+  for (const payment of payload.supplierPayments ?? []) if (!seenCashSessions.has(payment.cash_session_uuid)) throw new Error('SUPPLIER_PAYMENT_SESSION_MISSING');
   const settings = payload.settings;
   if (!isRecord(settings) || Object.keys(settings).some(key => !SETTING_KEYS.includes(key as typeof SETTING_KEYS[number])) ||
       !finite(settings.exchangeRate) || settings.exchangeRate <= 0 ||

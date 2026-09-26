@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, Supplier, SupplierInput, SupplierSort, SuspendedSale, SuspendedSaleSummary } from '@/types';
+import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, Supplier, SupplierAccountEntry, SupplierAccountHealthReport, SupplierAccountSummary, SupplierInput, SupplierPayment, SupplierPaymentInput, SupplierSort, SuspendedSale, SuspendedSaleSummary } from '@/types';
 import * as database from '@/database/database';
 
 const defaults: Settings = {
@@ -79,6 +79,13 @@ interface AppState extends Settings {
   addSupplier: (input: SupplierInput) => Promise<number>;
   updateSupplier: (id: number, input: SupplierInput) => Promise<void>;
   setSupplierActive: (id: number, active: boolean) => Promise<'archived' | 'restored'>;
+  activateSupplierAccount: (id: number, openingBalanceUsdCents: number) => Promise<SupplierAccountSummary>;
+  getSupplierAccountSummary: (id: number) => Promise<SupplierAccountSummary | null>;
+  getSupplierAccountEntries: (id: number, type?: SupplierAccountEntry['type'] | 'all', limit?: number, from?: string) => Promise<SupplierAccountEntry[]>;
+  getSupplierPayments: (id: number, limit?: number) => Promise<SupplierPayment[]>;
+  getSupplierPaymentDetail: (id: number) => Promise<SupplierPayment | null>;
+  createSupplierPayment: (input: SupplierPaymentInput) => Promise<SupplierPayment>;
+  auditSupplierAccountHealth: () => Promise<SupplierAccountHealthReport>;
   queryPurchaseReceipts: (query?: PurchaseReceiptQuery) => Promise<PurchaseReceipt[]>;
   getPurchaseReceiptDetail: (id: number) => Promise<PurchaseReceipt | null>;
   createPurchaseReceipt: (input: PurchaseReceiptInput) => Promise<PurchaseReceipt>;
@@ -207,6 +214,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   addSupplier: database.addSupplier,
   updateSupplier: database.updateSupplier,
   setSupplierActive: database.setSupplierActive,
+  activateSupplierAccount: database.activateSupplierAccount,
+  getSupplierAccountSummary: database.getSupplierAccountSummary,
+  getSupplierAccountEntries: database.getSupplierAccountEntries,
+  getSupplierPayments: database.getSupplierPayments,
+  getSupplierPaymentDetail: database.getSupplierPaymentDetail,
+  createSupplierPayment: async input => {
+    const payment = await database.createSupplierPayment(input);
+    set({ activeCashSession: await database.getActiveCashSession() });
+    return payment;
+  },
+  auditSupplierAccountHealth: database.auditSupplierAccountHealth,
   queryPurchaseReceipts: database.queryPurchaseReceipts,
   getPurchaseReceiptDetail: database.getPurchaseReceiptDetail,
   createPurchaseReceipt: async input => {

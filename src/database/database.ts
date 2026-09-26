@@ -1,15 +1,16 @@
 import * as SQLite from 'expo-sqlite';
-import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryMovement, InventoryMovementType, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptItem, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierInput, SupplierSort, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
+import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryMovement, InventoryMovementType, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptItem, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierAccountEntry, SupplierAccountHealthReport, SupplierAccountSummary, SupplierInput, SupplierPayment, SupplierPaymentInput, SupplierSort, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
 import { createDeterministicUuid, createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
 import { deriveReturnStatus, previewReturn, returnedQuantities } from '@/utils/returns';
 import { DEFAULT_EXPENSE_CATEGORIES, OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 import { calculateSettlement } from '@/utils/multiCurrency';
+import { calculateSupplierPaymentEquivalent } from '@/utils/supplierAccounts';
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
@@ -471,6 +472,83 @@ async function migratePurchaseReturnsV16() {
   });
 }
 
+async function migrateSupplierAccountsV17() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 17) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const supplierColumns = await transaction.getAllAsync<{ name: string }>('PRAGMA table_info(suppliers)');
+    if (!supplierColumns.some(column => column.name === 'accounting_enabled')) await transaction.execAsync('ALTER TABLE suppliers ADD COLUMN accounting_enabled INTEGER NOT NULL DEFAULT 0 CHECK(accounting_enabled IN (0,1))');
+    if (!supplierColumns.some(column => column.name === 'accounting_started_at')) await transaction.execAsync('ALTER TABLE suppliers ADD COLUMN accounting_started_at TEXT');
+    const sessionColumns = await transaction.getAllAsync<{ name: string }>('PRAGMA table_info(cash_sessions)');
+    if (!sessionColumns.some(column => column.name === 'closing_supplier_payments_syp')) await transaction.execAsync('ALTER TABLE cash_sessions ADD COLUMN closing_supplier_payments_syp INTEGER NOT NULL DEFAULT 0 CHECK(closing_supplier_payments_syp>=0)');
+    if (!sessionColumns.some(column => column.name === 'closing_supplier_payments_usd_cents')) await transaction.execAsync('ALTER TABLE cash_sessions ADD COLUMN closing_supplier_payments_usd_cents INTEGER NOT NULL DEFAULT 0 CHECK(closing_supplier_payments_usd_cents>=0)');
+    await transaction.execAsync(`
+      CREATE TABLE supplier_account_balances (
+        supplier_id INTEGER PRIMARY KEY REFERENCES suppliers(id) ON DELETE RESTRICT,
+        balance_usd_cents INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE supplier_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE RESTRICT,
+        cash_session_id INTEGER NOT NULL REFERENCES cash_sessions(id) ON DELETE RESTRICT,
+        payment_mode TEXT NOT NULL CHECK(payment_mode IN ('SYP','USD','MIXED')),
+        total_usd_equivalent_cents INTEGER NOT NULL CHECK(total_usd_equivalent_cents>0),
+        exchange_rate_syp_per_usd INTEGER CHECK(exchange_rate_syp_per_usd>0),
+        supplier_name_snapshot TEXT NOT NULL,
+        note TEXT,
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        balance_after_usd_cents INTEGER NOT NULL,
+        CHECK((payment_mode='USD' AND exchange_rate_syp_per_usd IS NULL) OR (payment_mode IN ('SYP','MIXED') AND exchange_rate_syp_per_usd IS NOT NULL))
+      );
+      CREATE TABLE supplier_payment_tenders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        supplier_payment_id INTEGER NOT NULL REFERENCES supplier_payments(id) ON DELETE RESTRICT,
+        currency TEXT NOT NULL CHECK(currency IN ('SYP','USD')),
+        amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
+        usd_equivalent_cents INTEGER NOT NULL CHECK(usd_equivalent_cents>0),
+        exchange_rate_syp_per_usd INTEGER CHECK(exchange_rate_syp_per_usd>0),
+        created_at TEXT NOT NULL,
+        UNIQUE(supplier_payment_id,currency),
+        CHECK((currency='SYP' AND exchange_rate_syp_per_usd IS NOT NULL) OR (currency='USD' AND exchange_rate_syp_per_usd IS NULL AND amount_minor=usd_equivalent_cents))
+      );
+      CREATE TABLE supplier_account_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        supplier_id INTEGER NOT NULL REFERENCES suppliers(id) ON DELETE RESTRICT,
+        type TEXT NOT NULL CHECK(type IN ('opening','purchase','purchase_return','payment')),
+        delta_usd_cents INTEGER NOT NULL,
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        supplier_name_snapshot TEXT NOT NULL,
+        purchase_receipt_id INTEGER REFERENCES purchase_receipts(id) ON DELETE RESTRICT,
+        purchase_return_id INTEGER REFERENCES purchase_returns(id) ON DELETE RESTRICT,
+        supplier_payment_id INTEGER REFERENCES supplier_payments(id) ON DELETE RESTRICT,
+        note_snapshot TEXT,
+        CHECK((type='opening' AND purchase_receipt_id IS NULL AND purchase_return_id IS NULL AND supplier_payment_id IS NULL) OR
+              (type='purchase' AND purchase_receipt_id IS NOT NULL AND purchase_return_id IS NULL AND supplier_payment_id IS NULL AND delta_usd_cents>=0) OR
+              (type='purchase_return' AND purchase_receipt_id IS NULL AND purchase_return_id IS NOT NULL AND supplier_payment_id IS NULL AND delta_usd_cents<=0) OR
+              (type='payment' AND purchase_receipt_id IS NULL AND purchase_return_id IS NULL AND supplier_payment_id IS NOT NULL AND delta_usd_cents<0))
+      );
+      CREATE UNIQUE INDEX idx_supplier_account_opening ON supplier_account_entries(supplier_id) WHERE type='opening';
+      CREATE UNIQUE INDEX idx_supplier_account_purchase ON supplier_account_entries(purchase_receipt_id) WHERE purchase_receipt_id IS NOT NULL;
+      CREATE UNIQUE INDEX idx_supplier_account_purchase_return ON supplier_account_entries(purchase_return_id) WHERE purchase_return_id IS NOT NULL;
+      CREATE UNIQUE INDEX idx_supplier_account_payment ON supplier_account_entries(supplier_payment_id) WHERE supplier_payment_id IS NOT NULL;
+      CREATE INDEX idx_supplier_account_entries_supplier_date ON supplier_account_entries(supplier_id,occurred_at DESC,id DESC);
+      CREATE INDEX idx_supplier_account_entries_supplier_type ON supplier_account_entries(supplier_id,type);
+      CREATE INDEX idx_supplier_payments_supplier_date ON supplier_payments(supplier_id,occurred_at DESC,id DESC);
+      CREATE INDEX idx_supplier_payments_session ON supplier_payments(cash_session_id);
+      CREATE INDEX idx_supplier_payment_tenders_payment ON supplier_payment_tenders(supplier_payment_id);
+      PRAGMA user_version = 17;
+    `);
+  });
+}
+
 export async function initializeDatabase() {
   const db = await dbPromise;
   await db.execAsync(`
@@ -544,6 +622,7 @@ export async function initializeDatabase() {
   await migrateInventoryV14();
   await migratePurchasesV15();
   await migratePurchaseReturnsV16();
+  await migrateSupplierAccountsV17();
   await db.runAsync(`DELETE FROM sale_draft_items
     WHERE NOT EXISTS (SELECT 1 FROM sale_drafts WHERE sale_drafts.id=sale_draft_items.draft_id)`);
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
@@ -780,11 +859,160 @@ export async function getSuppliers(search = '', sort: SupplierSort = 'name', inc
   if (term) { where.push('(s.name LIKE ? COLLATE NOCASE OR COALESCE(s.phone,\'\') LIKE ?)'); parameters.push(`%${term}%`, `%${term}%`); }
   if (!includeInactive) where.push('s.is_active=1');
   const order = sort === 'newest' ? 's.created_at DESC,s.id DESC' : 's.name COLLATE NOCASE ASC,s.id ASC';
-  return db.getAllAsync<Supplier>(`SELECT s.*,COUNT(pr.id) AS receipt_count,MAX(pr.received_at) AS latest_receipt_at,
+  return db.getAllAsync<Supplier>(`SELECT s.*,b.balance_usd_cents,COUNT(pr.id) AS receipt_count,MAX(pr.received_at) AS latest_receipt_at,
     (SELECT COUNT(*) FROM purchase_returns sr WHERE sr.supplier_uuid_snapshot=s.uuid) AS return_count,
     (SELECT MAX(created_at) FROM purchase_returns sr WHERE sr.supplier_uuid_snapshot=s.uuid) AS latest_return_at
-    FROM suppliers s LEFT JOIN purchase_receipts pr ON pr.supplier_id=s.id${where.length ? ` WHERE ${where.join(' AND ')}` : ''}
+    FROM suppliers s LEFT JOIN supplier_account_balances b ON b.supplier_id=s.id LEFT JOIN purchase_receipts pr ON pr.supplier_id=s.id${where.length ? ` WHERE ${where.join(' AND ')}` : ''}
     GROUP BY s.id ORDER BY ${order}`, ...parameters);
+}
+
+async function postSupplierAccountEntry(
+  transaction: SQLite.SQLiteDatabase,
+  supplier: Supplier,
+  input: { type: SupplierAccountEntry['type']; delta: number; occurredAt: string; note?: string | null; purchaseReceiptId?: number; purchaseReturnId?: number; supplierPaymentId?: number },
+) {
+  if (!Number.isSafeInteger(input.delta)) throw new Error('INVALID_SUPPLIER_ACCOUNT_AMOUNT');
+  const balance = await transaction.getFirstAsync<{ balance_usd_cents: number }>('SELECT balance_usd_cents FROM supplier_account_balances WHERE supplier_id=?', supplier.id);
+  if (!balance) throw new Error('SUPPLIER_ACCOUNT_BALANCE_MISSING');
+  const after = balance.balance_usd_cents + input.delta;
+  if (!Number.isSafeInteger(after)) throw new Error('INVALID_SUPPLIER_ACCOUNT_AMOUNT');
+  await transaction.runAsync(`INSERT INTO supplier_account_entries
+    (uuid,supplier_id,type,delta_usd_cents,occurred_at,created_at,supplier_name_snapshot,purchase_receipt_id,purchase_return_id,supplier_payment_id,note_snapshot)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`, createUuid(), supplier.id, input.type, input.delta, input.occurredAt, input.occurredAt, supplier.name,
+  input.purchaseReceiptId ?? null, input.purchaseReturnId ?? null, input.supplierPaymentId ?? null, input.note?.trim() || null);
+  const changed = await transaction.runAsync('UPDATE supplier_account_balances SET balance_usd_cents=?,updated_at=? WHERE supplier_id=? AND balance_usd_cents=?', after, input.occurredAt, supplier.id, balance.balance_usd_cents);
+  if (changed.changes !== 1) throw new Error('SUPPLIER_ACCOUNT_CONCURRENT_UPDATE');
+  return after;
+}
+
+export async function activateSupplierAccount(supplierId: number, openingBalanceUsdCents: number): Promise<SupplierAccountSummary> {
+  if (!Number.isSafeInteger(supplierId) || supplierId <= 0 || !Number.isSafeInteger(openingBalanceUsdCents)) throw new Error('INVALID_SUPPLIER_ACCOUNT_AMOUNT');
+  const db = await dbPromise; const now = new Date().toISOString();
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const supplier = await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=?', supplierId);
+    if (!supplier) throw new Error('SUPPLIER_NOT_FOUND');
+    if (supplier.accounting_enabled) throw new Error('SUPPLIER_ACCOUNT_ALREADY_ACTIVE');
+    const changed = await transaction.runAsync('UPDATE suppliers SET accounting_enabled=1,accounting_started_at=?,updated_at=? WHERE id=? AND accounting_enabled=0', now, now, supplierId);
+    if (changed.changes !== 1) throw new Error('SUPPLIER_ACCOUNT_ALREADY_ACTIVE');
+    await transaction.runAsync('INSERT INTO supplier_account_balances(supplier_id,balance_usd_cents,updated_at) VALUES(?,?,?)', supplierId, openingBalanceUsdCents, now);
+    await transaction.runAsync(`INSERT INTO supplier_account_entries(uuid,supplier_id,type,delta_usd_cents,occurred_at,created_at,supplier_name_snapshot,note_snapshot)
+      VALUES(?,?,'opening',?,?,?,?,?)`, createUuid(), supplierId, openingBalanceUsdCents, now, now, supplier.name, null);
+  });
+  const summary = await getSupplierAccountSummary(supplierId); if (!summary) throw new Error('SUPPLIER_ACCOUNT_NOT_FOUND'); return summary;
+}
+
+export async function getSupplierAccountSummary(supplierId: number): Promise<SupplierAccountSummary | null> {
+  const db = await dbPromise;
+  const supplier = await db.getFirstAsync<Supplier>('SELECT s.*,b.balance_usd_cents FROM suppliers s LEFT JOIN supplier_account_balances b ON b.supplier_id=s.id WHERE s.id=?', supplierId);
+  if (!supplier || !supplier.accounting_enabled) return null;
+  const totals = await db.getFirstAsync<{ opening: number; purchases: number; returns: number; payments: number }>(`SELECT
+    COALESCE(SUM(CASE WHEN type='opening' THEN delta_usd_cents ELSE 0 END),0) AS opening,
+    COALESCE(SUM(CASE WHEN type='purchase' THEN delta_usd_cents ELSE 0 END),0) AS purchases,
+    COALESCE(-SUM(CASE WHEN type='purchase_return' THEN delta_usd_cents ELSE 0 END),0) AS returns,
+    COALESCE(-SUM(CASE WHEN type='payment' THEN delta_usd_cents ELSE 0 END),0) AS payments
+    FROM supplier_account_entries WHERE supplier_id=?`, supplierId);
+  return { supplier, balanceUsdCents: supplier.balance_usd_cents ?? 0, openingUsdCents: totals?.opening ?? 0, purchasesUsdCents: totals?.purchases ?? 0, returnsUsdCents: totals?.returns ?? 0, paymentsUsdCents: totals?.payments ?? 0 };
+}
+
+export async function getSupplierAccountEntries(supplierId: number, type: SupplierAccountEntry['type'] | 'all' = 'all', limit = 200, from?: string): Promise<SupplierAccountEntry[]> {
+  if (!Number.isSafeInteger(supplierId) || supplierId <= 0 || !['all','opening','purchase','purchase_return','payment'].includes(type) || !Number.isSafeInteger(limit) || limit <= 0 || limit > 1000 || (from != null && !Number.isFinite(Date.parse(from)))) throw new Error('INVALID_SUPPLIER_ACCOUNT_QUERY');
+  const db = await dbPromise;
+  const where = `${type === 'all' ? '' : ' AND ledger.type=?'}${from ? ' AND ledger.occurred_at>=?' : ''}`;
+  return db.getAllAsync<SupplierAccountEntry>(`WITH ledger AS (
+      SELECT e.*,SUM(e.delta_usd_cents) OVER (PARTITION BY e.supplier_id ORDER BY e.occurred_at ASC,e.id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_balance_usd_cents
+      FROM supplier_account_entries e WHERE e.supplier_id=?
+    ) SELECT ledger.*,COALESCE(pr.uuid,pret.uuid,sp.uuid) AS reference
+    FROM ledger
+    LEFT JOIN purchase_receipts pr ON pr.id=ledger.purchase_receipt_id
+    LEFT JOIN purchase_returns pret ON pret.id=ledger.purchase_return_id
+    LEFT JOIN supplier_payments sp ON sp.id=ledger.supplier_payment_id
+    WHERE 1=1${where} ORDER BY ledger.occurred_at DESC,ledger.id DESC LIMIT ?`, supplierId, ...(type === 'all' ? [] : [type]), ...(from ? [from] : []), limit);
+}
+
+export async function getSupplierPayments(supplierId: number, limit = 100): Promise<SupplierPayment[]> {
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1000) throw new Error('INVALID_SUPPLIER_ACCOUNT_QUERY');
+  const db = await dbPromise;
+  return db.getAllAsync<SupplierPayment>('SELECT * FROM supplier_payments WHERE supplier_id=? ORDER BY occurred_at DESC,id DESC LIMIT ?', supplierId, limit);
+}
+
+export async function getSupplierPaymentDetail(id: number): Promise<SupplierPayment | null> {
+  const db = await dbPromise; const payment = await db.getFirstAsync<SupplierPayment>('SELECT * FROM supplier_payments WHERE id=?', id);
+  if (!payment) return null;
+  payment.tenders = await db.getAllAsync('SELECT * FROM supplier_payment_tenders WHERE supplier_payment_id=? ORDER BY id', id);
+  return payment;
+}
+
+export async function createSupplierPayment(input: SupplierPaymentInput): Promise<SupplierPayment> {
+  if (!Number.isSafeInteger(input.supplierId) || input.supplierId <= 0) throw new Error('INVALID_SUPPLIER_PAYMENT');
+  const note = normalizeOptionalText(input.note, 500); const db = await dbPromise; const now = new Date().toISOString(); let paymentId = 0;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const supplier = await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=? AND accounting_enabled=1', input.supplierId);
+    if (!supplier) throw new Error('SUPPLIER_ACCOUNT_INACTIVE');
+    const session = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
+    if (!session) throw new Error('CASH_SESSION_REQUIRED');
+    const setting = await transaction.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='exchangeRate'");
+    const parsedRate: unknown = setting ? JSON.parse(setting.value) : null;
+    if (!Number.isSafeInteger(parsedRate) || (parsedRate as number) <= 0) throw new Error('INVALID_EXCHANGE_RATE');
+    const calculated = calculateSupplierPaymentEquivalent(input, parsedRate as number);
+    const rate = calculated.input.mode === 'USD' ? null : parsedRate as number;
+    const current = await transaction.getFirstAsync<{ balance_usd_cents: number }>('SELECT balance_usd_cents FROM supplier_account_balances WHERE supplier_id=?', supplier.id);
+    if (!current) throw new Error('SUPPLIER_ACCOUNT_BALANCE_MISSING');
+    const after = current.balance_usd_cents - calculated.totalUsdCents;
+    if (!Number.isSafeInteger(after)) throw new Error('INVALID_SUPPLIER_ACCOUNT_AMOUNT');
+    const header = await transaction.runAsync(`INSERT INTO supplier_payments
+      (uuid,supplier_id,cash_session_id,payment_mode,total_usd_equivalent_cents,exchange_rate_syp_per_usd,supplier_name_snapshot,note,occurred_at,created_at,balance_after_usd_cents)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, createUuid(), supplier.id, session.id, calculated.input.mode, calculated.totalUsdCents, rate, supplier.name, note, now, now, after);
+    paymentId = header.lastInsertRowId;
+    if (calculated.input.sypAmount > 0) await transaction.runAsync(`INSERT INTO supplier_payment_tenders(uuid,supplier_payment_id,currency,amount_minor,usd_equivalent_cents,exchange_rate_syp_per_usd,created_at)
+      VALUES(?,?,'SYP',?,?,?,?)`, createUuid(), paymentId, calculated.input.sypAmount, calculated.sypUsdCents, parsedRate as number, now);
+    if (calculated.input.usdCents > 0) await transaction.runAsync(`INSERT INTO supplier_payment_tenders(uuid,supplier_payment_id,currency,amount_minor,usd_equivalent_cents,exchange_rate_syp_per_usd,created_at)
+      VALUES(?,?,'USD',?,?,NULL,?)`, createUuid(), paymentId, calculated.input.usdCents, calculated.input.usdCents, now);
+    await postSupplierAccountEntry(transaction, supplier, { type: 'payment', delta: -calculated.totalUsdCents, occurredAt: now, note, supplierPaymentId: paymentId });
+  });
+  const payment = await getSupplierPaymentDetail(paymentId); if (!payment) throw new Error('SUPPLIER_PAYMENT_NOT_FOUND'); return payment;
+}
+
+export async function auditSupplierAccountHealth(): Promise<SupplierAccountHealthReport> {
+  const db = await dbPromise;
+  const row = await db.getFirstAsync<Record<string, number>>(`SELECT
+    (SELECT COUNT(*) FROM suppliers s WHERE s.accounting_enabled=1 AND
+      (s.accounting_started_at IS NULL OR NOT EXISTS(SELECT 1 FROM supplier_account_balances b WHERE b.supplier_id=s.id) OR
+       1<>(SELECT COUNT(*) FROM supplier_account_entries e WHERE e.supplier_id=s.id AND e.type='opening'))) AS active_missing,
+    (SELECT COUNT(*) FROM suppliers s WHERE s.accounting_enabled=0 AND (EXISTS(SELECT 1 FROM supplier_account_balances b WHERE b.supplier_id=s.id) OR EXISTS(SELECT 1 FROM supplier_account_entries e WHERE e.supplier_id=s.id))) AS inactive_state,
+    (SELECT COUNT(*) FROM supplier_account_balances b LEFT JOIN suppliers s ON s.id=b.supplier_id
+      WHERE s.id IS NULL OR typeof(b.balance_usd_cents)<>'integer' OR b.balance_usd_cents<>COALESCE((SELECT SUM(e.delta_usd_cents) FROM supplier_account_entries e WHERE e.supplier_id=b.supplier_id),0)) AS balance_mismatch,
+    (SELECT COUNT(*) FROM (SELECT purchase_receipt_id,purchase_return_id,supplier_payment_id,type,COUNT(*) n FROM supplier_account_entries WHERE type<>'opening' GROUP BY purchase_receipt_id,purchase_return_id,supplier_payment_id,type HAVING n>1)) AS duplicate_sources,
+    (SELECT COUNT(*) FROM supplier_account_entries e
+      LEFT JOIN suppliers supplier ON supplier.id=e.supplier_id
+      LEFT JOIN purchase_receipts pr ON pr.id=e.purchase_receipt_id
+      LEFT JOIN purchase_returns pret ON pret.id=e.purchase_return_id
+      LEFT JOIN supplier_payments sp ON sp.id=e.supplier_payment_id
+      WHERE supplier.id IS NULL OR typeof(e.delta_usd_cents)<>'integer'
+         OR (e.type='purchase' AND (pr.id IS NULL OR e.delta_usd_cents<>(SELECT COALESCE(SUM(line_total_usd_cents),0) FROM purchase_receipt_items WHERE purchase_receipt_id=pr.id)))
+         OR (e.type='purchase_return' AND (pret.id IS NULL OR e.delta_usd_cents<>-pret.total_value_usd_cents))
+         OR (e.type='payment' AND (sp.id IS NULL OR e.delta_usd_cents<>-sp.total_usd_equivalent_cents OR sp.balance_after_usd_cents<>(SELECT COALESCE(SUM(e2.delta_usd_cents),0) FROM supplier_account_entries e2 WHERE e2.supplier_id=e.supplier_id AND (e2.occurred_at<e.occurred_at OR (e2.occurred_at=e.occurred_at AND e2.id<=e.id)))))) AS invalid_entries,
+    (SELECT COUNT(*) FROM supplier_payments sp LEFT JOIN suppliers s ON s.id=sp.supplier_id LEFT JOIN cash_sessions cs ON cs.id=sp.cash_session_id
+      WHERE s.id IS NULL OR cs.id IS NULL OR NOT EXISTS(SELECT 1 FROM supplier_payment_tenders t WHERE t.supplier_payment_id=sp.id)) AS payments_without_tender,
+    (SELECT COUNT(*) FROM supplier_payment_tenders t LEFT JOIN supplier_payments sp ON sp.id=t.supplier_payment_id WHERE sp.id IS NULL) AS orphan_tenders,
+    (SELECT COUNT(*) FROM supplier_payments sp WHERE typeof(sp.total_usd_equivalent_cents)<>'integer' OR typeof(sp.balance_after_usd_cents)<>'integer'
+      OR sp.total_usd_equivalent_cents<>(SELECT COALESCE(SUM(t.usd_equivalent_cents),0) FROM supplier_payment_tenders t WHERE t.supplier_payment_id=sp.id)
+      OR (sp.payment_mode='USD' AND sp.exchange_rate_syp_per_usd IS NOT NULL)
+      OR (sp.payment_mode IN ('SYP','MIXED') AND (typeof(sp.exchange_rate_syp_per_usd)<>'integer' OR sp.exchange_rate_syp_per_usd<=0))
+      OR (sp.payment_mode='SYP' AND ((SELECT COUNT(*) FROM supplier_payment_tenders t WHERE t.supplier_payment_id=sp.id AND t.currency='SYP')<>1 OR EXISTS(SELECT 1 FROM supplier_payment_tenders t WHERE t.supplier_payment_id=sp.id AND t.currency='USD')))
+      OR (sp.payment_mode='USD' AND ((SELECT COUNT(*) FROM supplier_payment_tenders t WHERE t.supplier_payment_id=sp.id AND t.currency='USD')<>1 OR EXISTS(SELECT 1 FROM supplier_payment_tenders t WHERE t.supplier_payment_id=sp.id AND t.currency='SYP')))
+      OR (sp.payment_mode='MIXED' AND ((SELECT COUNT(*) FROM supplier_payment_tenders t WHERE t.supplier_payment_id=sp.id AND t.currency='SYP')<>1 OR (SELECT COUNT(*) FROM supplier_payment_tenders t WHERE t.supplier_payment_id=sp.id AND t.currency='USD')<>1))) AS payment_mismatch,
+    (SELECT COUNT(*) FROM supplier_payment_tenders t JOIN supplier_payments sp ON sp.id=t.supplier_payment_id WHERE typeof(t.amount_minor)<>'integer' OR typeof(t.usd_equivalent_cents)<>'integer' OR t.amount_minor<=0 OR t.usd_equivalent_cents<=0 OR (t.currency='USD' AND (t.amount_minor<>t.usd_equivalent_cents OR t.exchange_rate_syp_per_usd IS NOT NULL)) OR (t.currency='SYP' AND (typeof(t.exchange_rate_syp_per_usd)<>'integer' OR t.exchange_rate_syp_per_usd<=0 OR t.exchange_rate_syp_per_usd<>sp.exchange_rate_syp_per_usd))) AS invalid_tenders,
+    (SELECT COUNT(*) FROM cash_sessions cs WHERE cs.closed_at IS NOT NULL AND (
+      typeof(cs.closing_supplier_payments_syp)<>'integer' OR typeof(cs.closing_supplier_payments_usd_cents)<>'integer'
+      OR cs.closing_supplier_payments_syp<>COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='SYP'),0)
+      OR cs.closing_supplier_payments_usd_cents<>COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='USD'),0))) AS session_mismatch`);
+  return {
+    activeWithoutBalance: row?.active_missing ?? 0, inactiveWithState: row?.inactive_state ?? 0,
+    balanceMismatches: row?.balance_mismatch ?? 0, duplicateSources: row?.duplicate_sources ?? 0,
+    invalidEntries: row?.invalid_entries ?? 0, paymentsWithoutTender: row?.payments_without_tender ?? 0,
+    orphanTenders: row?.orphan_tenders ?? 0, paymentTotalMismatches: row?.payment_mismatch ?? 0,
+    invalidTenders: row?.invalid_tenders ?? 0, cashSessionMismatches: row?.session_mismatch ?? 0,
+  };
 }
 
 export async function addSupplier(input: SupplierInput) {
@@ -854,10 +1082,11 @@ export async function getPurchaseReceiptDetail(id: number): Promise<PurchaseRece
 export async function createPurchaseReceipt(input: PurchaseReceiptInput): Promise<PurchaseReceipt> {
   if (!Number.isSafeInteger(input.supplierId) || input.supplierId <= 0 || !input.items.length) throw new Error('INVALID_PURCHASE_RECEIPT');
   const reference = normalizeOptionalText(input.referenceNumber, 120); const note = normalizeOptionalText(input.note, 500);
-  const productIds = new Set<number>();
+  const productIds = new Set<number>(); let receiptTotalUsdCents = 0;
   for (const item of input.items) {
     if (!Number.isSafeInteger(item.productId) || item.productId <= 0 || !Number.isSafeInteger(item.quantity) || item.quantity <= 0 || !Number.isSafeInteger(item.unitCostUsdCents) || item.unitCostUsdCents < 0 || productIds.has(item.productId)) throw new Error('INVALID_PURCHASE_ITEM');
-    const total = BigInt(item.quantity) * BigInt(item.unitCostUsdCents); if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('INVALID_PURCHASE_ITEM');
+    const total = BigInt(item.quantity) * BigInt(item.unitCostUsdCents); if (total > BigInt(Number.MAX_SAFE_INTEGER) || BigInt(receiptTotalUsdCents) + total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('INVALID_PURCHASE_ITEM');
+    receiptTotalUsdCents += Number(total);
     productIds.add(item.productId);
   }
   const db = await dbPromise; const now = new Date().toISOString(); let receiptId = 0;
@@ -879,6 +1108,7 @@ export async function createPurchaseReceipt(input: PurchaseReceiptInput): Promis
       await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,purchase_receipt_item_id,note,created_at)
         VALUES(?,?,?,?,?,'purchase',?,?,?,?,?,?)`, createUuid(), product.id, product.uuid, product.name, product.barcode, item.quantity, product.quantity, after, itemResult.lastInsertRowId, reference, now);
     }
+    if (supplier.accounting_enabled) await postSupplierAccountEntry(transaction, supplier, { type: 'purchase', delta: receiptTotalUsdCents, occurredAt: now, note, purchaseReceiptId: receiptId });
   });
   const receipt = await getPurchaseReceiptDetail(receiptId); if (!receipt) throw new Error('PURCHASE_RECEIPT_NOT_FOUND'); return receipt;
 }
@@ -951,6 +1181,10 @@ export async function createPurchaseReturn(input: PurchaseReturnInput): Promise<
         VALUES(?,?,?,?,?,?,?,?,?,?)`, createUuid(), returnId, item.id, item.product_uuid_snapshot, item.product_name_snapshot, item.barcode_snapshot, quantity, item.unit_cost_usd_cents, lineTotal, now);
       await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,purchase_return_item_id,note,created_at)
         VALUES(?,?,?,?,?,'purchase_return',?,?,?,?,?,?)`, createUuid(), item.product_id, item.product_uuid_snapshot, item.product_name_snapshot, item.barcode_snapshot, -quantity, item.inventory_quantity, after, inserted.lastInsertRowId, reference, now);
+    }
+    if (receipt.supplier_id) {
+      const supplier = await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=? AND accounting_enabled=1', receipt.supplier_id);
+      if (supplier) await postSupplierAccountEntry(transaction, supplier, { type: 'purchase_return', delta: -totalValue, occurredAt: now, note, purchaseReturnId: returnId });
     }
   });
   const record = await getPurchaseReturnDetail(returnId); if (!record) throw new Error('PURCHASE_RETURN_NOT_FOUND'); return record;
@@ -1538,13 +1772,16 @@ const cashSessionSummarySelect = `SELECT cs.*,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE(p.cash_received_syp,0) ELSE COALESCE(cs.closing_cash_received_syp,cs.closing_sales_total_syp,0) END AS cash_received_syp,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE(p.cash_received_usd_cents,0) ELSE COALESCE(cs.closing_cash_received_usd_cents,0) END AS cash_received_usd_cents,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE(s.change_given_syp,0) ELSE COALESCE(cs.closing_change_given_syp,0) END AS change_given_syp,
-  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE(p.cash_received_syp,0)-COALESCE(s.change_given_syp,0)-COALESCE(r.refunds_total_syp,0)-COALESCE(e.expenses_total_syp,0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp,
-  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_usd_cents+COALESCE(p.cash_received_usd_cents,0) ELSE COALESCE(cs.closing_expected_cash_usd_cents,0) END AS expected_cash_usd_cents
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE(spay.supplier_payments_syp,0) ELSE COALESCE(cs.closing_supplier_payments_syp,0) END AS supplier_payments_syp,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE(spay.supplier_payments_usd_cents,0) ELSE COALESCE(cs.closing_supplier_payments_usd_cents,0) END AS supplier_payments_usd_cents,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE(p.cash_received_syp,0)-COALESCE(s.change_given_syp,0)-COALESCE(r.refunds_total_syp,0)-COALESCE(e.expenses_total_syp,0)-COALESCE(spay.supplier_payments_syp,0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_usd_cents+COALESCE(p.cash_received_usd_cents,0)-COALESCE(spay.supplier_payments_usd_cents,0) ELSE COALESCE(cs.closing_expected_cash_usd_cents,0) END AS expected_cash_usd_cents
   FROM cash_sessions cs
   LEFT JOIN (SELECT cash_session_id,SUM(net_total_syp) AS sales_total_syp,SUM(COALESCE(change_syp,0)) AS change_given_syp,COUNT(*) AS invoice_count FROM sales WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) s ON s.cash_session_id=cs.id
   LEFT JOIN (SELECT s.cash_session_id,SUM(CASE WHEN sp.currency='SYP' THEN sp.amount_minor ELSE 0 END) AS cash_received_syp,SUM(CASE WHEN sp.currency='USD' THEN sp.amount_minor ELSE 0 END) AS cash_received_usd_cents FROM sales s JOIN sale_payments sp ON sp.sale_id=s.id WHERE s.cash_session_id IS NOT NULL GROUP BY s.cash_session_id) p ON p.cash_session_id=cs.id
   LEFT JOIN (SELECT cash_session_id,SUM(refund_total_syp) AS refunds_total_syp,COUNT(*) AS return_count FROM sale_returns WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) r ON r.cash_session_id=cs.id
-  LEFT JOIN (SELECT cash_session_id,SUM(amount_syp) AS expenses_total_syp,COUNT(*) AS expense_count FROM expenses WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) e ON e.cash_session_id=cs.id`;
+  LEFT JOIN (SELECT cash_session_id,SUM(amount_syp) AS expenses_total_syp,COUNT(*) AS expense_count FROM expenses WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) e ON e.cash_session_id=cs.id
+  LEFT JOIN (SELECT sp.cash_session_id,SUM(CASE WHEN t.currency='SYP' THEN t.amount_minor ELSE 0 END) AS supplier_payments_syp,SUM(CASE WHEN t.currency='USD' THEN t.amount_minor ELSE 0 END) AS supplier_payments_usd_cents FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id GROUP BY sp.cash_session_id) spay ON spay.cash_session_id=cs.id`;
 
 const cashSessionDetailSelect = `SELECT cs.*,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(net_total_syp) FROM sales WHERE cash_session_id=cs.id),0) ELSE cs.closing_sales_total_syp END AS sales_total_syp,
@@ -1556,8 +1793,10 @@ const cashSessionDetailSelect = `SELECT cs.*,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='SYP'),0) ELSE COALESCE(cs.closing_cash_received_syp,cs.closing_sales_total_syp,0) END AS cash_received_syp,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='USD'),0) ELSE COALESCE(cs.closing_cash_received_usd_cents,0) END AS cash_received_usd_cents,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(change_syp) FROM sales WHERE cash_session_id=cs.id),0) ELSE COALESCE(cs.closing_change_given_syp,0) END AS change_given_syp,
-  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='SYP'),0)-COALESCE((SELECT SUM(change_syp) FROM sales WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(refund_total_syp) FROM sale_returns WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(amount_syp) FROM expenses WHERE cash_session_id=cs.id),0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp,
-  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_usd_cents+COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='USD'),0) ELSE COALESCE(cs.closing_expected_cash_usd_cents,0) END AS expected_cash_usd_cents
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='SYP'),0) ELSE COALESCE(cs.closing_supplier_payments_syp,0) END AS supplier_payments_syp,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='USD'),0) ELSE COALESCE(cs.closing_supplier_payments_usd_cents,0) END AS supplier_payments_usd_cents,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='SYP'),0)-COALESCE((SELECT SUM(change_syp) FROM sales WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(refund_total_syp) FROM sale_returns WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(amount_syp) FROM expenses WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='SYP'),0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_usd_cents+COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='USD'),0)-COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='USD'),0) ELSE COALESCE(cs.closing_expected_cash_usd_cents,0) END AS expected_cash_usd_cents
   FROM cash_sessions cs`;
 
 function validateCashAmount(value: number) {
@@ -1604,27 +1843,30 @@ export async function closeCashSession(actualCashSyp: number, actualCashUsdCents
   await db.withExclusiveTransactionAsync(async transaction => {
     const active = await transaction.getFirstAsync<CashSession>('SELECT * FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
     if (!active) throw new Error('CASH_SESSION_NOT_FOUND');
-    const totals = await transaction.getFirstAsync<{ sales: number; refunds: number; expenses: number; cash_syp: number; cash_usd: number; change_syp: number }>(`SELECT
+    const totals = await transaction.getFirstAsync<{ sales: number; refunds: number; expenses: number; cash_syp: number; cash_usd: number; change_syp: number; supplier_syp: number; supplier_usd: number }>(`SELECT
       COALESCE((SELECT SUM(net_total_syp) FROM sales WHERE cash_session_id=?),0) AS sales,
       COALESCE((SELECT SUM(refund_total_syp) FROM sale_returns WHERE cash_session_id=?),0) AS refunds,
       COALESCE((SELECT SUM(amount_syp) FROM expenses WHERE cash_session_id=?),0) AS expenses,
       COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=? AND sp.currency='SYP'),0) AS cash_syp,
       COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=? AND sp.currency='USD'),0) AS cash_usd,
-      COALESCE((SELECT SUM(change_syp) FROM sales WHERE cash_session_id=?),0) AS change_syp`, active.id, active.id, active.id, active.id, active.id, active.id);
+      COALESCE((SELECT SUM(change_syp) FROM sales WHERE cash_session_id=?),0) AS change_syp,
+      COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=? AND t.currency='SYP'),0) AS supplier_syp,
+      COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=? AND t.currency='USD'),0) AS supplier_usd`, active.id, active.id, active.id, active.id, active.id, active.id, active.id, active.id);
     const sales = totals?.sales ?? 0; const refunds = totals?.refunds ?? 0; const expenses = totals?.expenses ?? 0;
     const cashSyp = totals?.cash_syp ?? 0; const cashUsd = totals?.cash_usd ?? 0; const changeSyp = totals?.change_syp ?? 0;
-    const expected = active.opening_cash_syp + cashSyp - changeSyp - refunds - expenses;
-    const expectedUsd = active.opening_cash_usd_cents + cashUsd;
+    const supplierSyp = totals?.supplier_syp ?? 0; const supplierUsd = totals?.supplier_usd ?? 0;
+    const expected = active.opening_cash_syp + cashSyp - changeSyp - refunds - expenses - supplierSyp;
+    const expectedUsd = active.opening_cash_usd_cents + cashUsd - supplierUsd;
     const difference = actualCashSyp - expected;
     const differenceUsd = actualCashUsdCents - expectedUsd;
-    if (![sales, refunds, expenses, cashSyp, cashUsd, changeSyp, expected, expectedUsd, difference, differenceUsd].every(Number.isSafeInteger)) throw new Error('INVALID_CASH_TOTAL');
+    if (![sales, refunds, expenses, cashSyp, cashUsd, changeSyp, supplierSyp, supplierUsd, expected, expectedUsd, difference, differenceUsd].every(Number.isSafeInteger) || expected < 0 || expectedUsd < 0) throw new Error('INVALID_CASH_TOTAL');
     const now = new Date().toISOString();
     const result = await transaction.runAsync(`UPDATE cash_sessions SET closed_at=?,closing_actual_cash_syp=?,
       closing_sales_total_syp=?,closing_refunds_total_syp=?,closing_expenses_total_syp=?,
       closing_expected_cash_syp=?,closing_difference_syp=?,closing_actual_cash_usd_cents=?,closing_expected_cash_usd_cents=?,
-      closing_difference_usd_cents=?,closing_cash_received_syp=?,closing_cash_received_usd_cents=?,closing_change_given_syp=?,closing_note=?,updated_at=?
+      closing_difference_usd_cents=?,closing_cash_received_syp=?,closing_cash_received_usd_cents=?,closing_change_given_syp=?,closing_supplier_payments_syp=?,closing_supplier_payments_usd_cents=?,closing_note=?,updated_at=?
       WHERE id=? AND closed_at IS NULL`, now, actualCashSyp, sales, refunds, expenses, expected, difference, actualCashUsdCents, expectedUsd,
-    differenceUsd, cashSyp, cashUsd, changeSyp, note, now, active.id);
+    differenceUsd, cashSyp, cashUsd, changeSyp, supplierSyp, supplierUsd, note, now, active.id);
     if (result.changes !== 1) throw new Error('CASH_SESSION_ALREADY_CLOSED');
     id = active.id;
   });

@@ -28,6 +28,7 @@
     "test:phase15": "node --test scripts/phase15-inventory.test.mjs",
     "test:phase16": "node --test scripts/phase16-suppliers-purchases.test.mjs",
     "test:phase17": "node --test scripts/phase17-purchase-returns.test.mjs",
+    "test:phase18": "node --test scripts/phase18-supplier-accounts.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

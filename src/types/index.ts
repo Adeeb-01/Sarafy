@@ -239,10 +239,95 @@ export interface Supplier {
   latest_receipt_at?: string | null;
   return_count?: number;
   latest_return_at?: string | null;
+  accounting_enabled: number;
+  accounting_started_at: string | null;
+  balance_usd_cents?: number | null;
 }
 
 export type SupplierInput = Pick<Supplier, 'name' | 'phone' | 'address' | 'note'>;
 export type SupplierSort = 'name' | 'newest';
+
+export type SupplierAccountEntryType = 'opening' | 'purchase' | 'purchase_return' | 'payment';
+
+export interface SupplierAccountBalance {
+  supplier_id: number;
+  balance_usd_cents: number;
+  updated_at: string;
+}
+
+export interface SupplierAccountEntry {
+  id: number;
+  uuid: string;
+  supplier_id: number;
+  type: SupplierAccountEntryType;
+  delta_usd_cents: number;
+  occurred_at: string;
+  created_at: string;
+  supplier_name_snapshot: string;
+  purchase_receipt_id: number | null;
+  purchase_return_id: number | null;
+  supplier_payment_id: number | null;
+  note_snapshot: string | null;
+  reference?: string | null;
+  running_balance_usd_cents?: number;
+}
+
+export interface SupplierPaymentTender {
+  id: number;
+  uuid: string;
+  supplier_payment_id: number;
+  currency: PaymentCurrency;
+  amount_minor: number;
+  usd_equivalent_cents: number;
+  exchange_rate_syp_per_usd: number | null;
+  created_at: string;
+}
+
+export interface SupplierPayment {
+  id: number;
+  uuid: string;
+  supplier_id: number;
+  cash_session_id: number;
+  payment_mode: PaymentMode;
+  total_usd_equivalent_cents: number;
+  exchange_rate_syp_per_usd: number | null;
+  supplier_name_snapshot: string;
+  note: string | null;
+  occurred_at: string;
+  created_at: string;
+  balance_after_usd_cents: number;
+  tenders?: SupplierPaymentTender[];
+}
+
+export interface SupplierPaymentInput {
+  supplierId: number;
+  mode: PaymentMode;
+  sypAmount: number;
+  usdCents: number;
+  note?: string | null;
+}
+
+export interface SupplierAccountSummary {
+  supplier: Supplier;
+  balanceUsdCents: number;
+  openingUsdCents: number;
+  purchasesUsdCents: number;
+  returnsUsdCents: number;
+  paymentsUsdCents: number;
+}
+
+export interface SupplierAccountHealthReport {
+  activeWithoutBalance: number;
+  inactiveWithState: number;
+  balanceMismatches: number;
+  duplicateSources: number;
+  invalidEntries: number;
+  paymentsWithoutTender: number;
+  orphanTenders: number;
+  paymentTotalMismatches: number;
+  invalidTenders: number;
+  cashSessionMismatches: number;
+}
 
 export interface PurchaseReceiptItem {
   id: number;
@@ -441,6 +526,8 @@ export interface CashSession {
   closing_cash_received_syp: number | null;
   closing_cash_received_usd_cents: number | null;
   closing_change_given_syp: number | null;
+  closing_supplier_payments_syp: number;
+  closing_supplier_payments_usd_cents: number;
   opening_note: string | null;
   closing_note: string | null;
   created_at: string;
@@ -459,6 +546,8 @@ export interface CashSessionSummary extends CashSession {
   cash_received_usd_cents: number;
   change_given_syp: number;
   expected_cash_usd_cents: number;
+  supplier_payments_syp: number;
+  supplier_payments_usd_cents: number;
 }
 
 export type CashSessionHistoryRow = Pick<CashSession,

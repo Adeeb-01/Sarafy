@@ -1,8 +1,8 @@
-import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryMovementType, Product, Sale, Settings, Supplier, SuspendedSale } from '@/types';
+import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryMovementType, Product, Sale, Settings, Supplier, SupplierAccountEntryType, SuspendedSale } from '@/types';
 
 export type ImportMode = 'safe_merge' | 'selective' | 'full_restore';
 export type ConflictStrategy = 'newest' | 'keep_local' | 'use_imported' | 'manual';
-export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_payments' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'inventory_balances' | 'inventory_movements' | 'suppliers' | 'purchase_receipts' | 'purchase_receipt_items' | 'purchase_returns' | 'purchase_return_items' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
+export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_payments' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'inventory_balances' | 'inventory_movements' | 'suppliers' | 'purchase_receipts' | 'purchase_receipt_items' | 'purchase_returns' | 'purchase_return_items' | 'supplier_account_balances' | 'supplier_account_entries' | 'supplier_payments' | 'supplier_payment_tenders' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
 
 export interface PortableSalePayment {
   uuid: string; sale_uuid: string; currency: 'SYP' | 'USD'; amount_minor: number;
@@ -47,6 +47,18 @@ export interface PortablePurchaseReturn {
   total_quantity: number; total_value_usd_cents: number; reference_number: string | null; note: string | null; items: PortablePurchaseReturnItem[];
 }
 
+export interface PortableSupplierAccountBalance { supplier_uuid: string; balance_usd_cents: number; updated_at: string }
+export interface PortableSupplierPaymentTender { uuid: string; currency: 'SYP' | 'USD'; amount_minor: number; usd_equivalent_cents: number; exchange_rate_syp_per_usd: number | null; created_at: string }
+export interface PortableSupplierPayment {
+  uuid: string; supplier_uuid: string; cash_session_uuid: string; payment_mode: 'SYP' | 'USD' | 'MIXED'; total_usd_equivalent_cents: number;
+  exchange_rate_syp_per_usd: number | null; supplier_name_snapshot: string; note: string | null; occurred_at: string; created_at: string;
+  balance_after_usd_cents: number; tenders: PortableSupplierPaymentTender[];
+}
+export interface PortableSupplierAccountEntry {
+  uuid: string; supplier_uuid: string; type: SupplierAccountEntryType; delta_usd_cents: number; occurred_at: string; created_at: string;
+  supplier_name_snapshot: string; purchase_receipt_uuid: string | null; purchase_return_uuid: string | null; supplier_payment_uuid: string | null; note_snapshot: string | null;
+}
+
 export interface PortableCategory {
   id?: number;
   uuid: string;
@@ -74,6 +86,9 @@ export interface ImportPayload {
   suppliers?: PortableSupplier[];
   purchaseReceipts?: PortablePurchaseReceipt[];
   purchaseReturns?: PortablePurchaseReturn[];
+  supplierAccountBalances?: PortableSupplierAccountBalance[];
+  supplierAccountEntries?: PortableSupplierAccountEntry[];
+  supplierPayments?: PortableSupplierPayment[];
 }
 
 export interface ImportOptions {
