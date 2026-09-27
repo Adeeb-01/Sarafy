@@ -948,12 +948,25 @@ export async function createSupplierPayment(input: SupplierPaymentInput): Promis
   await db.withExclusiveTransactionAsync(async transaction => {
     const supplier = await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=? AND accounting_enabled=1', input.supplierId);
     if (!supplier) throw new Error('SUPPLIER_ACCOUNT_INACTIVE');
-    const session = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
+    const session = await transaction.getFirstAsync<{ id: number; available_syp: number; available_usd_cents: number }>(`SELECT cs.id,
+      cs.opening_cash_syp
+        +COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='SYP'),0)
+        -COALESCE((SELECT SUM(s.change_syp) FROM sales s WHERE s.cash_session_id=cs.id),0)
+        -COALESCE((SELECT SUM(sr.refund_total_syp) FROM sale_returns sr WHERE sr.cash_session_id=cs.id),0)
+        -COALESCE((SELECT SUM(e.amount_syp) FROM expenses e WHERE e.cash_session_id=cs.id),0)
+        -COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments p JOIN supplier_payment_tenders t ON t.supplier_payment_id=p.id WHERE p.cash_session_id=cs.id AND t.currency='SYP'),0) AS available_syp,
+      cs.opening_cash_usd_cents
+        +COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='USD'),0)
+        -COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments p JOIN supplier_payment_tenders t ON t.supplier_payment_id=p.id WHERE p.cash_session_id=cs.id AND t.currency='USD'),0) AS available_usd_cents
+      FROM cash_sessions cs WHERE cs.closed_at IS NULL LIMIT 1`);
     if (!session) throw new Error('CASH_SESSION_REQUIRED');
     const setting = await transaction.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='exchangeRate'");
     const parsedRate: unknown = setting ? JSON.parse(setting.value) : null;
     if (!Number.isSafeInteger(parsedRate) || (parsedRate as number) <= 0) throw new Error('INVALID_EXCHANGE_RATE');
     const calculated = calculateSupplierPaymentEquivalent(input, parsedRate as number);
+    if (![session.available_syp, session.available_usd_cents].every(Number.isSafeInteger)
+      || calculated.input.sypAmount > session.available_syp
+      || calculated.input.usdCents > session.available_usd_cents) throw new Error('INSUFFICIENT_CASH_SESSION_FUNDS');
     const rate = calculated.input.mode === 'USD' ? null : parsedRate as number;
     const current = await transaction.getFirstAsync<{ balance_usd_cents: number }>('SELECT balance_usd_cents FROM supplier_account_balances WHERE supplier_id=?', supplier.id);
     if (!current) throw new Error('SUPPLIER_ACCOUNT_BALANCE_MISSING');
