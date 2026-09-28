@@ -4,7 +4,7 @@
 
 DESIGN APPROVED — READY FOR SCHEMA v19
 
-All original and follow-up accounting policy gaps are resolved below. No schema v19 migration or posting engine has been created yet; the current source remains at schema v18 until this design is committed independently.
+All valuation, allocation, and zero-cutover policies are now explicit. No schema v19 migration or posting engine exists yet; the current source remains at schema v18 until this design approval is committed independently.
 
 ## Scope and Evidence
 
@@ -308,6 +308,25 @@ Cash-session closing differences are documentary only. Closing updates the `cash
 
 Pure centralized helpers must implement half-up ratios, cumulative proportional allocation, largest-remainder allocation, and full-depletion residual handling. Transaction functions cannot define independent rounding variants. Tests must cover equal remainders, safe-integer boundaries, multi-line purchases, staged supplier returns, staged restocks, and final exact depletion.
 
+## Zero Cutover Policy
+
+Accounting activation is valid when every explicitly confirmed opening accounting position is zero. In that case:
+
+- `accounting_settings.enabled = 1`;
+- `accounting_settings.started_at` and functional currency `SYP` are persisted normally;
+- the confirmed cutover snapshot/state is persisted;
+- `opening_journal_entry_id = NULL`;
+- no opening journal and no journal lines are created;
+- no nominal debit or credit is fabricated.
+
+When any confirmed opening position is nonzero, exactly one nonempty `CUTOVER` journal is mandatory. `opening_journal_entry_id` references it, every line has exactly one positive side, total debits equal total credits, and Opening Equity is used only for the final net balancing amount.
+
+The Accounting Health Audit classifies cutover as follows:
+
+- Valid zero cutover: every confirmed opening position is zero, opening reference is null, and no cutover journal exists.
+- Valid nonzero cutover: at least one confirmed opening position is nonzero, the opening reference is non-null, and exactly one matching valid balanced journal exists.
+- Invalid: a fabricated journal for zero cutover, any zero-line or zero-value-line journal, missing journal for a nonzero cutover, multiple cutover journals, bad opening reference, or journal values inconsistent with the confirmed snapshot.
+
 ## Safe Facts Available to the Later Implementation
 
 The approved allocation policies allow these existing snapshots to serve as posting sources without modifying historical documents:
@@ -320,7 +339,7 @@ The approved allocation policies allow these existing snapshots to serve as post
 
 ## Gate Result
 
-The design is internally complete for opening inventory, purchase measurement and rounding, Supplier Advances and AP settlement, Realized FX, USD Cash, supplier returns, sale COGS, customer-return restocking, manual adjustments, Cash Control/sessions, cross-cutover returns, post-cutover account activation, Current Earnings, and conditional Balance Sheet presentation.
+The design is internally complete for opening inventory, zero/nonzero cutover, purchase measurement and rounding, Supplier Advances and AP settlement, Realized FX, USD Cash, supplier returns, sale COGS, customer-return restocking, manual adjustments, Cash Control/sessions, cross-cutover returns, post-cutover account activation, Current Earnings, and conditional Balance Sheet presentation.
 
 Schema remains v18 until the independent design approval commit is created. No migration or implementation code is part of this design gate.
 
