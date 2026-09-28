@@ -67,6 +67,7 @@ export async function insertFullRestorePayload(
       'closing_difference_syp', 'closing_expected_cash_usd_cents', 'closing_difference_usd_cents',
       'closing_cash_received_syp', 'closing_cash_received_usd_cents', 'closing_change_given_syp',
       'closing_supplier_payments_syp', 'closing_supplier_payments_usd_cents',
+      'closing_customer_payments_syp', 'closing_customer_payments_usd_cents',
       'opening_note', 'closing_note', 'created_at', 'updated_at',
     ], sessions.map(session => [
       session.uuid, session.opened_at, session.closed_at, session.opening_cash_syp,
@@ -76,7 +77,8 @@ export async function insertFullRestorePayload(
       session.closing_expected_cash_syp, session.closing_difference_syp,
       session.closing_expected_cash_usd_cents ?? null, session.closing_difference_usd_cents ?? null,
       session.closing_cash_received_syp ?? null, session.closing_cash_received_usd_cents ?? null,
-      session.closing_change_given_syp ?? null, session.closing_supplier_payments_syp ?? 0, session.closing_supplier_payments_usd_cents ?? 0, session.opening_note, session.closing_note,
+      session.closing_change_given_syp ?? null, session.closing_supplier_payments_syp ?? 0, session.closing_supplier_payments_usd_cents ?? 0,
+      session.closing_customer_payments_syp ?? 0, session.closing_customer_payments_usd_cents ?? 0, session.opening_note, session.closing_note,
       session.created_at, session.updated_at,
     ]));
   }
@@ -127,15 +129,24 @@ export async function insertFullRestorePayload(
   }
   const supplierIdByUuid = await loadIdByUuid(transaction, 'suppliers');
 
+  if (entities.has('customers')) {
+    inserted += await insertRows(transaction, 'customers', ['uuid','name','phone','note','is_active','accounting_enabled','accounting_started_at','created_at','updated_at'],
+      (payload.customers ?? []).map(item => [item.uuid,item.name,item.phone,item.note,item.is_active ? 1 : 0,item.accounting_enabled ? 1 : 0,item.accounting_started_at ?? null,item.created_at,item.updated_at]));
+  }
+  const customerIdByUuid = await loadIdByUuid(transaction, 'customers');
+
   if (entities.has('sales')) {
     inserted += await insertRows(transaction, 'sales', [
       'uuid', 'invoice_number', 'exchange_rate', 'subtotal_syp', 'discount_syp',
       'net_total_syp', 'cost_syp', 'profit_syp', 'amount_paid_syp', 'change_syp',
       'created_at', 'updated_at', 'cash_session_id',
+      'customer_id','customer_uuid_snapshot','customer_name_snapshot','on_account_syp',
     ], payload.sales.map(sale => [
       sale.uuid, sale.invoice_number, sale.exchange_rate, sale.subtotal_syp, sale.discount_syp,
       sale.net_total_syp, sale.cost_syp, sale.profit_syp, sale.amount_paid_syp ?? null,
       sale.change_syp ?? null, sale.created_at, sale.updated_at, optionalSessionId(sale.cash_session_uuid),
+      sale.customer_uuid_snapshot ? requireId(customerIdByUuid, sale.customer_uuid_snapshot, 'CUSTOMER_PARENT_MISSING') : null,
+      sale.customer_uuid_snapshot ?? null, sale.customer_name_snapshot ?? null, sale.on_account_syp ?? 0,
     ]));
   }
   const saleIdByUuid = await loadIdByUuid(transaction, 'sales');
@@ -180,8 +191,9 @@ export async function insertFullRestorePayload(
       payment.exchange_rate_syp_per_usd, payment.created_at,
     ]));
     const invalidPayments = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM sales s
-      WHERE EXISTS(SELECT 1 FROM sale_payments p WHERE p.sale_id=s.id)
-      AND (SELECT COALESCE(SUM(p.syp_equivalent),0) FROM sale_payments p WHERE p.sale_id=s.id)-COALESCE(s.change_syp,0)<>s.net_total_syp`);
+      WHERE (SELECT COALESCE(SUM(p.syp_equivalent),0) FROM sale_payments p WHERE p.sale_id=s.id)-COALESCE(s.change_syp,0)+COALESCE(s.on_account_syp,0)<>s.net_total_syp
+         OR s.on_account_syp<0 OR s.on_account_syp>s.net_total_syp
+         OR (s.on_account_syp>0 AND (s.customer_id IS NULL OR s.customer_uuid_snapshot IS NULL OR s.customer_name_snapshot IS NULL))`);
     if ((invalidPayments?.count ?? 0) > 0) throw new Error('PAYMENT_SETTLEMENT_CONFLICT');
   }
 
@@ -198,12 +210,17 @@ export async function insertFullRestorePayload(
       }
     }
     inserted += await insertRows(transaction, 'sale_returns', [
-      'uuid', 'sale_id', 'refund_total_syp', 'returned_cost_syp', 'created_at', 'updated_at', 'cash_session_id',
+      'uuid', 'sale_id', 'refund_total_syp', 'returned_cost_syp', 'created_at', 'updated_at', 'cash_session_id','customer_account_credit_syp',
     ], (payload.returns ?? []).map(record => [
       record.uuid, requireId(saleIdByUuid, record.sale_uuid, 'RETURN_PARENT_MISSING'),
       record.refund_total_syp, record.returned_cost_syp, record.created_at, record.updated_at,
-      optionalSessionId(record.cash_session_uuid),
+      optionalSessionId(record.cash_session_uuid), record.customer_account_credit_syp ?? 0,
     ]));
+    const invalidReturnSplits = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) count FROM sale_returns r
+      LEFT JOIN sales s ON s.id=r.sale_id
+      WHERE r.customer_account_credit_syp<0 OR r.customer_account_credit_syp>r.refund_total_syp
+         OR (r.customer_account_credit_syp>0 AND s.customer_id IS NULL)`);
+    if ((invalidReturnSplits?.count ?? 0) > 0) throw new Error('CUSTOMER_RETURN_SPLIT_MISMATCH');
   }
   const saleReturnIdByUuid = await loadIdByUuid(transaction, 'sale_returns');
 
@@ -377,6 +394,45 @@ export async function insertFullRestorePayload(
       (NOT EXISTS(SELECT 1 FROM supplier_account_balances b WHERE b.supplier_id=s.id) OR
        1<>(SELECT COUNT(*) FROM supplier_account_entries e WHERE e.supplier_id=s.id AND e.type='opening'))`);
     if ((mismatch?.count ?? 0) > 0 || (incomplete?.count ?? 0) > 0) throw new Error('SUPPLIER_ACCOUNT_BALANCE_MISMATCH');
+  }
+
+  if (entities.has('customer_payments')) {
+    inserted += await insertRows(transaction, 'customer_payments', ['uuid','customer_id','cash_session_id','payment_mode','total_syp_equivalent','exchange_rate_syp_per_usd','customer_name_snapshot','note','occurred_at','created_at','balance_after_syp'],
+      (payload.customerPayments ?? []).map(payment => [payment.uuid,requireId(customerIdByUuid,payment.customer_uuid,'CUSTOMER_PAYMENT_CUSTOMER_MISSING'),requireId(sessionIdByUuid,payment.cash_session_uuid,'CUSTOMER_PAYMENT_SESSION_MISSING'),payment.payment_mode,payment.total_syp_equivalent,payment.exchange_rate_syp_per_usd,payment.customer_name_snapshot,payment.note,payment.occurred_at,payment.created_at,payment.balance_after_syp]));
+  }
+  const customerPaymentIdByUuid = await loadIdByUuid(transaction, 'customer_payments');
+  if (entities.has('customer_payment_tenders')) {
+    const rows: SQLiteBindValue[][] = [];
+    for (const payment of payload.customerPayments ?? []) for (const tender of payment.tenders) rows.push([tender.uuid,requireId(customerPaymentIdByUuid,payment.uuid,'CUSTOMER_PAYMENT_PARENT_MISSING'),tender.currency,tender.amount_minor,tender.syp_equivalent,tender.exchange_rate_syp_per_usd,tender.created_at]);
+    inserted += await insertRows(transaction, 'customer_payment_tenders',['uuid','customer_payment_id','currency','amount_minor','syp_equivalent','exchange_rate_syp_per_usd','created_at'],rows);
+    const invalidPayments = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) count FROM customer_payments p
+      WHERE p.total_syp_equivalent<>COALESCE((SELECT SUM(t.syp_equivalent) FROM customer_payment_tenders t WHERE t.customer_payment_id=p.id),0)
+         OR NOT EXISTS(SELECT 1 FROM customer_payment_tenders t WHERE t.customer_payment_id=p.id)`);
+    const invalidTenders = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) count FROM customer_payment_tenders t
+      WHERE t.amount_minor<=0 OR t.syp_equivalent<=0
+         OR (t.currency='SYP' AND (t.amount_minor<>t.syp_equivalent OR t.exchange_rate_syp_per_usd IS NOT NULL))
+         OR (t.currency='USD' AND (t.exchange_rate_syp_per_usd IS NULL OR t.exchange_rate_syp_per_usd<=0))`);
+    if ((invalidPayments?.count ?? 0) > 0 || (invalidTenders?.count ?? 0) > 0) throw new Error('CUSTOMER_PAYMENT_TENDER_MISMATCH');
+  }
+  if (entities.has('customer_account_entries')) {
+    inserted += await insertRows(transaction, 'customer_account_entries',['uuid','customer_id','type','delta_syp','occurred_at','created_at','customer_name_snapshot','sale_id','sale_return_id','customer_payment_id','note_snapshot'],
+      (payload.customerAccountEntries ?? []).map(entry => [entry.uuid,requireId(customerIdByUuid,entry.customer_uuid,'CUSTOMER_ACCOUNT_CUSTOMER_MISSING'),entry.type,entry.delta_syp,entry.occurred_at,entry.created_at,entry.customer_name_snapshot,entry.sale_uuid ? requireId(saleIdByUuid,entry.sale_uuid,'CUSTOMER_ACCOUNT_SOURCE_MISSING') : null,entry.sale_return_uuid ? requireId(saleReturnIdByUuid,entry.sale_return_uuid,'CUSTOMER_ACCOUNT_SOURCE_MISSING') : null,entry.customer_payment_uuid ? requireId(customerPaymentIdByUuid,entry.customer_payment_uuid,'CUSTOMER_ACCOUNT_SOURCE_MISSING') : null,entry.note_snapshot]));
+    const invalidEntries = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) count FROM customer_account_entries e
+      LEFT JOIN sales s ON s.id=e.sale_id LEFT JOIN sale_returns r ON r.id=e.sale_return_id LEFT JOIN customer_payments p ON p.id=e.customer_payment_id
+      WHERE (e.type='sale' AND (s.id IS NULL OR e.delta_syp<>s.on_account_syp))
+         OR (e.type='sale_return' AND (r.id IS NULL OR e.delta_syp<>-r.customer_account_credit_syp))
+         OR (e.type='payment' AND (p.id IS NULL OR e.delta_syp<>-p.total_syp_equivalent))`);
+    const missingEntries = await transaction.getFirstAsync<{ count: number }>(`SELECT
+      (SELECT COUNT(*) FROM sales s WHERE s.on_account_syp>0 AND NOT EXISTS(SELECT 1 FROM customer_account_entries e WHERE e.sale_id=s.id))
+      +(SELECT COUNT(*) FROM sale_returns r WHERE r.customer_account_credit_syp>0 AND NOT EXISTS(SELECT 1 FROM customer_account_entries e WHERE e.sale_return_id=r.id))
+      +(SELECT COUNT(*) FROM customer_payments p WHERE NOT EXISTS(SELECT 1 FROM customer_account_entries e WHERE e.customer_payment_id=p.id)) count`);
+    if ((invalidEntries?.count ?? 0) > 0 || (missingEntries?.count ?? 0) > 0) throw new Error('CUSTOMER_ACCOUNT_SOURCE_MISMATCH');
+  }
+  if (entities.has('customer_account_balances')) {
+    inserted += await insertRows(transaction, 'customer_account_balances',['customer_id','balance_syp','updated_at'],(payload.customerAccountBalances ?? []).map(balance => [requireId(customerIdByUuid,balance.customer_uuid,'CUSTOMER_ACCOUNT_CUSTOMER_MISSING'),balance.balance_syp,balance.updated_at]));
+    const mismatch = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) count FROM customer_account_balances b WHERE b.balance_syp<>COALESCE((SELECT SUM(delta_syp) FROM customer_account_entries e WHERE e.customer_id=b.customer_id),0)`);
+    const incomplete = await transaction.getFirstAsync<{ count: number }>(`SELECT COUNT(*) count FROM customers c WHERE c.accounting_enabled=1 AND (NOT EXISTS(SELECT 1 FROM customer_account_balances b WHERE b.customer_id=c.id) OR 1<>(SELECT COUNT(*) FROM customer_account_entries e WHERE e.customer_id=c.id AND e.type='opening'))`);
+    if ((mismatch?.count ?? 0) > 0 || (incomplete?.count ?? 0) > 0) throw new Error('CUSTOMER_ACCOUNT_BALANCE_MISMATCH');
   }
 
   if (entities.has('inventory_balances')) {

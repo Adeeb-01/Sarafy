@@ -88,5 +88,6 @@ test('numeric inventory flags cannot render as raw return-flow text', async () =
   assert.match(flow, /item\.inventory_sale_movement === 1 && value > 0/);
   assert.doesNotMatch(flow, /\{item\.inventory_sale_movement &&/);
   assert.match(flow, /footer:\s*\{[^}]*minHeight:\s*112/, '320dp return footer must preserve its summary and 44dp confirmation target');
-  assert.match(flow, /footer:\s*\{[^}]*bottom:\s*spacing\.md/, 'return confirmation must stay above compact-screen navigation insets');
+  assert.doesNotMatch(flow, /footer:\s*\{[^}]*position:\s*'absolute'/, 'return confirmation must remain in normal scroll layout');
+  assert.match(flow, /footer:\s*\{[^}]*paddingVertical:\s*spacing\.md/, 'return confirmation must preserve compact-screen vertical padding');
 });

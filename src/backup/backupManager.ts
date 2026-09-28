@@ -3,7 +3,7 @@ import { File, Paths } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { getDatabase } from '@/database/database';
-import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryBalance, InventoryMovement, Product, PurchaseReceipt, PurchaseReceiptItem, PurchaseReturn, PurchaseReturnItem, Sale, SaleItem, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierAccountBalance, SupplierAccountEntry, SupplierPayment, SupplierPaymentTender, SuspendedSale, SuspendedSaleItem } from '@/types';
+import { CashSession, Customer, CustomerAccountEntry, CustomerPayment, CustomerPaymentTender, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryBalance, InventoryMovement, Product, PurchaseReceipt, PurchaseReceiptItem, PurchaseReturn, PurchaseReturnItem, Sale, SaleItem, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierAccountBalance, SupplierAccountEntry, SupplierPayment, SupplierPaymentTender, SuspendedSale, SuspendedSaleItem } from '@/types';
 import { ImportPayload, PortableCategory } from '@/import/importTypes';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { readSarafyArchive, writeSarafyArchive } from './backupArchive';
@@ -11,7 +11,7 @@ import { assertReadableNonEmptyFile, ensureBackupDirectory, getBackupDirectory }
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 
 const BACKUP_VERSION = 8;
-const SCHEMA_VERSION = 17;
+const SCHEMA_VERSION = 18;
 const APPLICATION_ID = 'com.sarafy.catalog';
 const ROOT = getBackupDirectory().uri;
 const PRE_IMPORT_LIMIT = 5;
@@ -26,7 +26,7 @@ export interface BackupManifest {
   backupType: 'manual' | 'pre-import';
   reason: string;
   includes: { dataJson: true; productImages: boolean; drafts?: boolean };
-  counts: { products: number; categories: number; sales: number; saleItems: number; salePayments?: number; expenses: number; images: number; drafts?: number; draftItems?: number; returns?: number; returnItems?: number; expenseCategories?: number; exchangeRateHistory?: number; cashSessions?: number; inventoryBalances?: number; inventoryMovements?: number; suppliers?: number; purchaseReceipts?: number; purchaseReceiptItems?: number; purchaseReturns?: number; purchaseReturnItems?: number; supplierAccountBalances?: number; supplierAccountEntries?: number; supplierPayments?: number; supplierPaymentTenders?: number };
+  counts: { products: number; categories: number; sales: number; saleItems: number; salePayments?: number; expenses: number; images: number; drafts?: number; draftItems?: number; returns?: number; returnItems?: number; expenseCategories?: number; exchangeRateHistory?: number; cashSessions?: number; inventoryBalances?: number; inventoryMovements?: number; suppliers?: number; purchaseReceipts?: number; purchaseReceiptItems?: number; purchaseReturns?: number; purchaseReturnItems?: number; supplierAccountBalances?: number; supplierAccountEntries?: number; supplierPayments?: number; supplierPaymentTenders?: number; customers?: number; customerAccountBalances?: number; customerAccountEntries?: number; customerPayments?: number; customerPaymentTenders?: number };
 }
 
 export interface SarafyBackup {
@@ -37,7 +37,7 @@ export interface SarafyBackup {
 
 export async function collectPortableData(): Promise<ImportPayload> {
   const db = await getDatabase();
-  const [products, categories, settingsRows, salesRows, saleItems, salePayments, expenses, draftRows, draftItems, returnRows, returnItems, expenseCategories, exchangeRateHistory, cashSessions, inventoryBalances, inventoryMovements, suppliers, purchaseReceipts, purchaseReceiptItems, purchaseReturns, purchaseReturnItems, supplierAccountBalances, supplierAccountEntries, supplierPayments, supplierPaymentTenders] = await Promise.all([
+  const [products, categories, settingsRows, salesRows, saleItems, salePayments, expenses, draftRows, draftItems, returnRows, returnItems, expenseCategories, exchangeRateHistory, cashSessions, inventoryBalances, inventoryMovements, suppliers, purchaseReceipts, purchaseReceiptItems, purchaseReturns, purchaseReturnItems, supplierAccountBalances, supplierAccountEntries, supplierPayments, supplierPaymentTenders, customers, customerAccountBalances, customerAccountEntries, customerPayments, customerPaymentTenders] = await Promise.all([
     db.getAllAsync<Product>('SELECT * FROM products ORDER BY id'),
     db.getAllAsync<PortableCategory>('SELECT id,uuid,name,created_at,updated_at FROM categories ORDER BY id'),
     db.getAllAsync<{ key: string; value: string }>('SELECT key,value FROM settings'),
@@ -63,6 +63,11 @@ export async function collectPortableData(): Promise<ImportPayload> {
     db.getAllAsync<SupplierAccountEntry>('SELECT * FROM supplier_account_entries ORDER BY id'),
     db.getAllAsync<SupplierPayment>('SELECT * FROM supplier_payments ORDER BY id'),
     db.getAllAsync<SupplierPaymentTender>('SELECT * FROM supplier_payment_tenders ORDER BY id'),
+    db.getAllAsync<Customer>('SELECT * FROM customers ORDER BY id'),
+    db.getAllAsync<{ customer_id: number; balance_syp: number; updated_at: string }>('SELECT * FROM customer_account_balances ORDER BY customer_id'),
+    db.getAllAsync<CustomerAccountEntry>('SELECT * FROM customer_account_entries ORDER BY id'),
+    db.getAllAsync<CustomerPayment>('SELECT * FROM customer_payments ORDER BY id'),
+    db.getAllAsync<CustomerPaymentTender>('SELECT * FROM customer_payment_tenders ORDER BY id'),
   ]);
   const stored = Object.fromEntries(settingsRows.map(row => [row.key, JSON.parse(row.value)])) as Partial<Settings>;
   const settings: Settings = {
@@ -95,6 +100,11 @@ export async function collectPortableData(): Promise<ImportPayload> {
   const supplierPaymentUuidById = new Map(supplierPayments.map(item => [item.id, item.uuid]));
   const paymentTendersByPayment = new Map<number, SupplierPaymentTender[]>();
   for (const tender of supplierPaymentTenders) paymentTendersByPayment.set(tender.supplier_payment_id, [...(paymentTendersByPayment.get(tender.supplier_payment_id) ?? []), tender]);
+  const customerUuidById = new Map(customers.map(customer => [customer.id, customer.uuid]));
+  const customerPaymentUuidById = new Map(customerPayments.map(payment => [payment.id, payment.uuid]));
+  const customerTendersByPayment = new Map<number, CustomerPaymentTender[]>();
+  for (const tender of customerPaymentTenders) customerTendersByPayment.set(tender.customer_payment_id, [...(customerTendersByPayment.get(tender.customer_payment_id) ?? []), tender]);
+  const saleReturnUuidById = new Map(returnRows.map(record => [record.id, record.uuid]));
   const purchaseItemsByReceipt = new Map<number, PurchaseReceiptItem[]>();
   for (const item of purchaseReceiptItems) purchaseItemsByReceipt.set(item.purchase_receipt_id, [...(purchaseItemsByReceipt.get(item.purchase_receipt_id) ?? []), item]);
   const purchaseReturnItemsByReturn = new Map<number, PurchaseReturnItem[]>();
@@ -105,6 +115,10 @@ export async function collectPortableData(): Promise<ImportPayload> {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
     products, categories, settings, expenseCategories, exchangeRateHistory,
+    customers: customers.map(({ id: _id, balance_syp: _balance, sale_count: _count, latest_sale_at: _latest, ...customer }) => customer),
+    customerAccountBalances: customerAccountBalances.map(balance => ({ customer_uuid: customerUuidById.get(balance.customer_id) ?? '', balance_syp: balance.balance_syp, updated_at: balance.updated_at })),
+    customerPayments: customerPayments.map(({ id, customer_id, cash_session_id, tenders: _tenders, ...payment }) => ({ ...payment, customer_uuid: customerUuidById.get(customer_id) ?? '', cash_session_uuid: sessionUuidById.get(cash_session_id) ?? '', tenders: (customerTendersByPayment.get(id) ?? []).map(({ id: _id, customer_payment_id: _paymentId, ...tender }) => tender) })),
+    customerAccountEntries: customerAccountEntries.map(({ id: _id, customer_id, sale_id, sale_return_id, customer_payment_id, reference: _reference, running_balance_syp: _running, ...entry }) => ({ ...entry, customer_uuid: customerUuidById.get(customer_id) ?? '', sale_uuid: sale_id ? saleUuidById.get(sale_id) ?? null : null, sale_return_uuid: sale_return_id ? saleReturnUuidById.get(sale_return_id) ?? null : null, customer_payment_uuid: customer_payment_id ? customerPaymentUuidById.get(customer_payment_id) ?? null : null })),
 suppliers: suppliers.map(({ id: _id, receipt_count: _count, latest_receipt_at: _latest, return_count: _returnCount, latest_return_at: _latestReturn, ...supplier }) => supplier),
     purchaseReceipts: purchaseReceipts.map(({ id, supplier_id, item_count: _count, total_quantity: _quantity, total_cost_usd_cents: _total, items: _items, ...receipt }) => ({
       ...receipt, supplier_uuid: supplier_id ? supplierUuidById.get(supplier_id) ?? null : null,
@@ -128,12 +142,13 @@ suppliers: suppliers.map(({ id: _id, receipt_count: _count, latest_receipt_at: _
     inventoryMovements: inventoryMovements.map(({ id: _id, product_id, sale_item_id, return_item_id, purchase_receipt_item_id, purchase_return_item_id, ...movement }) => ({ ...movement, product_uuid: product_id ? productUuidById.get(product_id) ?? movement.product_uuid_snapshot : movement.product_uuid_snapshot, sale_item_uuid: sale_item_id ? saleItemUuidById.get(sale_item_id) ?? null : null, return_item_uuid: return_item_id ? returnItemUuidById.get(return_item_id) ?? null : null, purchase_receipt_item_uuid: purchase_receipt_item_id ? purchaseItemUuidById.get(purchase_receipt_item_id) ?? null : null, purchase_return_item_uuid: purchase_return_item_id ? purchaseReturnItemUuidById.get(purchase_return_item_id) ?? null : null })),
     salePayments: salePayments.map(({ id: _id, sale_id, ...payment }) => ({ ...payment, sale_uuid: saleUuidById.get(sale_id) ?? '' })),
     cashSessions: cashSessions.map(({ id: _id, ...session }) => session),
-    sales: salesRows.map(sale => { const { cash_session_id: sessionId, ...portable } = sale; return { ...portable, cash_session_uuid: sessionId ? sessionUuidById.get(sessionId) ?? null : null, items: saleItemsBySale.get(sale.id) ?? [] }; }),
+    sales: salesRows.map(sale => { const { cash_session_id: sessionId, customer_id: _customerId, ...portable } = sale; return { ...portable, cash_session_uuid: sessionId ? sessionUuidById.get(sessionId) ?? null : null, items: saleItemsBySale.get(sale.id) ?? [] }; }),
     expenses: expenses.map(expense => { const { cash_session_id: sessionId, ...portable } = expense; return { ...portable, cash_session_uuid: sessionId ? sessionUuidById.get(sessionId) ?? null : null }; }),
     drafts: draftRows.map(draft => ({ ...draft, items: itemsByDraft.get(draft.id) ?? [] })),
     returns: returnRows.map(record => ({
       uuid: record.uuid, sale_uuid: saleUuidById.get(record.sale_id) ?? '', cash_session_uuid: record.cash_session_id ? sessionUuidById.get(record.cash_session_id) ?? null : null, refund_total_syp: record.refund_total_syp,
       returned_cost_syp: record.returned_cost_syp, created_at: record.created_at, updated_at: record.updated_at,
+      customer_account_credit_syp: record.customer_account_credit_syp ?? 0,
       items: (returnItemsByReturn.get(record.id) ?? []).map(item => ({ uuid: item.uuid, sale_item_uuid: saleItemUuidById.get(item.sale_item_id) ?? '', quantity: item.quantity, refund_amount_syp: item.refund_amount_syp, cost_reversal_syp: item.cost_reversal_syp, created_at: item.created_at, updated_at: item.updated_at })),
     })),
   };
@@ -177,6 +192,11 @@ async function buildBackup(type: BackupManifest['backupType'], reason: string): 
         supplierAccountEntries: data.supplierAccountEntries?.length ?? 0,
         supplierPayments: data.supplierPayments?.length ?? 0,
         supplierPaymentTenders: data.supplierPayments?.reduce((sum, payment) => sum + payment.tenders.length, 0) ?? 0,
+        customers: data.customers?.length ?? 0,
+        customerAccountBalances: data.customerAccountBalances?.length ?? 0,
+        customerAccountEntries: data.customerAccountEntries?.length ?? 0,
+        customerPayments: data.customerPayments?.length ?? 0,
+        customerPaymentTenders: data.customerPayments?.reduce((sum, payment) => sum + payment.tenders.length, 0) ?? 0,
       },
     },
     data,
@@ -330,7 +350,12 @@ export async function pickSarafyBackup(): Promise<SarafyBackup | null> {
       (candidate.manifest.counts.supplierAccountBalances != null && candidate.manifest.counts.supplierAccountBalances !== (candidate.data.supplierAccountBalances?.length ?? 0)) ||
       (candidate.manifest.counts.supplierAccountEntries != null && candidate.manifest.counts.supplierAccountEntries !== (candidate.data.supplierAccountEntries?.length ?? 0)) ||
       (candidate.manifest.counts.supplierPayments != null && candidate.manifest.counts.supplierPayments !== (candidate.data.supplierPayments?.length ?? 0)) ||
-      (candidate.manifest.counts.supplierPaymentTenders != null && candidate.manifest.counts.supplierPaymentTenders !== (candidate.data.supplierPayments?.reduce((sum, payment) => sum + payment.tenders.length, 0) ?? 0))) {
+      (candidate.manifest.counts.supplierPaymentTenders != null && candidate.manifest.counts.supplierPaymentTenders !== (candidate.data.supplierPayments?.reduce((sum, payment) => sum + payment.tenders.length, 0) ?? 0)) ||
+      (candidate.manifest.counts.customers != null && candidate.manifest.counts.customers !== (candidate.data.customers?.length ?? 0)) ||
+      (candidate.manifest.counts.customerAccountBalances != null && candidate.manifest.counts.customerAccountBalances !== (candidate.data.customerAccountBalances?.length ?? 0)) ||
+      (candidate.manifest.counts.customerAccountEntries != null && candidate.manifest.counts.customerAccountEntries !== (candidate.data.customerAccountEntries?.length ?? 0)) ||
+      (candidate.manifest.counts.customerPayments != null && candidate.manifest.counts.customerPayments !== (candidate.data.customerPayments?.length ?? 0)) ||
+      (candidate.manifest.counts.customerPaymentTenders != null && candidate.manifest.counts.customerPaymentTenders !== (candidate.data.customerPayments?.reduce((sum, payment) => sum + payment.tenders.length, 0) ?? 0))) {
     throw new Error('BACKUP_COUNT_MISMATCH');
   }
   return candidate as SarafyBackup;

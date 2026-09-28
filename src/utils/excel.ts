@@ -3,7 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as XLSX from 'xlsx';
 import { CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryListItem, Product, Sale, SalePayment, Settings } from '@/types';
-import { PortableInventoryMovement, PortablePurchaseReceipt, PortablePurchaseReturn, PortableSupplier, PortableSupplierAccountBalance, PortableSupplierAccountEntry, PortableSupplierPayment } from '@/import/importTypes';
+import { PortableCustomer, PortableCustomerAccountBalance, PortableCustomerAccountEntry, PortableCustomerPayment, PortableInventoryMovement, PortablePurchaseReceipt, PortablePurchaseReturn, PortableSupplier, PortableSupplierAccountBalance, PortableSupplierAccountEntry, PortableSupplierPayment } from '@/import/importTypes';
 import { exchangeRateChangePercent } from '@/utils/exchangeRate';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
@@ -51,6 +51,10 @@ export async function exportExcel(
   supplierAccountBalances: PortableSupplierAccountBalance[] = [],
   supplierAccountEntries: PortableSupplierAccountEntry[] = [],
   supplierPayments: PortableSupplierPayment[] = [],
+  customers: PortableCustomer[] = [],
+  customerAccountBalances: PortableCustomerAccountBalance[] = [],
+  customerAccountEntries: PortableCustomerAccountEntry[] = [],
+  customerPayments: PortableCustomerPayment[] = [],
 ) {
   const workbook = XLSX.utils.book_new();
   const sessionUuidById = new Map(cashSessions.map(session => [session.id, session.uuid]));
@@ -105,6 +109,9 @@ export async function exportExcel(
     change_syp: sale.change_syp,
     cost_syp: sale.cost_syp,
     gross_profit_syp: sale.profit_syp,
+    customer_uuid: sale.customer_uuid_snapshot ?? '',
+    customer_name: sale.customer_name_snapshot ?? '',
+    on_account_syp: sale.on_account_syp ?? 0,
     cash_session_uuid: sale.cash_session_uuid ?? (sale.cash_session_id ? sessionUuidById.get(sale.cash_session_id) : '') ?? '',
   })));
   salesSheet['!cols'] = [{ wch: 24 }, { wch: 24 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 18 }, { wch: 16 }, { wch: 16 }, { wch: 18 }];
@@ -127,7 +134,7 @@ export async function exportExcel(
   const returns = sales.flatMap(sale => (sale.returns ?? []).map(record => ({ sale, record })));
   const returnsSheet = XLSX.utils.json_to_sheet(returns.map(({ sale, record }) => ({
     return_uuid: record.uuid, original_invoice_number: sale.invoice_number, return_date: record.created_at,
-    refund_total_syp: record.refund_total_syp, returned_cost_syp: record.returned_cost_syp,
+    refund_total_syp: record.refund_total_syp, cash_refund_syp: record.refund_total_syp - (record.customer_account_credit_syp ?? 0), customer_account_credit_syp: record.customer_account_credit_syp ?? 0, returned_cost_syp: record.returned_cost_syp,
     cash_session_uuid: record.cash_session_uuid ?? (record.cash_session_id ? sessionUuidById.get(record.cash_session_id) : null) ?? '',
   })));
   returnsSheet['!cols'] = [{ wch: 38 }, { wch: 25 }, { wch: 24 }, { wch: 20 }, { wch: 20 }];
@@ -169,6 +176,8 @@ export async function exportExcel(
     actual_cash_usd_cents: session.closing_actual_cash_usd_cents ?? '', difference_usd_cents: session.closing_difference_usd_cents ?? '',
     supplier_payments_syp: session.closed_at ? session.closing_supplier_payments_syp : session.supplier_payments_syp,
     supplier_payments_usd_cents: session.closed_at ? session.closing_supplier_payments_usd_cents : session.supplier_payments_usd_cents,
+    customer_payments_syp: session.closed_at ? session.closing_customer_payments_syp : session.customer_payments_syp,
+    customer_payments_usd_cents: session.closed_at ? session.closing_customer_payments_usd_cents : session.customer_payments_usd_cents,
     invoice_count: session.invoice_count, return_count: session.return_count, expense_count: session.expense_count,
     opening_note: session.opening_note ?? '', closing_note: session.closing_note ?? '',
   })));
@@ -207,6 +216,21 @@ export async function exportExcel(
   const supplierTenderSheet = XLSX.utils.json_to_sheet(supplierPayments.flatMap(payment => payment.tenders.map(tender => ({ tender_uuid: tender.uuid, payment_uuid: payment.uuid, currency: tender.currency, amount_minor: tender.amount_minor, usd_equivalent_cents: tender.usd_equivalent_cents, exchange_rate: tender.exchange_rate_syp_per_usd ?? '', created_at: tender.created_at }))));
   supplierTenderSheet['!cols'] = Array.from({ length: 7 }, () => ({ wch: 28 }));
   XLSX.utils.book_append_sheet(workbook, supplierTenderSheet, 'Supplier Payment Tenders');
+  const customerSheet = XLSX.utils.json_to_sheet(customers.map(item => ({ customer_uuid: item.uuid, name: item.name, phone: item.phone ?? '', note: item.note ?? '', active: item.is_active, accounting_enabled: item.accounting_enabled, accounting_started_at: item.accounting_started_at ?? '', created_at: item.created_at, updated_at: item.updated_at })));
+  customerSheet['!cols'] = Array.from({ length: 9 }, () => ({ wch: 28 }));
+  XLSX.utils.book_append_sheet(workbook, customerSheet, 'Customers');
+  const customerAccountsSheet = XLSX.utils.json_to_sheet(customerAccountBalances.map(balance => ({ customer_uuid: balance.customer_uuid, balance_syp: balance.balance_syp, updated_at: balance.updated_at })));
+  customerAccountsSheet['!cols'] = [{ wch: 38 }, { wch: 24 }, { wch: 24 }];
+  XLSX.utils.book_append_sheet(workbook, customerAccountsSheet, 'Customer Accounts');
+  const customerEntriesSheet = XLSX.utils.json_to_sheet(customerAccountEntries.map(entry => ({ entry_uuid: entry.uuid, customer_uuid: entry.customer_uuid, type: entry.type, delta_syp: entry.delta_syp, occurred_at: entry.occurred_at, customer_snapshot: entry.customer_name_snapshot, sale_uuid: entry.sale_uuid ?? '', sale_return_uuid: entry.sale_return_uuid ?? '', customer_payment_uuid: entry.customer_payment_uuid ?? '', note_snapshot: entry.note_snapshot ?? '' })));
+  customerEntriesSheet['!cols'] = Array.from({ length: 10 }, () => ({ wch: 30 }));
+  XLSX.utils.book_append_sheet(workbook, customerEntriesSheet, 'Customer Account Entries');
+  const customerPaymentsSheet = XLSX.utils.json_to_sheet(customerPayments.map(payment => ({ payment_uuid: payment.uuid, customer_uuid: payment.customer_uuid, cash_session_uuid: payment.cash_session_uuid, mode: payment.payment_mode, total_syp_equivalent: payment.total_syp_equivalent, exchange_rate: payment.exchange_rate_syp_per_usd ?? '', customer_snapshot: payment.customer_name_snapshot, note: payment.note ?? '', occurred_at: payment.occurred_at, balance_after_syp: payment.balance_after_syp })));
+  customerPaymentsSheet['!cols'] = Array.from({ length: 10 }, () => ({ wch: 28 }));
+  XLSX.utils.book_append_sheet(workbook, customerPaymentsSheet, 'Customer Payments');
+  const customerTenderSheet = XLSX.utils.json_to_sheet(customerPayments.flatMap(payment => payment.tenders.map(tender => ({ tender_uuid: tender.uuid, payment_uuid: payment.uuid, currency: tender.currency, amount_minor: tender.amount_minor, syp_equivalent: tender.syp_equivalent, exchange_rate: tender.exchange_rate_syp_per_usd ?? '', created_at: tender.created_at }))));
+  customerTenderSheet['!cols'] = Array.from({ length: 7 }, () => ({ wch: 28 }));
+  XLSX.utils.book_append_sheet(workbook, customerTenderSheet, 'Customer Payment Tenders');
 
   const filename = `sarafy-products-${new Date().toISOString().slice(0, 10)}.xlsx`;
   const uri = `${FileSystem.cacheDirectory}${filename}`;

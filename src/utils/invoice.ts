@@ -24,6 +24,8 @@ export async function shareInvoicePdf(sale: Sale, language: Language) {
   const syp = payments.find(payment => payment.currency === 'SYP');
   const usd = payments.find(payment => payment.currency === 'USD');
   const mode = derivePaymentMode(payments);
+  const onAccount = sale.on_account_syp ?? 0;
+  const customerRows = sale.customer_name_snapshot ? `<div class="payment"><div class="line"><span>${rtl ? 'العميل' : 'Customer'}</span><b>${escapeHtml(sale.customer_name_snapshot)}</b></div>${onAccount > 0 ? `<div class="line"><span>${rtl ? 'على الحساب' : 'On account'}</span><b>${money(onAccount)}</b></div><div class="line"><span>${rtl ? 'المدفوع الآن' : 'Paid now'}</span><b>${money(sale.net_total_syp - onAccount)}</b></div>` : ''}</div>` : '';
   const paymentRows = payments.length ? `<div class="payment">
     <div class="line"><span>${rtl ? 'طريقة الدفع' : 'Payment method'}</span><b>${mode === 'MIXED' ? (rtl ? 'مختلط' : 'Mixed') : mode}</b></div>
     ${syp ? `<div class="line"><span>${rtl ? 'المستلم بالليرة' : 'SYP received'}</span><b>${money(syp.amount_minor)}</b></div>` : ''}
@@ -47,7 +49,7 @@ export async function shareInvoicePdf(sale: Sale, language: Language) {
     <table><thead><tr><th>${rtl ? 'المنتج' : 'Product'}</th><th>${rtl ? 'الكمية' : 'Qty'}</th><th>${rtl ? 'السعر' : 'Price'}</th><th>${rtl ? 'الإجمالي' : 'Total'}</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="totals"><div class="line"><span>${rtl ? 'المجموع' : 'Subtotal'}</span><b>${money(sale.subtotal_syp)}</b></div>
     <div class="line"><span>${rtl ? 'الحسم' : 'Discount'}</span><b>${money(sale.discount_syp)}</b></div>
-    <div class="line net"><span>${rtl ? 'الإجمالي الصافي' : 'Net total'}</span><span>${money(sale.net_total_syp)}</span></div>${paymentRows}</div>
+    <div class="line net"><span>${rtl ? 'الإجمالي الصافي' : 'Net total'}</span><span>${money(sale.net_total_syp)}</span></div>${customerRows}${paymentRows}</div>
     </body></html>`;
   const result = await Print.printToFileAsync({ html });
   if (await Sharing.isAvailableAsync()) {

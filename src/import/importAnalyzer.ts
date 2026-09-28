@@ -31,15 +31,20 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
   if (options.mode !== 'full_restore' && ((payload.supplierAccountBalances?.length ?? 0) || (payload.supplierAccountEntries?.length ?? 0) || (payload.supplierPayments?.length ?? 0))) {
     issues.push({ entity: 'supplier_account_entries', row: 0, code: 'SUPPLIER_ACCOUNT_SKIPPED_OPERATIONAL_FINANCE', action: 'skipped' });
   }
+  if (options.mode !== 'full_restore' && ((payload.customerAccountBalances?.length ?? 0) || (payload.customerAccountEntries?.length ?? 0) || (payload.customerPayments?.length ?? 0) || payload.sales.some(sale => (sale.on_account_syp ?? 0) > 0 || !!sale.customer_uuid_snapshot) || (payload.returns ?? []).some(record => (record.customer_account_credit_syp ?? 0) > 0))) {
+    issues.push({ entity: 'customer_account_entries', row: 0, code: 'CUSTOMER_ACCOUNT_SKIPPED_OPERATIONAL_FINANCE', action: 'skipped' });
+  }
   const localCashSessions = await db.getAllAsync<Record<string, unknown> & { uuid: string }>('SELECT * FROM cash_sessions');
   const localSessionByUuid = new Map(localCashSessions.map(row => [row.uuid, row]));
   const localSessions = new Set(localSessionByUuid.keys());
   const importableSessions = new Set<string>();
   const supplierFinanceSessionUuids = new Set((payload.supplierPayments ?? []).map(payment => payment.cash_session_uuid));
+  const customerFinanceSessionUuids = new Set((payload.customerPayments ?? []).map(payment => payment.cash_session_uuid));
   const hasSupplierFinance = (session: NonNullable<ImportPayload['cashSessions']>[number]) =>
     supplierFinanceSessionUuids.has(session.uuid) ||
     (session.closing_supplier_payments_syp ?? 0) !== 0 ||
     (session.closing_supplier_payments_usd_cents ?? 0) !== 0;
+  const hasCustomerFinance = (session: NonNullable<ImportPayload['cashSessions']>[number]) => customerFinanceSessionUuids.has(session.uuid) || (session.closing_customer_payments_syp ?? 0) !== 0 || (session.closing_customer_payments_usd_cents ?? 0) !== 0;
   if (options.entities.includes('cash_sessions')) {
     const localSessionRows = new Set(localSessions);
     const seenSessions = new Set<string>();
@@ -48,8 +53,8 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
         summary.duplicates += 1; issues.push({ entity: 'cash_sessions', row: index + 1, field: 'uuid', value: session.uuid, code: 'DUPLICATE_UUID', action: 'rejected' });
       } else if (options.mode === 'full_restore') {
         summary.newRecords += 1; importableSessions.add(session.uuid);
-      } else if (hasSupplierFinance(session)) {
-        issues.push({ entity: 'cash_sessions', row: index + 1, field: 'uuid', value: session.uuid, code: 'SUPPLIER_ACCOUNT_SKIPPED_OPERATIONAL_FINANCE', action: 'skipped' });
+      } else if (hasSupplierFinance(session) || hasCustomerFinance(session)) {
+        issues.push({ entity: 'cash_sessions', row: index + 1, field: 'uuid', value: session.uuid, code: hasSupplierFinance(session) ? 'SUPPLIER_ACCOUNT_SKIPPED_OPERATIONAL_FINANCE' : 'CUSTOMER_ACCOUNT_SKIPPED_OPERATIONAL_FINANCE', action: 'skipped' });
       } else if (session.closed_at == null) {
         summary.conflicts += 1; issues.push({ entity: 'cash_sessions', row: index + 1, code: 'OPEN_CASH_SESSION_CONFLICT', action: 'review' });
       } else if (localSessionRows.has(session.uuid)) {
@@ -191,6 +196,16 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
       else if (comparable(existing) === comparable(supplier)) summary.unchangedRecords += 1;
       else if (options.conflictStrategy === 'manual') { summary.conflicts += 1; issues.push({ entity: 'suppliers', row: index + 1, code: 'SUPPLIER_CONFLICT', action: 'review' }); }
       else summary.updatedRecords += 1;
+    }
+  }
+  if (options.entities.includes('customers')) {
+    const local = new Map((await db.getAllAsync<Record<string, unknown> & { uuid: string; updated_at: string }>('SELECT uuid,name,phone,note,is_active,created_at,updated_at FROM customers')).map(row => [row.uuid, row]));
+    const seen = new Set<string>();
+    for (const [index, customer] of (payload.customers ?? []).entries()) {
+      if (!isUuid(customer.uuid)) { summary.invalidRecords += 1; issues.push({ entity: 'customers', row: index + 1, field: 'uuid', code: 'INVALID_UUID', action: 'rejected' }); continue; }
+      if (seen.has(customer.uuid)) { summary.duplicates += 1; issues.push({ entity: 'customers', row: index + 1, field: 'uuid', code: 'DUPLICATE_UUID', action: 'rejected' }); continue; }
+      seen.add(customer.uuid); const existing = local.get(customer.uuid); const profile = { uuid: customer.uuid, name: customer.name, phone: customer.phone, note: customer.note, is_active: customer.is_active, created_at: customer.created_at, updated_at: customer.updated_at };
+      if (!existing) summary.newRecords += 1; else if (comparable(existing) === comparable(profile)) summary.unchangedRecords += 1; else if (options.conflictStrategy === 'manual') { summary.conflicts += 1; issues.push({ entity: 'customers', row: index + 1, code: 'CUSTOMER_CONFLICT', action: 'review' }); } else summary.updatedRecords += 1;
     }
   }
   if (options.entities.includes('expenses')) {

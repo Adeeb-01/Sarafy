@@ -1,8 +1,8 @@
-import { CashSession, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryMovementType, Product, Sale, Settings, Supplier, SupplierAccountEntryType, SuspendedSale } from '@/types';
+import { CashSession, Customer, CustomerAccountEntryType, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryMovementType, Product, Sale, Settings, Supplier, SupplierAccountEntryType, SuspendedSale } from '@/types';
 
 export type ImportMode = 'safe_merge' | 'selective' | 'full_restore';
 export type ConflictStrategy = 'newest' | 'keep_local' | 'use_imported' | 'manual';
-export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_payments' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'inventory_balances' | 'inventory_movements' | 'suppliers' | 'purchase_receipts' | 'purchase_receipt_items' | 'purchase_returns' | 'purchase_return_items' | 'supplier_account_balances' | 'supplier_account_entries' | 'supplier_payments' | 'supplier_payment_tenders' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
+export type ImportEntity = 'products' | 'categories' | 'settings' | 'sales' | 'sale_items' | 'sale_payments' | 'sale_returns' | 'sale_return_items' | 'expenses' | 'expense_categories' | 'exchange_rate_history' | 'cash_sessions' | 'inventory_balances' | 'inventory_movements' | 'suppliers' | 'purchase_receipts' | 'purchase_receipt_items' | 'purchase_returns' | 'purchase_return_items' | 'supplier_account_balances' | 'supplier_account_entries' | 'supplier_payments' | 'supplier_payment_tenders' | 'customers' | 'customer_account_balances' | 'customer_account_entries' | 'customer_payments' | 'customer_payment_tenders' | 'product_images' | 'sale_drafts' | 'sale_draft_items';
 
 export interface PortableSalePayment {
   uuid: string; sale_uuid: string; currency: 'SYP' | 'USD'; amount_minor: number;
@@ -17,8 +17,15 @@ export interface PortableSaleReturnItem {
 export interface PortableSaleReturn {
   uuid: string; sale_uuid: string; refund_total_syp: number; returned_cost_syp: number;
   cash_session_uuid?: string | null;
+  customer_account_credit_syp?: number;
   created_at: string; updated_at: string; items: PortableSaleReturnItem[];
 }
+
+export type PortableCustomer = Omit<Customer, 'id' | 'balance_syp' | 'sale_count' | 'latest_sale_at'>;
+export interface PortableCustomerAccountBalance { customer_uuid: string; balance_syp: number; updated_at: string }
+export interface PortableCustomerPaymentTender { uuid: string; currency: 'SYP' | 'USD'; amount_minor: number; syp_equivalent: number; exchange_rate_syp_per_usd: number | null; created_at: string }
+export interface PortableCustomerPayment { uuid: string; customer_uuid: string; cash_session_uuid: string; payment_mode: 'SYP' | 'USD' | 'MIXED'; total_syp_equivalent: number; exchange_rate_syp_per_usd: number | null; customer_name_snapshot: string; note: string | null; occurred_at: string; created_at: string; balance_after_syp: number; tenders: PortableCustomerPaymentTender[] }
+export interface PortableCustomerAccountEntry { uuid: string; customer_uuid: string; type: CustomerAccountEntryType; delta_syp: number; occurred_at: string; created_at: string; customer_name_snapshot: string; sale_uuid: string | null; sale_return_uuid: string | null; customer_payment_uuid: string | null; note_snapshot: string | null }
 
 export type PortableCashSession = Omit<CashSession, 'id'>;
 
@@ -89,6 +96,10 @@ export interface ImportPayload {
   supplierAccountBalances?: PortableSupplierAccountBalance[];
   supplierAccountEntries?: PortableSupplierAccountEntry[];
   supplierPayments?: PortableSupplierPayment[];
+  customers?: PortableCustomer[];
+  customerAccountBalances?: PortableCustomerAccountBalance[];
+  customerAccountEntries?: PortableCustomerAccountEntry[];
+  customerPayments?: PortableCustomerPayment[];
 }
 
 export interface ImportOptions {

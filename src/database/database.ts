@@ -1,5 +1,5 @@
 import * as SQLite from 'expo-sqlite';
-import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryMovement, InventoryMovementType, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptItem, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierAccountEntry, SupplierAccountHealthReport, SupplierAccountSummary, SupplierInput, SupplierPayment, SupplierPaymentInput, SupplierSort, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
+import { CashSession, CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, Customer, CustomerAccountEntry, CustomerAccountHealthReport, CustomerAccountSummary, CustomerInput, CustomerPayment, CustomerPaymentInput, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryMovement, InventoryMovementType, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptItem, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleAccountInput, SaleItem, SaleItemInput, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierAccountEntry, SupplierAccountHealthReport, SupplierAccountSummary, SupplierInput, SupplierPayment, SupplierPaymentInput, SupplierSort, SuspendedSale, SuspendedSaleItem, SuspendedSaleSummary } from '@/types';
 import { createDeterministicUuid, createUuid, isUuid } from '@/utils/uuid';
 import { cleanupTemporaryProductImages, deleteProductImage, isStoredProductImagePath, migrateLegacyProductImage, saveProductImage } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
@@ -7,10 +7,11 @@ import { deriveReturnStatus, previewReturn, returnedQuantities } from '@/utils/r
 import { DEFAULT_EXPENSE_CATEGORIES, OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 import { calculateSettlement } from '@/utils/multiCurrency';
 import { calculateSupplierPaymentEquivalent } from '@/utils/supplierAccounts';
+import { calculateCustomerPaymentEquivalent } from '@/utils/customerAccounts';
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 
 export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
@@ -549,6 +550,101 @@ async function migrateSupplierAccountsV17() {
   });
 }
 
+async function migrateCustomerAccountsV18() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 18) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const saleColumns = await transaction.getAllAsync<{ name: string }>('PRAGMA table_info(sales)');
+    if (!saleColumns.some(column => column.name === 'customer_id')) await transaction.execAsync('ALTER TABLE sales ADD COLUMN customer_id INTEGER REFERENCES customers(id) ON DELETE RESTRICT');
+    if (!saleColumns.some(column => column.name === 'customer_uuid_snapshot')) await transaction.execAsync('ALTER TABLE sales ADD COLUMN customer_uuid_snapshot TEXT');
+    if (!saleColumns.some(column => column.name === 'customer_name_snapshot')) await transaction.execAsync('ALTER TABLE sales ADD COLUMN customer_name_snapshot TEXT');
+    if (!saleColumns.some(column => column.name === 'on_account_syp')) await transaction.execAsync('ALTER TABLE sales ADD COLUMN on_account_syp INTEGER NOT NULL DEFAULT 0 CHECK(on_account_syp>=0)');
+    const returnColumns = await transaction.getAllAsync<{ name: string }>('PRAGMA table_info(sale_returns)');
+    if (!returnColumns.some(column => column.name === 'customer_account_credit_syp')) await transaction.execAsync('ALTER TABLE sale_returns ADD COLUMN customer_account_credit_syp INTEGER NOT NULL DEFAULT 0 CHECK(customer_account_credit_syp>=0)');
+    const sessionColumns = await transaction.getAllAsync<{ name: string }>('PRAGMA table_info(cash_sessions)');
+    if (!sessionColumns.some(column => column.name === 'closing_customer_payments_syp')) await transaction.execAsync('ALTER TABLE cash_sessions ADD COLUMN closing_customer_payments_syp INTEGER NOT NULL DEFAULT 0 CHECK(closing_customer_payments_syp>=0)');
+    if (!sessionColumns.some(column => column.name === 'closing_customer_payments_usd_cents')) await transaction.execAsync('ALTER TABLE cash_sessions ADD COLUMN closing_customer_payments_usd_cents INTEGER NOT NULL DEFAULT 0 CHECK(closing_customer_payments_usd_cents>=0)');
+    await transaction.execAsync(`
+      CREATE TABLE customers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        phone TEXT,
+        note TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+        accounting_enabled INTEGER NOT NULL DEFAULT 0 CHECK(accounting_enabled IN (0,1)),
+        accounting_started_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_customers_active_name ON customers(is_active,name COLLATE NOCASE,id);
+      CREATE TABLE customer_account_balances (
+        customer_id INTEGER PRIMARY KEY REFERENCES customers(id) ON DELETE RESTRICT,
+        balance_syp INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE customer_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+        cash_session_id INTEGER NOT NULL REFERENCES cash_sessions(id) ON DELETE RESTRICT,
+        payment_mode TEXT NOT NULL CHECK(payment_mode IN ('SYP','USD','MIXED')),
+        total_syp_equivalent INTEGER NOT NULL CHECK(total_syp_equivalent>0),
+        exchange_rate_syp_per_usd INTEGER CHECK(exchange_rate_syp_per_usd>0),
+        customer_name_snapshot TEXT NOT NULL,
+        note TEXT,
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        balance_after_syp INTEGER NOT NULL,
+        CHECK((payment_mode='SYP' AND exchange_rate_syp_per_usd IS NULL) OR (payment_mode IN ('USD','MIXED') AND exchange_rate_syp_per_usd IS NOT NULL))
+      );
+      CREATE TABLE customer_payment_tenders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        customer_payment_id INTEGER NOT NULL REFERENCES customer_payments(id) ON DELETE RESTRICT,
+        currency TEXT NOT NULL CHECK(currency IN ('SYP','USD')),
+        amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
+        syp_equivalent INTEGER NOT NULL CHECK(syp_equivalent>0),
+        exchange_rate_syp_per_usd INTEGER CHECK(exchange_rate_syp_per_usd>0),
+        created_at TEXT NOT NULL,
+        UNIQUE(customer_payment_id,currency),
+        CHECK((currency='SYP' AND exchange_rate_syp_per_usd IS NULL AND amount_minor=syp_equivalent) OR (currency='USD' AND exchange_rate_syp_per_usd IS NOT NULL))
+      );
+      CREATE TABLE customer_account_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid TEXT NOT NULL UNIQUE,
+        customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+        type TEXT NOT NULL CHECK(type IN ('opening','sale','sale_return','payment')),
+        delta_syp INTEGER NOT NULL,
+        occurred_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        customer_name_snapshot TEXT NOT NULL,
+        sale_id INTEGER REFERENCES sales(id) ON DELETE RESTRICT,
+        sale_return_id INTEGER REFERENCES sale_returns(id) ON DELETE RESTRICT,
+        customer_payment_id INTEGER REFERENCES customer_payments(id) ON DELETE RESTRICT,
+        note_snapshot TEXT,
+        CHECK((type='opening' AND sale_id IS NULL AND sale_return_id IS NULL AND customer_payment_id IS NULL) OR
+          (type='sale' AND sale_id IS NOT NULL AND sale_return_id IS NULL AND customer_payment_id IS NULL AND delta_syp>0) OR
+          (type='sale_return' AND sale_id IS NULL AND sale_return_id IS NOT NULL AND customer_payment_id IS NULL AND delta_syp<0) OR
+          (type='payment' AND sale_id IS NULL AND sale_return_id IS NULL AND customer_payment_id IS NOT NULL AND delta_syp<0))
+      );
+      CREATE UNIQUE INDEX idx_customer_account_opening ON customer_account_entries(customer_id) WHERE type='opening';
+      CREATE UNIQUE INDEX idx_customer_account_sale ON customer_account_entries(sale_id) WHERE sale_id IS NOT NULL;
+      CREATE UNIQUE INDEX idx_customer_account_sale_return ON customer_account_entries(sale_return_id) WHERE sale_return_id IS NOT NULL;
+      CREATE UNIQUE INDEX idx_customer_account_payment ON customer_account_entries(customer_payment_id) WHERE customer_payment_id IS NOT NULL;
+      CREATE INDEX idx_customer_account_entries_customer_date ON customer_account_entries(customer_id,occurred_at DESC,id DESC);
+      CREATE INDEX idx_customer_account_entries_customer_type ON customer_account_entries(customer_id,type);
+      CREATE INDEX idx_customer_payments_customer_date ON customer_payments(customer_id,occurred_at DESC,id DESC);
+      CREATE INDEX idx_customer_payments_session ON customer_payments(cash_session_id);
+      CREATE INDEX idx_customer_payment_tenders_payment ON customer_payment_tenders(customer_payment_id);
+      CREATE INDEX idx_sales_customer_id ON sales(customer_id);
+      PRAGMA user_version = 18;
+    `);
+  });
+}
+
 export async function initializeDatabase() {
   const db = await dbPromise;
   await db.execAsync(`
@@ -623,6 +719,7 @@ export async function initializeDatabase() {
   await migratePurchasesV15();
   await migratePurchaseReturnsV16();
   await migrateSupplierAccountsV17();
+  await migrateCustomerAccountsV18();
   await db.runAsync(`DELETE FROM sale_draft_items
     WHERE NOT EXISTS (SELECT 1 FROM sale_drafts WHERE sale_drafts.id=sale_draft_items.draft_id)`);
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
@@ -853,6 +950,143 @@ function normalizeOptionalText(value: string | null | undefined, maxLength: numb
   return normalized;
 }
 
+export async function getCustomers(search = '', includeInactive = true): Promise<Customer[]> {
+  const db = await dbPromise; const where: string[] = []; const parameters: string[] = [];
+  const term = search.trim();
+  if (term) { where.push("(c.name LIKE ? COLLATE NOCASE OR COALESCE(c.phone,'') LIKE ?)"); parameters.push(`%${term}%`, `%${term}%`); }
+  if (!includeInactive) where.push('c.is_active=1');
+  return db.getAllAsync<Customer>(`SELECT c.*,b.balance_syp,COUNT(s.id) AS sale_count,MAX(s.created_at) AS latest_sale_at
+    FROM customers c LEFT JOIN customer_account_balances b ON b.customer_id=c.id LEFT JOIN sales s ON s.customer_id=c.id
+    ${where.length ? `WHERE ${where.join(' AND ')}` : ''} GROUP BY c.id ORDER BY c.name COLLATE NOCASE,c.id`, ...parameters);
+}
+
+export async function addCustomer(input: CustomerInput) {
+  const name = input.name.trim(); const phone = normalizeOptionalText(input.phone, 80); const note = normalizeOptionalText(input.note, 240);
+  if (!name || name.length > 120) throw new Error('INVALID_CUSTOMER');
+  const db = await dbPromise; const now = new Date().toISOString();
+  const result = await db.runAsync('INSERT INTO customers(uuid,name,phone,note,created_at,updated_at) VALUES(?,?,?,?,?,?)', createUuid(), name, phone, note, now, now);
+  return result.lastInsertRowId;
+}
+
+export async function updateCustomer(id: number, input: CustomerInput) {
+  const name = input.name.trim(); const phone = normalizeOptionalText(input.phone, 80); const note = normalizeOptionalText(input.note, 240);
+  if (!Number.isSafeInteger(id) || id <= 0 || !name || name.length > 120) throw new Error('INVALID_CUSTOMER');
+  const db = await dbPromise; const result = await db.runAsync('UPDATE customers SET name=?,phone=?,note=?,updated_at=? WHERE id=?', name, phone, note, new Date().toISOString(), id);
+  if (!result.changes) throw new Error('CUSTOMER_NOT_FOUND');
+}
+
+export async function setCustomerActive(id: number, active: boolean) {
+  const db = await dbPromise; const result = await db.runAsync('UPDATE customers SET is_active=?,updated_at=? WHERE id=?', active ? 1 : 0, new Date().toISOString(), id);
+  if (!result.changes) throw new Error('CUSTOMER_NOT_FOUND');
+  return active ? 'restored' as const : 'archived' as const;
+}
+
+async function postCustomerAccountEntry(transaction: SQLite.SQLiteDatabase, customer: Customer, input: { type: CustomerAccountEntry['type']; delta: number; occurredAt: string; note?: string | null; saleId?: number; saleReturnId?: number; customerPaymentId?: number }) {
+  if (!Number.isSafeInteger(input.delta)) throw new Error('INVALID_CUSTOMER_ACCOUNT_AMOUNT');
+  const balance = await transaction.getFirstAsync<{ balance_syp: number }>('SELECT balance_syp FROM customer_account_balances WHERE customer_id=?', customer.id);
+  if (!balance) throw new Error('CUSTOMER_ACCOUNT_BALANCE_MISSING');
+  const after = balance.balance_syp + input.delta;
+  if (!Number.isSafeInteger(after)) throw new Error('INVALID_CUSTOMER_ACCOUNT_AMOUNT');
+  await transaction.runAsync(`INSERT INTO customer_account_entries
+    (uuid,customer_id,type,delta_syp,occurred_at,created_at,customer_name_snapshot,sale_id,sale_return_id,customer_payment_id,note_snapshot)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`, createUuid(), customer.id, input.type, input.delta, input.occurredAt, input.occurredAt, customer.name,
+  input.saleId ?? null, input.saleReturnId ?? null, input.customerPaymentId ?? null, input.note?.trim() || null);
+  const changed = await transaction.runAsync('UPDATE customer_account_balances SET balance_syp=?,updated_at=? WHERE customer_id=? AND balance_syp=?', after, input.occurredAt, customer.id, balance.balance_syp);
+  if (changed.changes !== 1) throw new Error('CUSTOMER_ACCOUNT_CONCURRENT_UPDATE');
+  return after;
+}
+
+export async function activateCustomerAccount(customerId: number, openingBalanceSyp: number): Promise<CustomerAccountSummary> {
+  if (!Number.isSafeInteger(customerId) || customerId <= 0 || !Number.isSafeInteger(openingBalanceSyp)) throw new Error('INVALID_CUSTOMER_ACCOUNT_AMOUNT');
+  const db = await dbPromise; const now = new Date().toISOString();
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const customer = await transaction.getFirstAsync<Customer>('SELECT * FROM customers WHERE id=?', customerId);
+    if (!customer) throw new Error('CUSTOMER_NOT_FOUND');
+    if (customer.accounting_enabled) throw new Error('CUSTOMER_ACCOUNT_ALREADY_ACTIVE');
+    const changed = await transaction.runAsync('UPDATE customers SET accounting_enabled=1,accounting_started_at=?,updated_at=? WHERE id=? AND accounting_enabled=0', now, now, customerId);
+    if (changed.changes !== 1) throw new Error('CUSTOMER_ACCOUNT_ALREADY_ACTIVE');
+    await transaction.runAsync('INSERT INTO customer_account_balances(customer_id,balance_syp,updated_at) VALUES(?,?,?)', customerId, openingBalanceSyp, now);
+    await transaction.runAsync(`INSERT INTO customer_account_entries(uuid,customer_id,type,delta_syp,occurred_at,created_at,customer_name_snapshot,note_snapshot)
+      VALUES(?,?,'opening',?,?,?,?,?)`, createUuid(), customerId, openingBalanceSyp, now, now, customer.name, null);
+  });
+  const summary = await getCustomerAccountSummary(customerId); if (!summary) throw new Error('CUSTOMER_ACCOUNT_NOT_FOUND'); return summary;
+}
+
+export async function getCustomerAccountSummary(customerId: number): Promise<CustomerAccountSummary | null> {
+  const db = await dbPromise;
+  const customer = await db.getFirstAsync<Customer>('SELECT c.*,b.balance_syp FROM customers c LEFT JOIN customer_account_balances b ON b.customer_id=c.id WHERE c.id=?', customerId);
+  if (!customer || !customer.accounting_enabled) return null;
+  const totals = await db.getFirstAsync<{ opening: number; sales: number; returns: number; payments: number }>(`SELECT
+    COALESCE(SUM(CASE WHEN type='opening' THEN delta_syp ELSE 0 END),0) opening,
+    COALESCE(SUM(CASE WHEN type='sale' THEN delta_syp ELSE 0 END),0) sales,
+    COALESCE(-SUM(CASE WHEN type='sale_return' THEN delta_syp ELSE 0 END),0) returns,
+    COALESCE(-SUM(CASE WHEN type='payment' THEN delta_syp ELSE 0 END),0) payments
+    FROM customer_account_entries WHERE customer_id=?`, customerId);
+  return { customer, balanceSyp: customer.balance_syp ?? 0, openingSyp: totals?.opening ?? 0, salesSyp: totals?.sales ?? 0, returnsSyp: totals?.returns ?? 0, paymentsSyp: totals?.payments ?? 0 };
+}
+
+export async function getCustomerAccountEntries(customerId: number, type: CustomerAccountEntry['type'] | 'all' = 'all', limit = 200, from?: string): Promise<CustomerAccountEntry[]> {
+  if (!Number.isSafeInteger(customerId) || customerId <= 0 || !['all','opening','sale','sale_return','payment'].includes(type) || !Number.isSafeInteger(limit) || limit <= 0 || limit > 1000 || (from != null && !Number.isFinite(Date.parse(from)))) throw new Error('INVALID_CUSTOMER_ACCOUNT_QUERY');
+  const db = await dbPromise; const where = `${type === 'all' ? '' : ' AND ledger.type=?'}${from ? ' AND ledger.occurred_at>=?' : ''}`;
+  return db.getAllAsync<CustomerAccountEntry>(`WITH ledger AS (
+      SELECT e.*,SUM(e.delta_syp) OVER (PARTITION BY e.customer_id ORDER BY e.occurred_at,e.id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) running_balance_syp
+      FROM customer_account_entries e WHERE e.customer_id=?
+    ) SELECT ledger.*,COALESCE(s.invoice_number,sr.uuid,cp.uuid) reference FROM ledger
+    LEFT JOIN sales s ON s.id=ledger.sale_id LEFT JOIN sale_returns sr ON sr.id=ledger.sale_return_id LEFT JOIN customer_payments cp ON cp.id=ledger.customer_payment_id
+    WHERE 1=1${where} ORDER BY ledger.occurred_at DESC,ledger.id DESC LIMIT ?`, customerId, ...(type === 'all' ? [] : [type]), ...(from ? [from] : []), limit);
+}
+
+export async function getCustomerPayments(customerId: number, limit = 100): Promise<CustomerPayment[]> {
+  const db = await dbPromise; return db.getAllAsync<CustomerPayment>('SELECT * FROM customer_payments WHERE customer_id=? ORDER BY occurred_at DESC,id DESC LIMIT ?', customerId, limit);
+}
+
+export async function getCustomerPaymentDetail(id: number): Promise<CustomerPayment | null> {
+  const db = await dbPromise; const payment = await db.getFirstAsync<CustomerPayment>('SELECT * FROM customer_payments WHERE id=?', id);
+  if (!payment) return null; payment.tenders = await db.getAllAsync('SELECT * FROM customer_payment_tenders WHERE customer_payment_id=? ORDER BY id', id); return payment;
+}
+
+export async function createCustomerPayment(input: CustomerPaymentInput): Promise<CustomerPayment> {
+  const db = await dbPromise; const note = normalizeOptionalText(input.note, 240); let paymentId = 0;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    const customer = await transaction.getFirstAsync<Customer>('SELECT * FROM customers WHERE id=? AND is_active=1 AND accounting_enabled=1', input.customerId);
+    if (!customer) throw new Error('CUSTOMER_ACCOUNT_INACTIVE');
+    const session = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
+    if (!session) throw new Error('CASH_SESSION_REQUIRED');
+    const setting = await transaction.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='exchangeRate'");
+    const rate: unknown = setting ? JSON.parse(setting.value) : null;
+    if (!Number.isSafeInteger(rate) || (rate as number) <= 0) throw new Error('INVALID_EXCHANGE_RATE');
+    const calculated = calculateCustomerPaymentEquivalent(input, rate as number); const now = new Date().toISOString();
+    const current = await transaction.getFirstAsync<{ balance_syp: number }>('SELECT balance_syp FROM customer_account_balances WHERE customer_id=?', customer.id);
+    if (!current) throw new Error('CUSTOMER_ACCOUNT_BALANCE_MISSING');
+    const after = current.balance_syp - calculated.totalSyp;
+    if (!Number.isSafeInteger(after)) throw new Error('INVALID_CUSTOMER_ACCOUNT_AMOUNT');
+    const result = await transaction.runAsync(`INSERT INTO customer_payments(uuid,customer_id,cash_session_id,payment_mode,total_syp_equivalent,exchange_rate_syp_per_usd,customer_name_snapshot,note,occurred_at,created_at,balance_after_syp)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, createUuid(), customer.id, session.id, calculated.input.mode, calculated.totalSyp, calculated.input.mode === 'SYP' ? null : rate as number, customer.name, note, now, now, after);
+    paymentId = result.lastInsertRowId;
+    if (calculated.input.sypAmount > 0) await transaction.runAsync(`INSERT INTO customer_payment_tenders(uuid,customer_payment_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,created_at) VALUES(?,?,'SYP',?,?,NULL,?)`, createUuid(), paymentId, calculated.input.sypAmount, calculated.input.sypAmount, now);
+    if (calculated.input.usdCents > 0) await transaction.runAsync(`INSERT INTO customer_payment_tenders(uuid,customer_payment_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,created_at) VALUES(?,?,'USD',?,?,?,?)`, createUuid(), paymentId, calculated.input.usdCents, calculated.usdEquivalentSyp, rate as number, now);
+    await postCustomerAccountEntry(transaction, customer, { type: 'payment', delta: -calculated.totalSyp, occurredAt: now, note, customerPaymentId: paymentId });
+  });
+  const payment = await getCustomerPaymentDetail(paymentId); if (!payment) throw new Error('CUSTOMER_PAYMENT_NOT_FOUND'); return payment;
+}
+
+export async function auditCustomerAccountHealth(): Promise<CustomerAccountHealthReport> {
+  const db = await dbPromise;
+  const row = await db.getFirstAsync<Record<string, number>>(`SELECT
+    (SELECT COUNT(*) FROM customers c WHERE c.accounting_enabled=1 AND (c.accounting_started_at IS NULL OR NOT EXISTS(SELECT 1 FROM customer_account_balances b WHERE b.customer_id=c.id) OR 1<>(SELECT COUNT(*) FROM customer_account_entries e WHERE e.customer_id=c.id AND e.type='opening'))) active_missing,
+    (SELECT COUNT(*) FROM customers c WHERE c.accounting_enabled=0 AND (EXISTS(SELECT 1 FROM customer_account_balances b WHERE b.customer_id=c.id) OR EXISTS(SELECT 1 FROM customer_account_entries e WHERE e.customer_id=c.id))) inactive_state,
+    (SELECT COUNT(*) FROM customer_account_balances b LEFT JOIN customers c ON c.id=b.customer_id WHERE c.id IS NULL OR typeof(b.balance_syp)<>'integer' OR b.balance_syp<>COALESCE((SELECT SUM(e.delta_syp) FROM customer_account_entries e WHERE e.customer_id=b.customer_id),0)) balance_mismatch,
+    (SELECT COUNT(*) FROM (SELECT sale_id,sale_return_id,customer_payment_id,type,COUNT(*) n FROM customer_account_entries WHERE type<>'opening' GROUP BY sale_id,sale_return_id,customer_payment_id,type HAVING n>1)) duplicate_sources,
+    (SELECT COUNT(*) FROM customer_account_entries e LEFT JOIN customers c ON c.id=e.customer_id LEFT JOIN sales s ON s.id=e.sale_id LEFT JOIN sale_returns sr ON sr.id=e.sale_return_id LEFT JOIN customer_payments cp ON cp.id=e.customer_payment_id WHERE c.id IS NULL OR typeof(e.delta_syp)<>'integer' OR (e.type='sale' AND (s.id IS NULL OR e.delta_syp<>s.on_account_syp)) OR (e.type='sale_return' AND (sr.id IS NULL OR e.delta_syp<>-sr.customer_account_credit_syp)) OR (e.type='payment' AND (cp.id IS NULL OR e.delta_syp<>-cp.total_syp_equivalent OR cp.balance_after_syp<>(SELECT COALESCE(SUM(e2.delta_syp),0) FROM customer_account_entries e2 WHERE e2.customer_id=e.customer_id AND (e2.occurred_at<e.occurred_at OR (e2.occurred_at=e.occurred_at AND e2.id<=e.id)))))) invalid_entries,
+    (SELECT COUNT(*) FROM customer_payments cp LEFT JOIN customers c ON c.id=cp.customer_id LEFT JOIN cash_sessions cs ON cs.id=cp.cash_session_id WHERE c.id IS NULL OR cs.id IS NULL OR NOT EXISTS(SELECT 1 FROM customer_payment_tenders t WHERE t.customer_payment_id=cp.id)) payments_without_tender,
+    (SELECT COUNT(*) FROM customer_payment_tenders t LEFT JOIN customer_payments cp ON cp.id=t.customer_payment_id WHERE cp.id IS NULL) orphan_tenders,
+    (SELECT COUNT(*) FROM customer_payments cp WHERE typeof(cp.total_syp_equivalent)<>'integer' OR cp.total_syp_equivalent<>(SELECT COALESCE(SUM(t.syp_equivalent),0) FROM customer_payment_tenders t WHERE t.customer_payment_id=cp.id)) payment_mismatch,
+    (SELECT COUNT(*) FROM customer_payment_tenders t WHERE typeof(t.amount_minor)<>'integer' OR typeof(t.syp_equivalent)<>'integer' OR t.amount_minor<=0 OR t.syp_equivalent<=0 OR (t.currency='SYP' AND (t.amount_minor<>t.syp_equivalent OR t.exchange_rate_syp_per_usd IS NOT NULL)) OR (t.currency='USD' AND (typeof(t.exchange_rate_syp_per_usd)<>'integer' OR t.exchange_rate_syp_per_usd<=0))) invalid_tenders,
+    (SELECT COUNT(*) FROM sale_returns WHERE typeof(customer_account_credit_syp)<>'integer' OR customer_account_credit_syp<0 OR customer_account_credit_syp>refund_total_syp) invalid_returns,
+    (SELECT COUNT(*) FROM cash_sessions cs WHERE cs.closed_at IS NOT NULL AND (cs.closing_customer_payments_syp<>COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=cs.id AND t.currency='SYP'),0) OR cs.closing_customer_payments_usd_cents<>COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=cs.id AND t.currency='USD'),0))) session_mismatch`);
+  return { activeWithoutBalance: row?.active_missing ?? 0, inactiveWithState: row?.inactive_state ?? 0, balanceMismatches: row?.balance_mismatch ?? 0, duplicateSources: row?.duplicate_sources ?? 0, invalidEntries: row?.invalid_entries ?? 0, paymentsWithoutTender: row?.payments_without_tender ?? 0, orphanTenders: row?.orphan_tenders ?? 0, paymentTotalMismatches: row?.payment_mismatch ?? 0, invalidTenders: row?.invalid_tenders ?? 0, invalidReturnSplits: row?.invalid_returns ?? 0, cashSessionMismatches: row?.session_mismatch ?? 0 };
+}
+
 export async function getSuppliers(search = '', sort: SupplierSort = 'name', includeInactive = true): Promise<Supplier[]> {
   const db = await dbPromise; const where: string[] = []; const parameters: string[] = [];
   const term = search.trim();
@@ -952,11 +1186,13 @@ export async function createSupplierPayment(input: SupplierPaymentInput): Promis
       cs.opening_cash_syp
         +COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='SYP'),0)
         -COALESCE((SELECT SUM(s.change_syp) FROM sales s WHERE s.cash_session_id=cs.id),0)
-        -COALESCE((SELECT SUM(sr.refund_total_syp) FROM sale_returns sr WHERE sr.cash_session_id=cs.id),0)
+        +COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=cs.id AND t.currency='SYP'),0)
+        -COALESCE((SELECT SUM(sr.refund_total_syp-sr.customer_account_credit_syp) FROM sale_returns sr WHERE sr.cash_session_id=cs.id),0)
         -COALESCE((SELECT SUM(e.amount_syp) FROM expenses e WHERE e.cash_session_id=cs.id),0)
         -COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments p JOIN supplier_payment_tenders t ON t.supplier_payment_id=p.id WHERE p.cash_session_id=cs.id AND t.currency='SYP'),0) AS available_syp,
       cs.opening_cash_usd_cents
         +COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='USD'),0)
+        +COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=cs.id AND t.currency='USD'),0)
         -COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments p JOIN supplier_payment_tenders t ON t.supplier_payment_id=p.id WHERE p.cash_session_id=cs.id AND t.currency='USD'),0) AS available_usd_cents
       FROM cash_sessions cs WHERE cs.closed_at IS NULL LIMIT 1`);
     if (!session) throw new Error('CASH_SESSION_REQUIRED');
@@ -1440,13 +1676,13 @@ export async function queryInvoices(query: InvoiceQuery): Promise<Sale[]> {
   const search = query.search?.trim() ?? '';
   if (search) {
     const like = `%${search}%`;
-    where.push(`(s.invoice_number LIKE ? OR s.id IN (
+    where.push(`(s.invoice_number LIKE ? OR COALESCE(s.customer_name_snapshot,'') LIKE ? COLLATE NOCASE OR s.id IN (
       SELECT si.sale_id FROM sale_items si
       WHERE si.product_name LIKE ? COLLATE NOCASE OR si.barcode_snapshot=? OR si.product_id IN (
         SELECT p.id FROM products p WHERE p.barcode=?
       )
     ))`);
-    parameters.push(like, like, search, search);
+    parameters.push(like, like, like, search, search);
   }
   const start = invoiceDateStart(query.period);
   if (start) { where.push('s.created_at >= ?'); parameters.push(start); }
@@ -1469,6 +1705,7 @@ export async function createSale(
   discountSyp = 0,
   paymentInput?: PaymentInput | number,
   draftId?: number,
+  accountInput?: SaleAccountInput,
 ) {
   if (!items.length) throw new Error('EMPTY_SALE');
   if (!Number.isSafeInteger(exchangeRate) || exchangeRate <= 0 || items.some(item => !Number.isSafeInteger(item.quantity) || item.quantity <= 0 || !Number.isSafeInteger(item.unitPriceSyp) || item.unitPriceSyp < 0 || !Number.isFinite(item.unitCostSyp) || item.unitCostSyp < 0)) {
@@ -1481,10 +1718,13 @@ export async function createSale(
   if (![subtotal, cost, discountSyp].every(Number.isSafeInteger)) throw new Error('INVALID_SALE_DATA');
   const discount = Math.max(0, Math.min(discountSyp, subtotal));
   const net = subtotal - discount;
+  const onAccountSyp = accountInput?.onAccountSyp ?? 0;
+  if (!Number.isSafeInteger(onAccountSyp) || onAccountSyp < 0 || onAccountSyp > net || (onAccountSyp > 0 && (!Number.isSafeInteger(accountInput?.customerId) || (accountInput?.customerId ?? 0) <= 0))) throw new Error('INVALID_ON_ACCOUNT_AMOUNT');
+  const cashDue = net - onAccountSyp;
   const normalizedPayment: PaymentInput = typeof paymentInput === 'number'
     ? { mode: 'SYP', sypAmount: paymentInput, usdCents: 0 }
-    : paymentInput ?? { mode: 'SYP', sypAmount: net, usdCents: 0 };
-  const previewSettlement = calculateSettlement(net, exchangeRate, normalizedPayment);
+    : paymentInput ?? { mode: 'SYP', sypAmount: cashDue, usdCents: 0 };
+  const previewSettlement = calculateSettlement(cashDue, exchangeRate, normalizedPayment);
   if (!previewSettlement.valid) throw new Error('INSUFFICIENT_PAYMENT');
   const profit = net - cost;
   const createdAt = new Date().toISOString();
@@ -1493,8 +1733,11 @@ export async function createSale(
   await db.withExclusiveTransactionAsync(async transaction => {
     const activeSession = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
     if (!activeSession) throw new Error('CASH_SESSION_REQUIRED');
-    const settlement = calculateSettlement(net, exchangeRate, normalizedPayment);
-    if (!settlement.valid || settlement.totalTenderEquivalentSyp - settlement.changeSyp !== net) throw new Error('INVALID_PAYMENT_SETTLEMENT');
+    const settlement = calculateSettlement(cashDue, exchangeRate, normalizedPayment);
+    if (!settlement.valid || settlement.totalTenderEquivalentSyp - settlement.changeSyp + onAccountSyp !== net) throw new Error('INVALID_PAYMENT_SETTLEMENT');
+    const customer = accountInput?.customerId == null ? null : await transaction.getFirstAsync<Customer>('SELECT * FROM customers WHERE id=? AND is_active=1', accountInput.customerId);
+    if (accountInput?.customerId != null && !customer) throw new Error('CUSTOMER_INACTIVE');
+    if (onAccountSyp > 0 && !customer?.accounting_enabled) throw new Error('CUSTOMER_ACCOUNT_INACTIVE');
     if (draftId != null) {
       const draft = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_drafts WHERE id=?', draftId);
       if (!draft) throw new Error('DRAFT_NOT_FOUND');
@@ -1520,9 +1763,10 @@ export async function createSale(
     }
     const result = await transaction.runAsync(
       `INSERT INTO sales
-       (uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,amount_paid_syp,change_syp,created_at,updated_at,cash_session_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       (uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,amount_paid_syp,change_syp,created_at,updated_at,cash_session_id,customer_id,customer_uuid_snapshot,customer_name_snapshot,on_account_syp)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       createUuid(), invoiceNumber, exchangeRate, subtotal, discount, net, cost, profit, settlement.totalTenderEquivalentSyp, settlement.changeSyp, createdAt, createdAt, activeSession.id,
+      customer?.id ?? null, customer?.uuid ?? null, customer?.name ?? null, onAccountSyp,
     );
     saleId = result.lastInsertRowId;
     for (const [index, item] of items.entries()) {
@@ -1551,6 +1795,7 @@ export async function createSale(
       `INSERT INTO sale_payments(uuid,sale_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,created_at)
        VALUES(?,?,?,?,?,?,?)`, createUuid(), saleId, payment.currency, payment.amount_minor, payment.syp_equivalent, payment.exchange_rate_syp_per_usd, createdAt,
     );
+    if (customer && onAccountSyp > 0) await postCustomerAccountEntry(transaction, customer, { type: 'sale', delta: onAccountSyp, occurredAt: createdAt, saleId });
     if (draftId != null) {
       await transaction.runAsync('DELETE FROM sale_draft_items WHERE draft_id=?', draftId);
       await transaction.runAsync('DELETE FROM sale_drafts WHERE id=?', draftId);
@@ -1561,13 +1806,13 @@ export async function createSale(
   return sale;
 }
 
-export async function createSaleReturn(saleId: number, selections: ReturnSelection[]): Promise<SaleReturn> {
+export async function createSaleReturn(saleId: number, selections: ReturnSelection[], customerAccountCreditSyp = 0): Promise<SaleReturn> {
   if (!Number.isSafeInteger(saleId) || saleId <= 0 || !selections.length) throw new Error('INVALID_RETURN');
+  if (!Number.isSafeInteger(customerAccountCreditSyp) || customerAccountCreditSyp < 0) throw new Error('INVALID_RETURN_SETTLEMENT');
   const db = await dbPromise;
   let returnId = 0;
   await db.withExclusiveTransactionAsync(async transaction => {
     const activeSession = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
-    if (!activeSession) throw new Error('CASH_SESSION_REQUIRED');
     const header = await transaction.getFirstAsync<Omit<Sale, 'items'>>('SELECT * FROM sales WHERE id=?', saleId);
     if (!header) throw new Error('SALE_NOT_FOUND');
     const saleItems = await transaction.getAllAsync<SaleItem>('SELECT * FROM sale_items WHERE sale_id=? ORDER BY id', saleId);
@@ -1585,10 +1830,24 @@ export async function createSaleReturn(saleId: number, selections: ReturnSelecti
     const sale: Sale = { ...header, items: saleItems, returns: returnHeaders.map(record => ({ ...record, items: byReturn.get(record.id) ?? [] })) };
     const preview = previewReturn(sale, selections, sale.returns);
     if (!preview.items.length) throw new Error('EMPTY_RETURN');
+    if (customerAccountCreditSyp > preview.refundTotalSyp) throw new Error('INVALID_RETURN_SETTLEMENT');
+    const customer = header.customer_id == null ? null : await transaction.getFirstAsync<Customer>('SELECT * FROM customers WHERE id=? AND accounting_enabled=1', header.customer_id);
+    if (customerAccountCreditSyp > 0 && !customer) throw new Error('CUSTOMER_ACCOUNT_INACTIVE');
+    const cashRefundSyp = preview.refundTotalSyp - customerAccountCreditSyp;
+    if (cashRefundSyp > 0 && !activeSession) throw new Error('CASH_SESSION_REQUIRED');
+    const cash = activeSession ? await transaction.getFirstAsync<{ available_syp: number }>(`SELECT cs.opening_cash_syp
+      +COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='SYP'),0)
+      -COALESCE((SELECT SUM(s.change_syp) FROM sales s WHERE s.cash_session_id=cs.id),0)
+      +COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=cs.id AND t.currency='SYP'),0)
+      -COALESCE((SELECT SUM(sr.refund_total_syp-sr.customer_account_credit_syp) FROM sale_returns sr WHERE sr.cash_session_id=cs.id),0)
+      -COALESCE((SELECT SUM(e.amount_syp) FROM expenses e WHERE e.cash_session_id=cs.id),0)
+      -COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments p JOIN supplier_payment_tenders t ON t.supplier_payment_id=p.id WHERE p.cash_session_id=cs.id AND t.currency='SYP'),0) available_syp
+      FROM cash_sessions cs WHERE cs.id=?`, activeSession.id) : null;
+    if (cashRefundSyp > 0 && (!cash || !Number.isSafeInteger(cash.available_syp) || cashRefundSyp > cash.available_syp)) throw new Error('INSUFFICIENT_CASH_SESSION_FUNDS');
     const now = new Date().toISOString();
     const inserted = await transaction.runAsync(
-      'INSERT INTO sale_returns(uuid,sale_id,refund_total_syp,returned_cost_syp,created_at,updated_at,cash_session_id) VALUES(?,?,?,?,?,?,?)',
-      createUuid(), saleId, preview.refundTotalSyp, preview.returnedCostSyp, now, now, activeSession.id,
+      'INSERT INTO sale_returns(uuid,sale_id,refund_total_syp,returned_cost_syp,created_at,updated_at,cash_session_id,customer_account_credit_syp) VALUES(?,?,?,?,?,?,?,?)',
+      createUuid(), saleId, preview.refundTotalSyp, preview.returnedCostSyp, now, now, activeSession?.id ?? null, customerAccountCreditSyp,
     );
     returnId = inserted.lastInsertRowId;
     const selectionByItem = new Map(selections.map(selection => [selection.saleItemId, selection]));
@@ -1613,6 +1872,7 @@ export async function createSaleReturn(saleId: number, selections: ReturnSelecti
       await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,return_item_id,note,created_at)
         VALUES(?,?,?,?,?,'return',?,?,?,?,NULL,?)`, createUuid(), sold.product_id, balance.product_uuid, sold.product_name, sold.barcode_snapshot, selectedRestock, balance.quantity, after, insertedItem.lastInsertRowId, now);
     }
+    if (customer && customerAccountCreditSyp > 0) await postCustomerAccountEntry(transaction, customer, { type: 'sale_return', delta: -customerAccountCreditSyp, occurredAt: now, saleReturnId: returnId });
   });
   const record = (await getReturns()).find(item => item.id === returnId);
   if (!record) throw new Error('RETURN_NOT_FOUND');
@@ -1787,14 +2047,17 @@ const cashSessionSummarySelect = `SELECT cs.*,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE(s.change_given_syp,0) ELSE COALESCE(cs.closing_change_given_syp,0) END AS change_given_syp,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE(spay.supplier_payments_syp,0) ELSE COALESCE(cs.closing_supplier_payments_syp,0) END AS supplier_payments_syp,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE(spay.supplier_payments_usd_cents,0) ELSE COALESCE(cs.closing_supplier_payments_usd_cents,0) END AS supplier_payments_usd_cents,
-  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE(p.cash_received_syp,0)-COALESCE(s.change_given_syp,0)-COALESCE(r.refunds_total_syp,0)-COALESCE(e.expenses_total_syp,0)-COALESCE(spay.supplier_payments_syp,0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp,
-  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_usd_cents+COALESCE(p.cash_received_usd_cents,0)-COALESCE(spay.supplier_payments_usd_cents,0) ELSE COALESCE(cs.closing_expected_cash_usd_cents,0) END AS expected_cash_usd_cents
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE(cpay.customer_payments_syp,0) ELSE COALESCE(cs.closing_customer_payments_syp,0) END AS customer_payments_syp,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE(cpay.customer_payments_usd_cents,0) ELSE COALESCE(cs.closing_customer_payments_usd_cents,0) END AS customer_payments_usd_cents,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE(p.cash_received_syp,0)-COALESCE(s.change_given_syp,0)+COALESCE(cpay.customer_payments_syp,0)-COALESCE(r.cash_refunds_syp,0)-COALESCE(e.expenses_total_syp,0)-COALESCE(spay.supplier_payments_syp,0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_usd_cents+COALESCE(p.cash_received_usd_cents,0)+COALESCE(cpay.customer_payments_usd_cents,0)-COALESCE(spay.supplier_payments_usd_cents,0) ELSE COALESCE(cs.closing_expected_cash_usd_cents,0) END AS expected_cash_usd_cents
   FROM cash_sessions cs
   LEFT JOIN (SELECT cash_session_id,SUM(net_total_syp) AS sales_total_syp,SUM(COALESCE(change_syp,0)) AS change_given_syp,COUNT(*) AS invoice_count FROM sales WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) s ON s.cash_session_id=cs.id
   LEFT JOIN (SELECT s.cash_session_id,SUM(CASE WHEN sp.currency='SYP' THEN sp.amount_minor ELSE 0 END) AS cash_received_syp,SUM(CASE WHEN sp.currency='USD' THEN sp.amount_minor ELSE 0 END) AS cash_received_usd_cents FROM sales s JOIN sale_payments sp ON sp.sale_id=s.id WHERE s.cash_session_id IS NOT NULL GROUP BY s.cash_session_id) p ON p.cash_session_id=cs.id
-  LEFT JOIN (SELECT cash_session_id,SUM(refund_total_syp) AS refunds_total_syp,COUNT(*) AS return_count FROM sale_returns WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) r ON r.cash_session_id=cs.id
+  LEFT JOIN (SELECT cash_session_id,SUM(refund_total_syp) AS refunds_total_syp,SUM(refund_total_syp-customer_account_credit_syp) AS cash_refunds_syp,COUNT(*) AS return_count FROM sale_returns WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) r ON r.cash_session_id=cs.id
   LEFT JOIN (SELECT cash_session_id,SUM(amount_syp) AS expenses_total_syp,COUNT(*) AS expense_count FROM expenses WHERE cash_session_id IS NOT NULL GROUP BY cash_session_id) e ON e.cash_session_id=cs.id
-  LEFT JOIN (SELECT sp.cash_session_id,SUM(CASE WHEN t.currency='SYP' THEN t.amount_minor ELSE 0 END) AS supplier_payments_syp,SUM(CASE WHEN t.currency='USD' THEN t.amount_minor ELSE 0 END) AS supplier_payments_usd_cents FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id GROUP BY sp.cash_session_id) spay ON spay.cash_session_id=cs.id`;
+  LEFT JOIN (SELECT sp.cash_session_id,SUM(CASE WHEN t.currency='SYP' THEN t.amount_minor ELSE 0 END) AS supplier_payments_syp,SUM(CASE WHEN t.currency='USD' THEN t.amount_minor ELSE 0 END) AS supplier_payments_usd_cents FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id GROUP BY sp.cash_session_id) spay ON spay.cash_session_id=cs.id
+  LEFT JOIN (SELECT cp.cash_session_id,SUM(CASE WHEN t.currency='SYP' THEN t.amount_minor ELSE 0 END) AS customer_payments_syp,SUM(CASE WHEN t.currency='USD' THEN t.amount_minor ELSE 0 END) AS customer_payments_usd_cents FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id GROUP BY cp.cash_session_id) cpay ON cpay.cash_session_id=cs.id`;
 
 const cashSessionDetailSelect = `SELECT cs.*,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(net_total_syp) FROM sales WHERE cash_session_id=cs.id),0) ELSE cs.closing_sales_total_syp END AS sales_total_syp,
@@ -1808,8 +2071,10 @@ const cashSessionDetailSelect = `SELECT cs.*,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(change_syp) FROM sales WHERE cash_session_id=cs.id),0) ELSE COALESCE(cs.closing_change_given_syp,0) END AS change_given_syp,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='SYP'),0) ELSE COALESCE(cs.closing_supplier_payments_syp,0) END AS supplier_payments_syp,
   CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='USD'),0) ELSE COALESCE(cs.closing_supplier_payments_usd_cents,0) END AS supplier_payments_usd_cents,
-  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='SYP'),0)-COALESCE((SELECT SUM(change_syp) FROM sales WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(refund_total_syp) FROM sale_returns WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(amount_syp) FROM expenses WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='SYP'),0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp,
-  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_usd_cents+COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='USD'),0)-COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='USD'),0) ELSE COALESCE(cs.closing_expected_cash_usd_cents,0) END AS expected_cash_usd_cents
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=cs.id AND t.currency='SYP'),0) ELSE COALESCE(cs.closing_customer_payments_syp,0) END AS customer_payments_syp,
+  CASE WHEN cs.closed_at IS NULL THEN COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=cs.id AND t.currency='USD'),0) ELSE COALESCE(cs.closing_customer_payments_usd_cents,0) END AS customer_payments_usd_cents,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_syp+COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='SYP'),0)-COALESCE((SELECT SUM(change_syp) FROM sales WHERE cash_session_id=cs.id),0)+COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=cs.id AND t.currency='SYP'),0)-COALESCE((SELECT SUM(refund_total_syp-customer_account_credit_syp) FROM sale_returns WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(amount_syp) FROM expenses WHERE cash_session_id=cs.id),0)-COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='SYP'),0) ELSE cs.closing_expected_cash_syp END AS expected_cash_syp,
+  CASE WHEN cs.closed_at IS NULL THEN cs.opening_cash_usd_cents+COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='USD'),0)+COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=cs.id AND t.currency='USD'),0)-COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=cs.id AND t.currency='USD'),0) ELSE COALESCE(cs.closing_expected_cash_usd_cents,0) END AS expected_cash_usd_cents
   FROM cash_sessions cs`;
 
 function validateCashAmount(value: number) {
@@ -1856,30 +2121,34 @@ export async function closeCashSession(actualCashSyp: number, actualCashUsdCents
   await db.withExclusiveTransactionAsync(async transaction => {
     const active = await transaction.getFirstAsync<CashSession>('SELECT * FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
     if (!active) throw new Error('CASH_SESSION_NOT_FOUND');
-    const totals = await transaction.getFirstAsync<{ sales: number; refunds: number; expenses: number; cash_syp: number; cash_usd: number; change_syp: number; supplier_syp: number; supplier_usd: number }>(`SELECT
+    const totals = await transaction.getFirstAsync<{ sales: number; refunds: number; cash_refunds: number; expenses: number; cash_syp: number; cash_usd: number; change_syp: number; supplier_syp: number; supplier_usd: number; customer_syp: number; customer_usd: number }>(`SELECT
       COALESCE((SELECT SUM(net_total_syp) FROM sales WHERE cash_session_id=?),0) AS sales,
       COALESCE((SELECT SUM(refund_total_syp) FROM sale_returns WHERE cash_session_id=?),0) AS refunds,
+      COALESCE((SELECT SUM(refund_total_syp-customer_account_credit_syp) FROM sale_returns WHERE cash_session_id=?),0) AS cash_refunds,
       COALESCE((SELECT SUM(amount_syp) FROM expenses WHERE cash_session_id=?),0) AS expenses,
       COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=? AND sp.currency='SYP'),0) AS cash_syp,
       COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=? AND sp.currency='USD'),0) AS cash_usd,
       COALESCE((SELECT SUM(change_syp) FROM sales WHERE cash_session_id=?),0) AS change_syp,
       COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=? AND t.currency='SYP'),0) AS supplier_syp,
-      COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=? AND t.currency='USD'),0) AS supplier_usd`, active.id, active.id, active.id, active.id, active.id, active.id, active.id, active.id);
+      COALESCE((SELECT SUM(t.amount_minor) FROM supplier_payments sp JOIN supplier_payment_tenders t ON t.supplier_payment_id=sp.id WHERE sp.cash_session_id=? AND t.currency='USD'),0) AS supplier_usd,
+      COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=? AND t.currency='SYP'),0) AS customer_syp,
+      COALESCE((SELECT SUM(t.amount_minor) FROM customer_payments cp JOIN customer_payment_tenders t ON t.customer_payment_id=cp.id WHERE cp.cash_session_id=? AND t.currency='USD'),0) AS customer_usd`, active.id, active.id, active.id, active.id, active.id, active.id, active.id, active.id, active.id, active.id, active.id);
     const sales = totals?.sales ?? 0; const refunds = totals?.refunds ?? 0; const expenses = totals?.expenses ?? 0;
     const cashSyp = totals?.cash_syp ?? 0; const cashUsd = totals?.cash_usd ?? 0; const changeSyp = totals?.change_syp ?? 0;
     const supplierSyp = totals?.supplier_syp ?? 0; const supplierUsd = totals?.supplier_usd ?? 0;
-    const expected = active.opening_cash_syp + cashSyp - changeSyp - refunds - expenses - supplierSyp;
-    const expectedUsd = active.opening_cash_usd_cents + cashUsd - supplierUsd;
+    const customerSyp = totals?.customer_syp ?? 0; const customerUsd = totals?.customer_usd ?? 0; const cashRefunds = totals?.cash_refunds ?? 0;
+    const expected = active.opening_cash_syp + cashSyp - changeSyp + customerSyp - cashRefunds - expenses - supplierSyp;
+    const expectedUsd = active.opening_cash_usd_cents + cashUsd + customerUsd - supplierUsd;
     const difference = actualCashSyp - expected;
     const differenceUsd = actualCashUsdCents - expectedUsd;
-    if (![sales, refunds, expenses, cashSyp, cashUsd, changeSyp, supplierSyp, supplierUsd, expected, expectedUsd, difference, differenceUsd].every(Number.isSafeInteger) || expected < 0 || expectedUsd < 0) throw new Error('INVALID_CASH_TOTAL');
+    if (![sales, refunds, cashRefunds, expenses, cashSyp, cashUsd, changeSyp, supplierSyp, supplierUsd, customerSyp, customerUsd, expected, expectedUsd, difference, differenceUsd].every(Number.isSafeInteger) || expected < 0 || expectedUsd < 0) throw new Error('INVALID_CASH_TOTAL');
     const now = new Date().toISOString();
     const result = await transaction.runAsync(`UPDATE cash_sessions SET closed_at=?,closing_actual_cash_syp=?,
       closing_sales_total_syp=?,closing_refunds_total_syp=?,closing_expenses_total_syp=?,
       closing_expected_cash_syp=?,closing_difference_syp=?,closing_actual_cash_usd_cents=?,closing_expected_cash_usd_cents=?,
-      closing_difference_usd_cents=?,closing_cash_received_syp=?,closing_cash_received_usd_cents=?,closing_change_given_syp=?,closing_supplier_payments_syp=?,closing_supplier_payments_usd_cents=?,closing_note=?,updated_at=?
+      closing_difference_usd_cents=?,closing_cash_received_syp=?,closing_cash_received_usd_cents=?,closing_change_given_syp=?,closing_supplier_payments_syp=?,closing_supplier_payments_usd_cents=?,closing_customer_payments_syp=?,closing_customer_payments_usd_cents=?,closing_note=?,updated_at=?
       WHERE id=? AND closed_at IS NULL`, now, actualCashSyp, sales, refunds, expenses, expected, difference, actualCashUsdCents, expectedUsd,
-    differenceUsd, cashSyp, cashUsd, changeSyp, supplierSyp, supplierUsd, note, now, active.id);
+    differenceUsd, cashSyp, cashUsd, changeSyp, supplierSyp, supplierUsd, customerSyp, customerUsd, note, now, active.id);
     if (result.changes !== 1) throw new Error('CASH_SESSION_ALREADY_CLOSED');
     id = active.id;
   });

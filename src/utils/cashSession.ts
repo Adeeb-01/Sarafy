@@ -7,6 +7,14 @@ export function calculateExpectedCash(openingCashSyp: number, salesTotalSyp: num
   return expected;
 }
 
+export function calculateExpectedCashWithSettlements(openingCashSyp: number, cashReceivedSyp: number, changeGivenSyp: number, cashRefundsSyp: number, expensesSyp: number, supplierPaymentsSyp: number, customerPaymentsSyp: number) {
+  const values = [openingCashSyp, cashReceivedSyp, changeGivenSyp, cashRefundsSyp, expensesSyp, supplierPaymentsSyp, customerPaymentsSyp];
+  if (!values.every(Number.isSafeInteger) || values.some(value => value < 0)) throw new Error('INVALID_CASH_TOTAL');
+  const expected = openingCashSyp + cashReceivedSyp - changeGivenSyp - cashRefundsSyp - expensesSyp - supplierPaymentsSyp + customerPaymentsSyp;
+  if (!Number.isSafeInteger(expected)) throw new Error('INVALID_CASH_TOTAL');
+  return expected;
+}
+
 export function calculateCashDifference(actualCashSyp: number, expectedCashSyp: number) {
   if (!Number.isSafeInteger(actualCashSyp) || actualCashSyp < 0 || !Number.isSafeInteger(expectedCashSyp)) throw new Error('INVALID_CASH_TOTAL');
   const difference = actualCashSyp - expectedCashSyp;

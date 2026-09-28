@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
 import { CartReviewModal, CartLine, InvoiceHistory, NewSaleView } from '@/components/sales/SalesViews';
@@ -7,7 +7,7 @@ import { SuspendedSalesView } from '@/components/sales/SuspendedSalesView';
 import { AnalyticsDashboard } from '@/components/analytics/AnalyticsDashboard';
 import { AppButton, ConfirmSheet, MonetaryValue, ScreenContainer, SegmentedControl, useSnackbar } from '@/components/ui';
 import { useAppStore } from '@/store/useAppStore';
-import { PaymentMode, Product, Sale, SuspendedSaleSummary } from '@/types';
+import { Customer, PaymentMode, Product, Sale, SuspendedSaleSummary } from '@/types';
 import { spacing, typography, useAppTheme } from '@/theme';
 import { calculateSypPrice } from '@/utils/priceCalculator';
 import { formatNumber } from '@/utils/formatters';
@@ -23,8 +23,9 @@ import { buildRepeatedSaleCart } from '@/utils/repeatSale';
 import { ReturnFlowScreen } from '@/components/sales/ReturnFlowScreen';
 import { shareReturnReceiptPdf } from '@/utils/returnReceipt';
 import { CashSessionScreen } from '@/components/cash/CashSessionScreen';
+import { CustomersScreen } from '@/screens/CustomersScreen';
 
-type SalesSection = 'sale' | 'suspended' | 'invoices' | 'expenses' | 'analytics' | 'cash';
+type SalesSection = 'sale' | 'suspended' | 'invoices' | 'customers' | 'expenses' | 'analytics' | 'cash';
 
 export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationInset?: number }) {
   const state = useAppStore();
@@ -39,6 +40,9 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const [exactPayment, setExactPayment] = useState(true);
   const [paymentMode, setPaymentMode] = useState<PaymentMode>('SYP');
   const [usdAmount, setUsdAmount] = useState('');
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [selectedCustomerId, setSelectedCustomerId] = useState<number | null>(null);
+  const [onAccountAmount, setOnAccountAmount] = useState('0');
   const [cartExchangeRate, setCartExchangeRate] = useState<number | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<number | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -64,13 +68,22 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   const parsedDiscount = useMemo(() => parseLocalizedNumber(discount), [discount]);
   const appliedDiscount = clampCartDiscount(parsedDiscount, subtotal);
   const total = subtotal - appliedDiscount;
+  const selectedCustomer = customers.find(customer => customer.id === selectedCustomerId) ?? null;
+  const parsedOnAccount = selectedCustomerId == null ? 0 : parseLocalizedNumber(onAccountAmount);
+  const accountValid = Number.isSafeInteger(parsedOnAccount) && parsedOnAccount >= 0 && parsedOnAccount <= total && (parsedOnAccount === 0 || selectedCustomer?.accounting_enabled === 1);
+  const cashDue = accountValid ? total - parsedOnAccount : total;
   const lockedRate = cartExchangeRate ?? state.exchangeRate;
   const payment = useMemo(() => {
-    const syp = paymentMode === 'USD' ? 0 : exactPayment ? total : parseLocalizedNumber(amountPaid);
+    if (!accountValid) return null;
+    const syp = paymentMode === 'USD' ? 0 : exactPayment ? cashDue : parseLocalizedNumber(amountPaid);
     const usd = paymentMode === 'SYP' ? 0 : parseUsdToCents(usdAmount);
     if (!Number.isSafeInteger(syp) || syp < 0 || usd == null) return null;
-    try { return calculateSettlement(total, lockedRate, { mode: paymentMode, sypAmount: syp, usdCents: usd }); } catch { return null; }
-  }, [amountPaid, exactPayment, lockedRate, paymentMode, total, usdAmount]);
+    try { return calculateSettlement(cashDue, lockedRate, { mode: paymentMode, sypAmount: syp, usdCents: usd }); } catch { return null; }
+  }, [accountValid, amountPaid, cashDue, exactPayment, lockedRate, paymentMode, usdAmount]);
+  useEffect(() => { void state.getCustomers('', false).then(setCustomers); }, [state.getCustomers]);
+  useEffect(() => {
+    if (reviewOpen || section === 'customers' || returnSale) void state.getCustomers('', false).then(setCustomers);
+  }, [returnSale, reviewOpen, section, state.getCustomers]);
   const cartItemCount = useMemo(() => cart.reduce((sum, line) => sum + line.quantity, 0), [cart]);
   const productsByBarcode = useMemo(() => createProductBarcodeMap(state.products), [state.products]);
   const visibleSuspendedSales = useMemo(() => state.suspendedSales.filter(draft => draft.id !== activeDraftId), [activeDraftId, state.suspendedSales]);
@@ -126,10 +139,10 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     savingRef.current = true;
     setSaving(true);
     try {
-      const sale = await state.completeSale(cart, appliedDiscount, { mode: paymentMode, sypAmount: payment.payments.find(row => row.currency === 'SYP')?.amount_minor ?? 0, usdCents: payment.payments.find(row => row.currency === 'USD')?.amount_minor ?? 0 }, lockedRate, activeDraftId ?? undefined);
+      const sale = await state.completeSale(cart, appliedDiscount, { mode: paymentMode, sypAmount: payment.payments.find(row => row.currency === 'SYP')?.amount_minor ?? 0, usdCents: payment.payments.find(row => row.currency === 'USD')?.amount_minor ?? 0 }, lockedRate, activeDraftId ?? undefined, { customerId: selectedCustomerId, onAccountSyp: parsedOnAccount });
       setCart([]);
       setDiscount('');
-      setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setCartExchangeRate(null); setActiveDraftId(null);
+      setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setSelectedCustomerId(null); setOnAccountAmount('0'); setCartExchangeRate(null); setActiveDraftId(null);
       setReviewOpen(false);
       setConfirmOpen(false);
       setCompletedSale(sale);
@@ -152,7 +165,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     savingRef.current = true; setSaving(true);
     try {
       await state.suspendSale(cart, appliedDiscount, cartExchangeRate ?? state.exchangeRate, activeDraftId ?? undefined);
-      setCart([]); setDiscount(''); setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setCartExchangeRate(null); setActiveDraftId(null);
+      setCart([]); setDiscount(''); setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setSelectedCustomerId(null); setOnAccountAmount('0'); setCartExchangeRate(null); setActiveDraftId(null);
       setReviewOpen(false); setSuspendConfirmOpen(false); setCompletedSale(null);
       haptics.success(); snackbar.show({ text: copy.sales.suspendedDone, tone: 'success' });
     } catch (error) {
@@ -173,7 +186,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
         const product = item.product_id == null ? undefined : products.get(item.product_id);
         return { productId: item.product_id, cartKey: item.product_id == null ? `draft:${item.uuid}` : `product:${item.product_id}`, productName: item.product_name, barcodeSnapshot: item.barcode_snapshot, quantity: item.quantity, unitPriceSyp: item.unit_price_syp, unitCostSyp: item.unit_cost_syp, isAvailable: Boolean(product && product.is_active !== 0), availableQuantity: product?.inventory_tracking_enabled ? product.inventory_quantity ?? 0 : undefined };
       });
-      setCart(restored); setDiscount(full.discount_syp ? String(full.discount_syp) : ''); setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true);
+      setCart(restored); setDiscount(full.discount_syp ? String(full.discount_syp) : ''); setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setSelectedCustomerId(null); setOnAccountAmount('0');
       setCartExchangeRate(full.exchange_rate); setActiveDraftId(full.id); setCompletedSale(null); setSection('sale'); setReviewOpen(true); setDraftToResume(null);
       haptics.success();
     } catch (error) {
@@ -194,7 +207,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     const result = buildRepeatedSaleCart(cart, sale, state.products, settings);
     const wasEmpty = cart.length === 0;
     setCart(result.cart); if (wasEmpty) { setDiscount(''); setCartExchangeRate(state.exchangeRate); setActiveDraftId(null); }
-    setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setCompletedSale(null); setSelectedSale(null); setSaleToRepeat(null); setSection('sale');
+    setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setSelectedCustomerId(null); setOnAccountAmount('0'); setCompletedSale(null); setSelectedSale(null); setSaleToRepeat(null); setSection('sale');
     snackbar.show({ text: result.unavailableNames.length ? copy.sales.repeatSummary(formatNumber(result.addedProducts, state.language), formatNumber(result.unavailableNames.length, state.language), result.unavailableNames.slice(0, 2).join('، ')) : copy.sales.repeatAllAdded(formatNumber(result.addedProducts, state.language)), tone: result.unavailableNames.length ? 'info' : 'success' });
   }, [cart, copy.sales, settings, snackbar, state.exchangeRate, state.language, state.products]);
 
@@ -229,8 +242,8 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     } finally { invoiceOpeningRef.current = false; }
   }, [copy.sales.invoiceLoadFailed, snackbar, state]);
 
-  const createReturn = useCallback(async (saleId: number, selections: import('@/types').ReturnSelection[]) => {
-    try { const record = await state.createReturn(saleId, selections); haptics.success(); snackbar.show({ text: copy.sales.returnRecorded, tone: 'success' }); return record; }
+  const createReturn = useCallback(async (saleId: number, selections: import('@/types').ReturnSelection[], customerAccountCreditSyp = 0) => {
+    try { const record = await state.createReturn(saleId, selections, customerAccountCreditSyp); haptics.success(); snackbar.show({ text: copy.sales.returnRecorded, tone: 'success' }); return record; }
     catch (error) { if (__DEV__) console.error('[ReturnCreationFailed]', error); haptics.error(); const required = error instanceof Error && error.message === 'CASH_SESSION_REQUIRED'; snackbar.show({ text: required ? copy.cashSession.cashRequired : copy.sales.returnFailed, tone: required ? 'info' : 'error' }); if (required) { setReturnSale(null); setSection('cash'); } throw error; }
   }, [copy.cashSession.cashRequired, copy.sales.returnFailed, copy.sales.returnRecorded, snackbar, state]);
 
@@ -239,7 +252,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     catch (error) { if (__DEV__) console.error('[ReturnReceiptFailed]', error); snackbar.show({ text: copy.sales.returnPrepareFailed, tone: 'error' }); }
   }, [copy.sales.returnPrepareFailed, copy.sales.returnPrepared, snackbar, state.language]);
 
-  const sectionOptions = [{ value: 'sale' as const, label: copy.sales.newSale }, { value: 'invoices' as const, label: copy.sales.invoices }, { value: 'expenses' as const, label: copy.sales.expenses }, { value: 'analytics' as const, label: copy.sales.analytics }];
+  const sectionOptions = [{ value: 'sale' as const, label: copy.sales.newSale }, { value: 'invoices' as const, label: copy.sales.invoices }, { value: 'customers' as const, label: copy.customer.title }, { value: 'expenses' as const, label: copy.sales.expenses }, { value: 'analytics' as const, label: copy.sales.analytics }];
 
   return <ScreenContainer>
     <View style={styles.page}>
@@ -248,12 +261,13 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
         {section === 'sale' && <NewSaleView products={state.products} settings={settings} cart={cart} completedSale={completedSale} bottomNavigationInset={bottomNavigationInset} sharing={completedSale?.id === sharingSaleId} onAdd={addProduct} onQuantityChange={(id, quantity) => setQuantity(id, quantity)} onQuantityDelta={(id, delta) => changeQuantity(id, delta)} onReviewCart={() => setReviewOpen(true)} onNewSale={() => setCompletedSale(null)} onShare={sale => void shareSale(sale)} onViewDetails={sale => { setSelectedSale(sale); setSection('invoices'); }} onOpenScanner={() => setScannerOpen(true)} />}
         {section === 'suspended' && <SuspendedSalesView drafts={visibleSuspendedSales} language={state.language} bottomNavigationInset={bottomNavigationInset} busyId={draftBusyId} onResume={draft => { if (cart.length) setDraftToResume(draft); else void loadDraftIntoCart(draft, false); }} onDelete={setDraftToDelete} />}
         {section === 'invoices' && <InvoiceHistory language={state.language} bottomNavigationInset={bottomNavigationInset} selectedSale={selectedSale} sharingSaleId={sharingSaleId} revision={state.sales.reduce((sum, sale) => sum + (sale.returns?.length ?? 0), 0)} queryInvoices={state.queryInvoices} onSelect={sale => void openInvoice(sale)} onCloseDetails={() => setSelectedSale(null)} onShare={sale => void shareSale(sale)} onReturn={sale => { setSelectedSale(null); setReturnSale(sale); }} onRepeat={sale => { if (cart.length) setSaleToRepeat(sale); else repeatSale(sale); }} />}
+        {section === 'customers' && <CustomersScreen bottomNavigationInset={bottomNavigationInset} />}
         {section === 'expenses' && <ExpensesView language={state.language} bottomNavigationInset={bottomNavigationInset} hasActiveCashSession={!!state.activeCashSession} onRequireCashSession={() => setSection('cash')} />}
         {section === 'analytics' && <AnalyticsDashboard sales={state.sales} expenses={state.expenses} language={state.language} bottomNavigationInset={bottomNavigationInset} />}
         {section === 'cash' && <CashSessionScreen language={state.language} bottomNavigationInset={bottomNavigationInset} />}
       </Animated.View>
     </View>
-    <CartReviewModal visible={reviewOpen} cart={cart} discount={discount} discountError={discountError} subtotal={subtotal} appliedDiscount={appliedDiscount} total={total} paymentMode={paymentMode} sypAmount={exactPayment ? String(total) : amountPaid} usdAmount={usdAmount} settlement={payment} language={state.language} saving={saving} draftRate={activeDraftId == null ? null : cartExchangeRate} currentRate={state.exchangeRate} onClose={() => setReviewOpen(false)} onDiscountChange={setDiscount} onPaymentModeChange={mode => { setPaymentMode(mode); setAmountPaid(''); setUsdAmount(''); setExactPayment(mode === 'SYP'); }} onSypAmountChange={value => { setExactPayment(false); setAmountPaid(value); }} onUsdAmountChange={setUsdAmount} onExactSyp={() => { setExactPayment(true); setAmountPaid(''); }} onMinimumUsd={() => { const syp = paymentMode === 'MIXED' ? (exactPayment ? total : parseLocalizedNumber(amountPaid)) : 0; const remaining = Math.max(0, total - (Number.isSafeInteger(syp) && syp >= 0 ? syp : 0)); setUsdAmount(formatUsdCents(minimumUsdCentsToCover(remaining, lockedRate)).replace(' USD', '')); }} onQuantityChange={setQuantity} onQuantityDelta={changeQuantity} onRequestComplete={requestComplete} onRequestSuspend={() => setSuspendConfirmOpen(true)} />
+    <CartReviewModal visible={reviewOpen} cart={cart} discount={discount} discountError={discountError} subtotal={subtotal} appliedDiscount={appliedDiscount} total={total} customers={customers} selectedCustomerId={selectedCustomerId} onAccountAmount={onAccountAmount} cashDue={cashDue} paymentMode={paymentMode} sypAmount={exactPayment ? String(cashDue) : amountPaid} usdAmount={usdAmount} settlement={payment} language={state.language} saving={saving} draftRate={activeDraftId == null ? null : cartExchangeRate} currentRate={state.exchangeRate} onClose={() => setReviewOpen(false)} onDiscountChange={setDiscount} onCustomerChange={id => { setSelectedCustomerId(id); setOnAccountAmount('0'); setAmountPaid(''); setUsdAmount(''); setExactPayment(true); }} onAccountAmountChange={value => { setOnAccountAmount(value); setAmountPaid(''); setUsdAmount(''); setExactPayment(true); }} onPaymentModeChange={mode => { setPaymentMode(mode); setAmountPaid(''); setUsdAmount(''); setExactPayment(mode === 'SYP'); }} onSypAmountChange={value => { setExactPayment(false); setAmountPaid(value); }} onUsdAmountChange={setUsdAmount} onExactSyp={() => { setExactPayment(true); setAmountPaid(''); }} onMinimumUsd={() => { const syp = paymentMode === 'MIXED' ? (exactPayment ? cashDue : parseLocalizedNumber(amountPaid)) : 0; const remaining = Math.max(0, cashDue - (Number.isSafeInteger(syp) && syp >= 0 ? syp : 0)); setUsdAmount(formatUsdCents(minimumUsdCentsToCover(remaining, lockedRate)).replace(' USD', '')); }} onQuantityChange={setQuantity} onQuantityDelta={changeQuantity} onRequestComplete={requestComplete} onRequestSuspend={() => setSuspendConfirmOpen(true)} />
     <ConfirmSheet visible={confirmOpen} onClose={() => setConfirmOpen(false)} onConfirm={() => void completeSale()} title={copy.sales.completeTitle} description={copy.sales.itemsLabel(formatNumber(cartItemCount, state.language))} confirmLabel={copy.sales.completeSale} cancelLabel={copy.sales.review} loading={saving} rtl={rtl} icon="check-circle" tone="success"><MonetaryValue value={total} language={state.language} currencyLabel={copy.common.syp} compact={false} /></ConfirmSheet>
     <ConfirmSheet visible={suspendConfirmOpen} onClose={() => setSuspendConfirmOpen(false)} onConfirm={() => void suspendCurrentSale()} title={copy.sales.suspendTitle} description={copy.sales.suspendDescription} confirmLabel={copy.sales.suspendSale} cancelLabel={copy.common.cancel} loading={saving} rtl={rtl} icon="pause-circle" tone="warning" />
     <ConfirmSheet visible={draftToResume !== null} onClose={() => setDraftToResume(null)} onConfirm={() => { if (draftToResume) void loadDraftIntoCart(draftToResume, true); }} title={copy.sales.currentSaleExists} description={copy.sales.suspendDescription} confirmLabel={copy.sales.holdCurrentAndResume} cancelLabel={copy.common.cancel} loading={draftBusyId !== null} rtl={rtl} icon="repeat" tone="warning" />
@@ -272,7 +286,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       return { kind: 'success', title: product.name, quantity: formatNumber(nextQuantity, state.language), amount };
     }} />
     <ProductFormModal visible={unknownProductBarcode !== null} product={null} mode="create" initialSection="identity" initialBarcode={unknownProductBarcode ?? undefined} onClose={() => setUnknownProductBarcode(null)} />
-    <ReturnFlowScreen key={returnSale?.id ?? 'closed'} sale={returnSale} language={state.language} hasActiveCashSession={!!state.activeCashSession} onRequireCashSession={() => { setReturnSale(null); setSection('cash'); snackbar.show({ text: copy.cashSession.cashRequired, tone: 'info' }); }} onClose={() => setReturnSale(null)} onCreate={createReturn} onShare={shareReturn} />
+    <ReturnFlowScreen key={returnSale?.id ?? 'closed'} sale={returnSale} language={state.language} hasActiveCashSession={!!state.activeCashSession} hasCustomerAccount={Boolean(returnSale?.customer_id && customers.some(customer => customer.id === returnSale.customer_id && customer.accounting_enabled === 1))} onRequireCashSession={() => { setReturnSale(null); setSection('cash'); snackbar.show({ text: copy.cashSession.cashRequired, tone: 'info' }); }} onClose={() => setReturnSale(null)} onCreate={createReturn} onShare={shareReturn} />
   </ScreenContainer>;
 }
 

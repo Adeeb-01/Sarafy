@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleItemInput, SaleReturn, Settings, Supplier, SupplierAccountEntry, SupplierAccountHealthReport, SupplierAccountSummary, SupplierInput, SupplierPayment, SupplierPaymentInput, SupplierSort, SuspendedSale, SuspendedSaleSummary } from '@/types';
+import { CashSessionHistoryRow, CashSessionReturnSummary, CashSessionSummary, Customer, CustomerAccountEntry, CustomerAccountHealthReport, CustomerAccountSummary, CustomerInput, CustomerPayment, CustomerPaymentInput, ExchangeRateHistoryEntry, Expense, ExpenseCategory, ExpenseCategoryTotal, ExpensePeriod, ExpenseQuery, InventoryDetail, InventoryHealthReport, InventoryListItem, InventoryMetrics, InventoryQuery, InvoiceQuery, PaymentInput, Product, ProductInput, PurchaseReceipt, PurchaseReceiptInput, PurchaseReceiptQuery, PurchaseReturn, PurchaseReturnInput, PurchaseReturnQuery, ReturnSelection, Sale, SaleAccountInput, SaleItemInput, SaleReturn, Settings, Supplier, SupplierAccountEntry, SupplierAccountHealthReport, SupplierAccountSummary, SupplierInput, SupplierPayment, SupplierPaymentInput, SupplierSort, SuspendedSale, SuspendedSaleSummary } from '@/types';
 import * as database from '@/database/database';
 
 const defaults: Settings = {
@@ -45,8 +45,8 @@ interface AppState extends Settings {
   updateExchangeRate: (value: number) => Promise<ExchangeRateHistoryEntry | null>;
   getExchangeRateHistory: () => Promise<ExchangeRateHistoryEntry[]>;
   refreshSales: () => Promise<void>;
-  completeSale: (items: SaleItemInput[], discountSyp?: number, payment?: PaymentInput | number, exchangeRate?: number, draftId?: number) => Promise<Sale>;
-  createReturn: (saleId: number, selections: ReturnSelection[]) => Promise<SaleReturn>;
+  completeSale: (items: SaleItemInput[], discountSyp?: number, payment?: PaymentInput | number, exchangeRate?: number, draftId?: number, account?: SaleAccountInput) => Promise<Sale>;
+  createReturn: (saleId: number, selections: ReturnSelection[], customerAccountCreditSyp?: number) => Promise<SaleReturn>;
   suspendSale: (items: SaleItemInput[], discountSyp: number, exchangeRate: number, replaceDraftId?: number) => Promise<number>;
   getSuspendedSale: (id: number) => Promise<SuspendedSale | null>;
   deleteSuspendedSale: (id: number) => Promise<void>;
@@ -86,6 +86,17 @@ interface AppState extends Settings {
   getSupplierPaymentDetail: (id: number) => Promise<SupplierPayment | null>;
   createSupplierPayment: (input: SupplierPaymentInput) => Promise<SupplierPayment>;
   auditSupplierAccountHealth: () => Promise<SupplierAccountHealthReport>;
+  getCustomers: (search?: string, includeInactive?: boolean) => Promise<Customer[]>;
+  addCustomer: (input: CustomerInput) => Promise<number>;
+  updateCustomer: (id: number, input: CustomerInput) => Promise<void>;
+  setCustomerActive: (id: number, active: boolean) => Promise<'archived' | 'restored'>;
+  activateCustomerAccount: (id: number, openingBalanceSyp: number) => Promise<CustomerAccountSummary>;
+  getCustomerAccountSummary: (id: number) => Promise<CustomerAccountSummary | null>;
+  getCustomerAccountEntries: (id: number, type?: CustomerAccountEntry['type'] | 'all', limit?: number, from?: string) => Promise<CustomerAccountEntry[]>;
+  getCustomerPayments: (id: number, limit?: number) => Promise<CustomerPayment[]>;
+  getCustomerPaymentDetail: (id: number) => Promise<CustomerPayment | null>;
+  createCustomerPayment: (input: CustomerPaymentInput) => Promise<CustomerPayment>;
+  auditCustomerAccountHealth: () => Promise<CustomerAccountHealthReport>;
   queryPurchaseReceipts: (query?: PurchaseReceiptQuery) => Promise<PurchaseReceipt[]>;
   getPurchaseReceiptDetail: (id: number) => Promise<PurchaseReceipt | null>;
   createPurchaseReceipt: (input: PurchaseReceiptInput) => Promise<PurchaseReceipt>;
@@ -144,13 +155,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     const [sales, expenses] = await Promise.all([database.getSales(), database.getExpenses()]);
     set({ sales, expenses });
   },
-  completeSale: async (items, discountSyp = 0, payment, exchangeRate = get().exchangeRate, draftId) => {
-    const sale = await database.createSale(items, exchangeRate, discountSyp, payment, draftId);
+  completeSale: async (items, discountSyp = 0, payment, exchangeRate = get().exchangeRate, draftId, account) => {
+    const sale = await database.createSale(items, exchangeRate, discountSyp, payment, draftId, account);
     set({ products: await database.getProducts(), sales: [sale, ...get().sales], suspendedSales: draftId == null ? get().suspendedSales : get().suspendedSales.filter(draft => draft.id !== draftId), activeCashSession: await database.getActiveCashSession() });
     return sale;
   },
-  createReturn: async (saleId, selections) => {
-    const record = await database.createSaleReturn(saleId, selections);
+  createReturn: async (saleId, selections, customerAccountCreditSyp) => {
+    const record = await database.createSaleReturn(saleId, selections, customerAccountCreditSyp);
     set({ products: await database.getProducts(), sales: await database.getSales(), activeCashSession: await database.getActiveCashSession() });
     return record;
   },
@@ -225,6 +236,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     return payment;
   },
   auditSupplierAccountHealth: database.auditSupplierAccountHealth,
+  getCustomers: database.getCustomers,
+  addCustomer: database.addCustomer,
+  updateCustomer: database.updateCustomer,
+  setCustomerActive: database.setCustomerActive,
+  activateCustomerAccount: database.activateCustomerAccount,
+  getCustomerAccountSummary: database.getCustomerAccountSummary,
+  getCustomerAccountEntries: database.getCustomerAccountEntries,
+  getCustomerPayments: database.getCustomerPayments,
+  getCustomerPaymentDetail: database.getCustomerPaymentDetail,
+  createCustomerPayment: async input => { const payment = await database.createCustomerPayment(input); set({ activeCashSession: await database.getActiveCashSession() }); return payment; },
+  auditCustomerAccountHealth: database.auditCustomerAccountHealth,
   queryPurchaseReceipts: database.queryPurchaseReceipts,
   getPurchaseReceiptDetail: database.getPurchaseReceiptDetail,
   createPurchaseReceipt: async input => {

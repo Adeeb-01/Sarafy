@@ -64,8 +64,8 @@ export function calculateSettlement(totalSyp: number, rateSypPerUsd: number, raw
   const remainingSyp = Math.max(0, totalSyp - totalTenderEquivalentSyp);
   const changeSyp = Math.max(0, totalTenderEquivalentSyp - totalSyp);
   const payments: PaymentSettlement['payments'] = [];
-  if (input.mode !== 'USD') payments.push({ currency: 'SYP', amount_minor: input.sypAmount, syp_equivalent: input.sypAmount, exchange_rate_syp_per_usd: null });
-  if (input.mode !== 'SYP') payments.push({ currency: 'USD', amount_minor: input.usdCents, syp_equivalent: usdEquivalent, exchange_rate_syp_per_usd: rateSypPerUsd });
+  if (input.mode !== 'USD' && input.sypAmount > 0) payments.push({ currency: 'SYP', amount_minor: input.sypAmount, syp_equivalent: input.sypAmount, exchange_rate_syp_per_usd: null });
+  if (input.mode !== 'SYP' && input.usdCents > 0) payments.push({ currency: 'USD', amount_minor: input.usdCents, syp_equivalent: usdEquivalent, exchange_rate_syp_per_usd: rateSypPerUsd });
   return { mode: input.mode, payments, totalTenderEquivalentSyp, changeSyp, remainingSyp, valid: remainingSyp === 0 };
 }
 

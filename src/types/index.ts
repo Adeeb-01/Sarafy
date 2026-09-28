@@ -64,6 +64,11 @@ export interface PaymentInput {
   usdCents: number;
 }
 
+export interface SaleAccountInput {
+  customerId: number | null;
+  onAccountSyp: number;
+}
+
 export interface PaymentSettlement {
   mode: PaymentMode;
   payments: Array<Omit<SalePayment, 'id' | 'uuid' | 'sale_id' | 'created_at'>>;
@@ -97,6 +102,7 @@ export interface SaleReturn {
   updated_at: string;
   cash_session_id?: number | null;
   cash_session_uuid?: string | null;
+  customer_account_credit_syp: number;
   items: SaleReturnItem[];
 }
 
@@ -124,12 +130,110 @@ export interface Sale {
   updated_at: string;
   cash_session_id?: number | null;
   cash_session_uuid?: string | null;
+  customer_id?: number | null;
+  customer_uuid_snapshot?: string | null;
+  customer_name_snapshot?: string | null;
+  on_account_syp?: number;
   items: SaleItem[];
   item_count?: number;
   line_count?: number;
   returns?: SaleReturn[];
   return_summary?: SaleReturnSummary;
   payments?: SalePayment[];
+}
+
+export interface Customer {
+  id: number;
+  uuid: string;
+  name: string;
+  phone: string | null;
+  note: string | null;
+  is_active: number;
+  accounting_enabled: number;
+  accounting_started_at: string | null;
+  created_at: string;
+  updated_at: string;
+  balance_syp?: number | null;
+  sale_count?: number;
+  latest_sale_at?: string | null;
+}
+
+export type CustomerInput = Pick<Customer, 'name' | 'phone' | 'note'>;
+export type CustomerAccountEntryType = 'opening' | 'sale' | 'sale_return' | 'payment';
+
+export interface CustomerAccountEntry {
+  id: number;
+  uuid: string;
+  customer_id: number;
+  type: CustomerAccountEntryType;
+  delta_syp: number;
+  occurred_at: string;
+  created_at: string;
+  customer_name_snapshot: string;
+  sale_id: number | null;
+  sale_return_id: number | null;
+  customer_payment_id: number | null;
+  note_snapshot: string | null;
+  reference?: string | null;
+  running_balance_syp?: number;
+}
+
+export interface CustomerPaymentTender {
+  id: number;
+  uuid: string;
+  customer_payment_id: number;
+  currency: PaymentCurrency;
+  amount_minor: number;
+  syp_equivalent: number;
+  exchange_rate_syp_per_usd: number | null;
+  created_at: string;
+}
+
+export interface CustomerPayment {
+  id: number;
+  uuid: string;
+  customer_id: number;
+  cash_session_id: number;
+  payment_mode: PaymentMode;
+  total_syp_equivalent: number;
+  exchange_rate_syp_per_usd: number | null;
+  customer_name_snapshot: string;
+  note: string | null;
+  occurred_at: string;
+  created_at: string;
+  balance_after_syp: number;
+  tenders?: CustomerPaymentTender[];
+}
+
+export interface CustomerPaymentInput {
+  customerId: number;
+  mode: PaymentMode;
+  sypAmount: number;
+  usdCents: number;
+  note?: string | null;
+}
+
+export interface CustomerAccountSummary {
+  customer: Customer;
+  balanceSyp: number;
+  openingSyp: number;
+  salesSyp: number;
+  returnsSyp: number;
+  paymentsSyp: number;
+}
+
+export interface CustomerAccountHealthReport {
+  activeWithoutBalance: number;
+  inactiveWithState: number;
+  balanceMismatches: number;
+  duplicateSources: number;
+  invalidEntries: number;
+  paymentsWithoutTender: number;
+  orphanTenders: number;
+  paymentTotalMismatches: number;
+  invalidTenders: number;
+  invalidReturnSplits: number;
+  cashSessionMismatches: number;
 }
 
 export interface ReturnableSaleItem extends SaleItem {
@@ -528,6 +632,8 @@ export interface CashSession {
   closing_change_given_syp: number | null;
   closing_supplier_payments_syp: number;
   closing_supplier_payments_usd_cents: number;
+  closing_customer_payments_syp: number;
+  closing_customer_payments_usd_cents: number;
   opening_note: string | null;
   closing_note: string | null;
   created_at: string;
@@ -548,6 +654,8 @@ export interface CashSessionSummary extends CashSession {
   expected_cash_usd_cents: number;
   supplier_payments_syp: number;
   supplier_payments_usd_cents: number;
+  customer_payments_syp: number;
+  customer_payments_usd_cents: number;
 }
 
 export type CashSessionHistoryRow = Pick<CashSession,
