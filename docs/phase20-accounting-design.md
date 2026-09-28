@@ -2,9 +2,9 @@
 
 ## Status
 
-DESIGN BLOCKED — ACCOUNTING POLICY DECISION REQUIRED
+DESIGN APPROVED — READY FOR SCHEMA v19
 
-No schema v19 migration or posting engine has been created. The current source remains at schema v18. This gate records only facts that can be proved from the current database and transaction paths; it does not invent inventory valuation, foreign-currency carrying values, or cash-continuity semantics.
+All original and follow-up accounting policy gaps are resolved below. No schema v19 migration or posting engine has been created yet; the current source remains at schema v18 until this design is committed independently.
 
 ## Scope and Evidence
 
@@ -157,102 +157,171 @@ Sales, customer payments, supplier payments, and expenses require an active sess
 
 Cash-session closing differences are documentary only. Closing updates the `cash_sessions` row with expected, actual, and difference snapshots (`database.ts:2140-2152`). It does not mutate a persistent cash balance, create an expense/income record, affect the next opening, or post any other operational transaction.
 
-## Mandatory Stop Findings
+## Approved Accounting Policies
 
-All five mandatory stop conditions are unresolved by existing evidence.
+### Functional currency and immutable journal
 
-### 1. Inventory accounting value — unresolved
+- The GL functional currency is SYP and every GL amount is integer SYP.
+- USD operational values remain integer cents. Conversion must use deterministic `BigInt` arithmetic.
+- Every posted journal balances exactly. Each line has exactly one positive side.
+- Posted entries and lines are immutable. Corrections require a linked reversal and replacement; arbitrary manual journals are out of scope.
+- A unique source identity prevents a second journal for the same operational source.
 
-The system cannot derive a defensible functional-currency inventory asset from its quantity ledger. Existing purchase data lacks SYP value, while sale COGS snapshots are based on mutable product cost rather than inventory-layer depletion.
+### Cutover
 
-Decision required:
+- Migration v18 to v19 creates structures only, leaves accounting disabled, and creates no historical journals or inferred values.
+- Activation is explicit and is blocked while a cash session is open.
+- The user must confirm cash SYP, native/carrying USD cash, customer AR/credit controls, each supplier payable/advance native and carrying position, every tracked product quantity/value, and the current rate.
+- Exactly one balanced opening journal is created. `OPENING_EQUITY` is the sole final balancing amount; temporary P&L accounts cannot be used as plugs.
+- Pre-cutover operational history remains immutable and legitimately has no GL journal.
 
-- the post-cutover costing method (FIFO, perpetual weighted average, standard cost, or another explicit method);
-- treatment of opening tracked quantities and manually adjusted quantities;
-- treatment of customer restocks and supplier returns;
-- whether pre-cutover inventory receives an explicitly entered opening SYP valuation or remains outside GL until valued.
+### Inventory valuation
 
-### 2. USD cash carrying value — unresolved
+- Post-cutover method: perpetual moving weighted average in integer SYP.
+- `inventory_balances` remains the quantity authority; separate balance and immutable valuation-movement records hold accounting quantity and carrying value.
+- Existing tracked stock receives an explicitly confirmed opening SYP value per product; zero quantity requires zero value and untracked products receive no valuation.
+- Outflows use proportional `BigInt` relief and remove all remaining value on full depletion.
+- Purchases add translated historical SYP value; sales relieve moving-average value as separate GL COGS evidence without changing operational sale cost snapshots.
+- A post-cutover customer restock restores the original accounting COGS allocation, not current average. Supplier returns and manual decreases relieve current moving-average value.
+- Manual increases require an explicitly confirmed SYP value; product-master `cost_usd` is only a suggestion and never mutates accounting inventory.
+- Manual decreases post Inventory Adjustment Loss; increases post Inventory Adjustment Gain.
+- Supplier-return differences between inventory relief and liability/advance relief post to Inventory Valuation Variance.
 
-The system knows physical USD cents and transaction-time conversions for USD sales/customer receipts, but it has no carrying-value ledger for USD on hand. Direct USD opening cash and direct USD supplier payments have no SYP basis.
+### Purchase measurement
 
-Decision required:
+- Each new post-cutover purchase snapshots the committed operational exchange rate and immutable header/item SYP accounting values.
+- Pre-cutover receipts keep null accounting rate/value and are never backfilled.
+- A post-cutover purchase posts Inventory against Accounts Payable and creates a receipt-linked supplier liability layer atomically with stock, valuation, subledger, and journal changes.
 
-- how USD cash acquisitions create SYP carrying value;
-- how USD outflows relieve that value (FIFO, weighted average, specific identification, or another policy);
-- how opening USD cash is valued at cutover;
-- when realized FX is recognized and how rounding is handled.
+### Supplier positions and realized FX
 
-### 3. USD supplier-payable carrying value — unresolved
+- The operational supplier account remains canonical signed USD cents.
+- Positive supplier positions use FIFO payable layers with original/remaining native cents and SYP carrying value.
+- Negative supplier positions are presented in the GL as Supplier Advances, never negative AP.
+- Cutover requires explicit native and SYP carrying amounts per nonzero supplier position and creates cutover positions rather than pretending they came from old receipts.
+- Supplier payments relieve payable layers FIFO. SYP consideration is exact SYP cash; USD consideration uses weighted-average USD cash carrying value. Differences against liability carrying value are realized FX gain/loss.
+- A supplier return relieves the related receipt/cutover liability carrying value. Amount beyond remaining liability creates a Supplier Advance rather than resurrecting paid AP.
+- A return against a pre-cutover receipt first relieves the supplier's cutover payable; excess advance uses the current committed rate. Inventory relief remains moving average and any mismatch posts to Inventory Valuation Variance.
+- Changing the operational rate alone creates no journal or unrealized FX.
 
-Supplier balances and entries are canonical USD cents only. Purchases, opening balances, and returns have no SYP carrying value. Paying a USD liability with SYP records a conversion for settlement but does not identify which liability carrying value was relieved.
+### USD cash carrying value
 
-Decision required:
+- Persistent USD cash stores both native cents and SYP carrying value; GL `CASH_USD` holds the carrying SYP amount.
+- Cutover USD native/carrying values are explicitly confirmed.
+- USD sale and customer-payment inflows add their immutable transaction SYP equivalents with no immediate FX.
+- USD outflows use moving weighted-average carrying value with proportional `BigInt` relief and exact full depletion.
+- Realized FX exists only when a settlement compares a liability carrying value with cash consideration carrying value.
 
-- initial SYP carrying value for opening supplier positions;
-- purchase-date SYP recognition policy;
-- how payments and returns relieve payable carrying values;
-- treatment of partial settlements, supplier credits, overpayments, and realized FX.
+### Customer controls
 
-### 4. Purchase accounting exchange-rate semantics — unresolved
+- The customer operational subledger remains signed integer SYP.
+- GL uses separate Accounts Receivable and Customer Credits controls and applies explicit old/new balance zero-crossing calculations.
+- Customer payments are not revenue. SYP increases Cash SYP; USD increases native/carrying USD cash using the payment snapshot; the exact operational SYP effect changes AR/Credit controls.
+- Sales revenue is the immutable net invoice amount. Cash, AR, and Customer Credit lines reflect exact settlement; SYP change reduces Cash SYP. Accounting COGS is posted separately from moving-average inventory.
 
-Purchases do not capture a rate. Applying the current rate later would rewrite history and is not acceptable. The system needs an explicit policy for new purchases and a cutover policy for existing purchase/stock history.
+### Returns and prior-period adjustment
 
-Decision required:
+- A post-cutover customer return posts Sales Returns and its real Cash/AR/Credit settlement. Actual restocking reverses original accounting COGS into Inventory.
+- A post-cutover return against a pre-cutover sale does not distort current Sales Returns or COGS. Real cash/account effects and any restock use the source-limited Prior Period Adjustment account; restock uses immutable historical operational cost evidence.
+- Prior Period Adjustment cannot be used as a general balancing or cash-difference account.
 
-- which rate is snapshotted for new receipts and returns;
-- whether the operational setting is authoritative or the user confirms a transaction rate;
-- deterministic integer conversion/rounding rules;
-- whether supplier returns reverse original receipt SYP value or use return-date value plus FX.
+### Cash control and sessions
 
-### 5. Cash continuity between sessions — unresolved
+- After activation, persistent Cash Control owns book SYP, native USD cents, and USD carrying SYP.
+- Every cash-affecting source atomically updates its operational record, cash-session effect, Cash Control, and GL.
+- The first and every later session opening must equal Cash Control; accounting-disabled behavior remains unchanged.
+- Session close differences remain documentary and create no automatic journal or balance change.
+- Unexplained actual cash cannot silently become the next opening. The operator must post an immutable, reasoned Cash Adjustment.
+- Cash Adjustments are restricted to Owner Contribution, Owner Withdrawal, or Cash Over/Short. USD inflows use current-rate carrying value; USD outflows use moving-average relief. Outflows cannot overdraw Cash Control.
 
-There is no persistent cash balance outside a session and no enforced continuity between closes and openings. Posting every opening as Cash and every close difference without a policy could create arbitrary equity, income, expense, or duplicate cash.
+### Post-cutover account activation
 
-Decision required:
+- Customer or supplier account activation with a nonzero opening balance is blocked after GL cutover.
+- Zero-opening activation remains allowed. Opening Equity is never mutated later to accommodate an operational account.
 
-- whether GL cash persists continuously across shifts or each session is merely a drawer control;
-- whether the next opening must reconcile to the prior actual close;
-- how cash deposited, withdrawn, transferred, or recounted between sessions is documented;
-- whether closing shortages/surpluses post automatically, require confirmation, or remain documentary.
+### Legacy numeric safety
 
-## Accounting Cutover Consequence
+- Every legacy `REAL`-affinity source amount is validated as finite, safe-integer SYP with correct sign before posting.
+- Fractional values abort the entire operational transaction. The GL cannot silently round or truncate them.
 
-A single cutover timestamp alone is insufficient. Safe Phase 20 implementation also needs explicit opening functional-currency balances for any GL-controlled inventory, USD cash, and USD supplier payable/credit positions. Historical operational documents must remain immutable and must not be retro-posted using inferred rates.
+### Reporting and equity
 
-Until the policies above are approved:
+- Trial Balance, account ledger, General Journal, and P&L derive from journal lines, not operational analytics.
+- Current Earnings is a presentation-only sum of temporary GL accounts; no period-close journal is created.
+- Balance Sheet equity presents Opening Equity, Owner Contributions, Owner Drawings, Current Earnings, and Prior Period Adjustment.
+- Balance Sheet is exposed as valid only when all cash, AR/Credit, AP/Advance, inventory, cache, and trial-balance reconciliations pass exactly.
 
-- chart-of-accounts rows and journal tables must not be introduced as if their balances were authoritative;
-- no automated journal posting should be wired into sales, purchases, returns, payments, expenses, or sessions;
-- no trial balance, balance sheet, or realized-FX report can be represented as complete;
-- existing analytics and subledgers remain the authoritative operational views.
+### Portability
 
-## Safe Facts Available for a Later Design
+- Full backup/restore includes authoritative v19 accounting state and rejects unbalanced or inconsistent payloads.
+- Restoring v8-v18 leaves accounting disabled with no invented opening state.
+- Safe Merge skips all GL, valuation, cash-control, supplier-layer, and cash-adjustment history with an explicit operational-finance reason.
+- Excel is report-only for accounting; it cannot import GL history.
 
-Once the missing policies are supplied, these existing snapshots are suitable posting sources without modifying historical documents:
+## Original Five Blockers — Resolution
 
-- SYP sale revenue, discounts, receivables, returns, expenses, and historical sale COGS;
+1. Inventory accounting value: resolved as explicit cutover value plus perpetual moving weighted average in SYP.
+2. USD cash carrying value: resolved as native cents plus weighted-average SYP carrying value.
+3. USD supplier-payable carrying value: resolved as explicit cutover positions plus FIFO receipt-linked payable layers.
+4. Purchase exchange-rate semantics: resolved at the high level as immutable committed-rate snapshots on post-cutover receipts and no backfill.
+5. Cash continuity: resolved through persistent Cash Control, exact session openings, documentary closes, and explicit Cash Adjustments.
+
+## Final Allocation Policies
+
+### Supplier Advance creation and consumption
+
+- Supplier Advances are asset/prepayment positions, never negative AP, revenue, expense, or FX by themselves.
+- Every advance origin creates an immutable FIFO layer preserving supplier, source identity, original/remaining native USD cents, original/remaining SYP carrying value, and timestamp.
+- When a supplier payment crosses AP through zero, native USD-equivalent cents split exactly into payable settlement and advance creation.
+- Payment consideration carrying value is exact SYP tender plus weighted-average USD Cash carrying relief. Mixed tenders are valued independently, summed, and then allocated; there is no arbitrary currency-first order.
+- The total consideration carrying value is split between AP settlement and advance creation by deterministic cumulative `BigInt` proportional allocation using native supplier-account USD-equivalent cents. The final portion receives the exact residual.
+- Only the AP-settlement portion can realize FX by comparing FIFO AP carrying value with its allocated consideration. The advance portion takes its allocated actual cash carrying value and creates no FX.
+- Future purchases consume Supplier Advance layers FIFO before creating new AP. Full layer depletion removes all remaining SYP value; partial depletion uses proportional `BigInt` relief and retains exact residuals.
+- Consumed advance carrying value transfers directly into Inventory (`DR Inventory / CR Supplier Advances`). It is not retranslated at the purchase rate and creates no FX.
+- Only the uncovered native purchase amount is translated at the purchase rate and creates a new AP layer. A partly prepaid purchase's inventory value equals advance carrying value consumed plus new AP carrying value.
+- Return-created advances use the approved receipt/cutover/return-time carrying basis and then behave like every other FIFO advance layer.
+- Advance health requires native and SYP layer sums to equal the supplier-advance control, nonnegative remainders, no zero-native/nonzero-SYP residue, and no duplicate source allocation.
+
+### Purchase conversion and allocation
+
+- Purchase coverage is determined in native USD first: FIFO advances consumed, then uncovered USD becomes AP.
+- The authoritative translated SYP amount for the uncovered AP portion uses `BigInt` half-up conversion of its USD-cent total at the immutable receipt rate.
+- For a receipt without advances, this is the receipt's authoritative translated header amount. For a prepaid receipt, header accounting inventory value is advance carrying value transferred plus the uncovered AP translated value.
+- Native prepaid and unpaid coverage is assigned to receipt lines deterministically by stable insertion sequence/immutable item ID.
+- Translated SYP is allocated to lines using largest remainder: floor each exact numerator divided by 100, rank fractional remainders descending, and break ties by immutable insertion sequence/ID.
+- Advance carrying value is allocated to the covered line portions using deterministic cumulative proportional relief from FIFO layers. Each line's accounting value is its advance basis plus allocated AP basis.
+- Header accounting value and line accounting values are integer, nonnegative, reproducible after restore, and sum exactly.
+- Partial supplier returns use cumulative proportional `BigInt` allocation from immutable original line quantity and accounting line total. Each return receives the new cumulative target minus previously allocated value; full return receives every remaining SYP unit.
+
+### Customer-return physical restock COGS
+
+- Financial return quantity and physical restock quantity remain independent.
+- Each post-cutover sale item preserves original sold quantity, original accounting COGS, cumulative financial returns, cumulative restocked quantity, and cumulative accounting COGS restored.
+- Inventory restoration is based solely on cumulative physical restock quantity, never cumulative financial return quantity.
+- Target cumulative restored COGS is the `BigInt` half-up result of `originalAccountingCogs × cumulativeRestocked / originalQuantity`.
+- The current return restores the new cumulative target minus prior cumulative restored COGS. Full physical restock forces exact restoration of all original accounting COGS.
+- A zero-restock financial return has no inventory or accounting COGS effect.
+- Cumulative restock cannot exceed cumulative financial returns or original sold quantity.
+- Pre-cutover sale returns retain the approved Prior Period Adjustment treatment and use immutable operational historical cost evidence rather than a Phase 20 sale allocation.
+
+### Centralized arithmetic
+
+Pure centralized helpers must implement half-up ratios, cumulative proportional allocation, largest-remainder allocation, and full-depletion residual handling. Transaction functions cannot define independent rounding variants. Tests must cover equal remainders, safe-integer boundaries, multi-line purchases, staged supplier returns, staged restocks, and final exact depletion.
+
+## Safe Facts Available to the Later Implementation
+
+The approved allocation policies allow these existing snapshots to serve as posting sources without modifying historical documents:
+
+- SYP sale revenue, discounts, receivables, returns, expenses, and historical operational sale COGS;
 - native and converted sale/customer-payment tenders;
 - native USD purchase, supplier-return, supplier-account, and supplier-payment values;
 - immutable transaction UUIDs and unique source links for idempotent journal posting;
 - cash-session transaction membership and immutable close snapshots.
 
-They are necessary source facts, but they do not resolve the five blocked accounting policies.
-
-## Required Policy Decisions Before Schema v19
-
-Phase 20 can resume only after an explicit answer to each of these questions:
-
-1. Which perpetual inventory valuation method will Sarafy use after cutover, and what SYP opening value applies to existing stock?
-2. Which method assigns and relieves SYP carrying value for physical USD cash, including opening USD?
-3. How are USD supplier payables initially measured in SYP and subsequently relieved by returns/payments, including realized FX?
-4. Which exchange rate and rounding rule is snapshotted for each new purchase, and do returns reverse original SYP cost or use return-date measurement?
-5. Is business cash continuous across sessions? If yes, what documents inter-session additions/removals and how do close variances post?
-
-Secondary presentation decisions will also be needed for negative customer balances (customer credit) and negative supplier balances (supplier credit), but those do not repair the five missing measurement policies above.
-
 ## Gate Result
 
-Schema remains v18. No migration, chart of accounts, journal, posting engine, reporting UI, backup shape, or accounting PDF/Excel output has been implemented in Phase 20.
+The design is internally complete for opening inventory, purchase measurement and rounding, Supplier Advances and AP settlement, Realized FX, USD Cash, supplier returns, sale COGS, customer-return restocking, manual adjustments, Cash Control/sessions, cross-cutover returns, post-cutover account activation, Current Earnings, and conditional Balance Sheet presentation.
 
-**DESIGN BLOCKED — ACCOUNTING POLICY DECISION REQUIRED**
+Schema remains v18 until the independent design approval commit is created. No migration or implementation code is part of this design gate.
+
+**DESIGN APPROVED — READY FOR SCHEMA v19**
