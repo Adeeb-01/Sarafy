@@ -4,7 +4,7 @@
 
 DESIGN APPROVED — READY FOR SCHEMA v19
 
-All valuation, allocation, and zero-cutover policies are now explicit. No schema v19 migration or posting engine exists yet; the current source remains at schema v18 until this design approval is committed independently.
+All valuation, allocation, zero-cutover, and value-neutral-source policies are explicit. No schema v19 migration or posting engine exists; the current source remains at schema v18 until this approval is committed independently.
 
 ## Scope and Evidence
 
@@ -172,7 +172,7 @@ Cash-session closing differences are documentary only. Closing updates the `cash
 - Migration v18 to v19 creates structures only, leaves accounting disabled, and creates no historical journals or inferred values.
 - Activation is explicit and is blocked while a cash session is open.
 - The user must confirm cash SYP, native/carrying USD cash, customer AR/credit controls, each supplier payable/advance native and carrying position, every tracked product quantity/value, and the current rate.
-- Exactly one balanced opening journal is created. `OPENING_EQUITY` is the sole final balancing amount; temporary P&L accounts cannot be used as plugs.
+- A nonzero cutover creates exactly one balanced opening journal; a confirmed all-zero cutover creates none and keeps `opening_journal_entry_id` null. For a nonzero cutover, `OPENING_EQUITY` is the sole final balancing amount; temporary P&L accounts cannot be used as plugs.
 - Pre-cutover operational history remains immutable and legitimately has no GL journal.
 
 ### Inventory valuation
@@ -337,10 +337,41 @@ The approved allocation policies allow these existing snapshots to serve as post
 - immutable transaction UUIDs and unique source links for idempotent journal posting;
 - cash-session transaction membership and immutable close snapshots.
 
+## Value-Neutral Source Policy
+
+A post-cutover operational source may create no General Ledger journal only when its complete functional-currency accounting effect is exactly zero. The posting engine derives every approved account consequence first—including Cash SYP, USD Cash carrying SYP, AR, Customer Credits, Inventory, AP, Supplier Advances, Revenue/Returns, COGS, Expenses, valuation variance, inventory gains/losses, realized FX, Prior Period Adjustment, equity cash adjustments, and Cash Over/Short—using the approved integer, allocation, and carrying-value rules. Header value, native currency value, cash value, or revenue alone cannot establish the exemption.
+
+The posting sequence is mandatory:
+
+1. derive and validate the complete accounting effects;
+2. combine each account's final approved effect without improperly netting distinct economic events;
+3. remove zero account deltas;
+4. if no nonzero lines remain, classify the source as `ZERO_EFFECT_NO_JOURNAL`; otherwise create the normal exactly balanced journal.
+
+For a valid zero-effect source:
+
+- no `journal_entry` or `journal_lines` are created;
+- no empty, self-cancelling, nominal, or 1 SYP journal is fabricated;
+- the immutable operational source still commits;
+- quantity movements and valuation evidence still record quantity before/delta/after and a zero SYP value delta when applicable;
+- normal accounting-rate and zero-value snapshots remain preserved where the source model requires them.
+
+Examples include a zero-cost purchase that adds zero carrying value, a zero-revenue/zero-COGS sale, a wholly zero-effect customer or supplier return, and a quantity-only movement in a zero-value inventory pool. A zero-revenue sale with nonzero COGS, a zero-financial return with nonzero restock value, a supplier return with nonzero valuation variance, or any nonzero Cash/control/FX component requires a normal journal.
+
+Positive-amount validation for customer/supplier payments and Cash Adjustments is unchanged. Those sources receive the exemption only if their complete valid accounting outcome is genuinely zero; one zero component never bypasses posting.
+
+Source uniqueness remains operationally authoritative when no journal exists. A nonfinancial status marker is optional and cannot contain debit/credit amounts. The smallest implementation should avoid a marker unless it materially improves idempotency.
+
+The Accounting Health Audit never trusts a stored zero-effect label. For every post-cutover source with no journal, it independently recomputes the complete effect from immutable source snapshots. Absence is valid only when every functional-currency delta is zero; otherwise it raises `MISSING_NONZERO_SOURCE_JOURNAL`. It also rejects empty or zero-valued journals, fabricated nominal/self-cancelling entries, duplicate source journals, nonzero inventory/FX/control/cash effects hidden as zero, and journals contradicting immutable source calculations.
+
+Backup/Restore preserves zero-value sources plus quantity/valuation evidence and never invents journals. After restore the audit independently reproduces the classification. Safe Merge remains isolated from operational GL state and cannot recreate a missing journal.
+
+Deterministic tests must cover zero-cost purchase, zero-revenue sale with zero and nonzero COGS, zero-value returns with zero and nonzero inventory/variance effects, zero-value manual quantity movement, final nonzero depletion residue, backup/restore, fault injection, and header-zero sources whose complete derivation is nonzero.
+
 ## Gate Result
 
-The design is internally complete for opening inventory, zero/nonzero cutover, purchase measurement and rounding, Supplier Advances and AP settlement, Realized FX, USD Cash, supplier returns, sale COGS, customer-return restocking, manual adjustments, Cash Control/sessions, cross-cutover returns, post-cutover account activation, Current Earnings, and conditional Balance Sheet presentation.
+The design is internally complete for opening inventory, zero/nonzero cutover, value-neutral sources, purchase measurement and rounding, Supplier Advances and AP settlement, Realized FX, USD Cash, supplier returns, sale COGS, customer-return restocking, manual adjustments, Cash Control/sessions, cross-cutover returns, post-cutover account activation, Current Earnings, and conditional Balance Sheet presentation.
 
-Schema remains v18 until the independent design approval commit is created. No migration or implementation code is part of this design gate.
+Schema remains v18 until this independent design approval commit is created. No migration or implementation code is part of this design gate.
 
 **DESIGN APPROVED — READY FOR SCHEMA v19**
