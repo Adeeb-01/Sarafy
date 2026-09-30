@@ -64,6 +64,7 @@ test('raw modals are limited to shared sheet infrastructure and full-screen work
     'src/components/sales/ReturnFlowScreen.tsx',
     'src/components/sales/SalesViews.tsx',
     'src/components/ui/BottomSheet.tsx',
+    'src/screens/AccountingScreen.tsx',
     'src/screens/CustomersScreen.tsx',
     'src/screens/InventoryScreen.tsx',
     'src/screens/PurchasesScreen.tsx',

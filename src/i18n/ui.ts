@@ -199,6 +199,7 @@ const ar = {
     save: 'حفظ الحركة', enabled: 'تم تفعيل تتبع المخزون', adjusted: 'تم تحديث المخزون', noTracked: 'لا توجد منتجات متتبعة',
     noTrackedDescription: 'فعّل التتبع لمنتج وحدد كميته الافتتاحية.', noProducts: 'لا توجد منتجات متاحة للتفعيل',
     insufficient: 'الكمية المتاحة غير كافية.', invalid: 'أدخل كمية صحيحة تساوي صفرًا أو أكثر.', failed: 'تعذر تحديث المخزون. لم تتغير البيانات.',
+    accountingValue: 'القيمة المحاسبية بالليرة', accountingValueHint: 'أدخل القيمة الدفترية الكلية لهذه الزيادة. لا تُستخدم تكلفة المنتج الحالية تلقائيًا.', accountingValueRequired: 'أدخل قيمة محاسبية صحيحة تساوي صفرًا أو أكثر.',
     opening: 'رصيد افتتاحي', adjustment: 'تسوية جرد', sale: 'بيع', return: 'مرتجع', purchase: 'استلام شراء', purchase_return: 'إرجاع للمورد', health: 'فحص سلامة المخزون', noIssues: 'دفتر المخزون سليم',
   },
   customer: {
@@ -395,6 +396,7 @@ const en: ShapeOf<typeof ar> = {
     save: 'Save movement', enabled: 'Inventory tracking enabled', adjusted: 'Inventory updated', noTracked: 'No tracked products',
     noTrackedDescription: 'Enable tracking for a product and set its opening quantity.', noProducts: 'No products are available to enable',
     insufficient: 'Available stock is insufficient.', invalid: 'Enter a whole quantity of zero or more.', failed: 'Inventory could not be updated. No data changed.',
+    accountingValue: 'Accounting value in SYP', accountingValueHint: 'Enter the total carrying value for this increase. Current product cost is not applied automatically.', accountingValueRequired: 'Enter a whole accounting value of zero or more.',
     opening: 'Opening balance', adjustment: 'Count adjustment', sale: 'Sale', return: 'Return', purchase: 'Purchase receipt', purchase_return: 'Return to supplier', health: 'Inventory health check', noIssues: 'Inventory ledger is healthy',
   },
   customer: {

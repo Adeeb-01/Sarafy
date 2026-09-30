@@ -95,7 +95,7 @@ test('10k expense and 10k history queries are indexed, deterministic and bounded
 
 test('backup, safe merge and Excel preserve portable expense and rate semantics', async () => {
   const [backup, importer, types, excel] = await Promise.all(['../src/backup/backupManager.ts','../src/import/jsonImporter.ts','../src/import/importTypes.ts','../src/utils/excel.ts'].map(path=>readFile(new URL(path,import.meta.url),'utf8')));
-assert.match(backup,/BACKUP_VERSION = 8/); assert.match(backup,/SCHEMA_VERSION = 18/); assert.match(backup,/expenseCategories/); assert.match(backup,/exchangeRateHistory/); assert.match(types,/expenseCategories\?: ExpenseCategory\[\]/); assert.match(types,/exchangeRateHistory\?: ExchangeRateHistoryEntry\[\]/);
+assert.match(backup,/BACKUP_VERSION = 8/); assert.match(backup,/SCHEMA_VERSION = 19/); assert.match(backup,/expenseCategories/); assert.match(backup,/exchangeRateHistory/); assert.match(types,/expenseCategories\?: ExpenseCategory\[\]/); assert.match(types,/exchangeRateHistory\?: ExchangeRateHistoryEntry\[\]/);
   assert.match(importer,/EXPENSE_CATEGORY_PARENT_MISSING/); assert.match(importer,/SELECT id FROM exchange_rate_history WHERE uuid=\?/); assert.match(importer,/item\.category_uuid \|\| OTHER_EXPENSE_CATEGORY_UUID/); assert.match(excel,/Expense Categories/); assert.match(excel,/Exchange Rate History/); assert.match(excel,/note: expense\.note/);
 });
 
@@ -124,5 +124,5 @@ test('source keeps history read-only and old backup generations optional without
 
 test('application wires SQL expense queries, immutable rate history and virtualized UI', async () => {
   const [database, store, expenseUi, rateUi] = await Promise.all(['../src/database/database.ts','../src/store/useAppStore.ts','../src/components/expenses/ExpensesView.tsx','../src/components/RateHistoryScreen.tsx'].map(path=>readFile(new URL(path,import.meta.url),'utf8')));
-  assert.match(database,/export const SCHEMA_VERSION = 18/); assert.match(database,/withExclusiveTransactionAsync/); assert.match(database,/queryExpenses/); assert.match(database,/getExpenseTotalsByCategory/); assert.match(database,/EXPENSE_CATEGORY_INACTIVE/); assert.match(store,/updateExchangeRate: async/); assert.match(expenseUi,/useDeferredValue/); assert.match(expenseUi,/SegmentedControl/); assert.match(expenseUi,/savingRef/); assert.match(rateUi,/FlatList/); assert.doesNotMatch(database,/UPDATE sales SET exchange_rate/); assert.doesNotMatch(database,/UPDATE sale_drafts SET exchange_rate/);
+  assert.match(database,/export const SCHEMA_VERSION = 19/); assert.match(database,/withExclusiveTransactionAsync/); assert.match(database,/queryExpenses/); assert.match(database,/getExpenseTotalsByCategory/); assert.match(database,/EXPENSE_CATEGORY_INACTIVE/); assert.match(store,/updateExchangeRate: async/); assert.match(expenseUi,/useDeferredValue/); assert.match(expenseUi,/SegmentedControl/); assert.match(expenseUi,/savingRef/); assert.match(rateUi,/FlatList/); assert.doesNotMatch(database,/UPDATE sales SET exchange_rate/); assert.doesNotMatch(database,/UPDATE sale_drafts SET exchange_rate/);
 });

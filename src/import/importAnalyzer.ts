@@ -2,6 +2,7 @@ import { getDatabase, OTHER_EXPENSE_CATEGORY_UUID } from '@/database/database';
 import { ImportIssue, ImportOptions, ImportPayload, ImportPreview } from './importTypes';
 import { isUuid } from '@/utils/uuid';
 import { normalizeBarcode } from '@/utils/barcode';
+import { isValidImportedSalePaymentRows } from '@/utils/customerAccounts';
 
 const emptySummary = () => ({
   newRecords: 0, updatedRecords: 0, unchangedRecords: 0, conflicts: 0,
@@ -19,6 +20,9 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
   const db = await getDatabase();
   const summary = emptySummary();
   const issues: ImportIssue[] = [];
+  if (options.mode !== 'full_restore' && payload.accounting) {
+    issues.push({ entity: 'accounting', row: 0, code: 'GENERAL_LEDGER_SKIPPED_OPERATIONAL_FINANCE', action: 'skipped' });
+  }
   if (options.mode !== 'full_restore' && ((payload.inventoryBalances?.length ?? 0) || (payload.inventoryMovements?.length ?? 0))) {
     issues.push({ entity: 'inventory_balances', row: 0, code: 'OPERATIONAL_STOCK_SKIPPED_SAFE_MERGE', action: 'skipped' });
   }
@@ -267,7 +271,7 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
     }
     const totals = new Map<string, number>();
     for (const payment of payload.salePayments ?? []) totals.set(payment.sale_uuid, (totals.get(payment.sale_uuid) ?? 0) + payment.syp_equivalent);
-    for (const [saleUuid, total] of totals) { const sale = payload.sales.find(row => row.uuid === saleUuid); if (sale && total - (sale.change_syp ?? 0) !== sale.net_total_syp) { summary.conflicts += 1; issues.push({ entity: 'sale_payments', row: 0, value: saleUuid, code: 'PAYMENT_SETTLEMENT_CONFLICT', action: 'review' }); } }
+    for (const [saleUuid, total] of totals) { const sale = payload.sales.find(row => row.uuid === saleUuid); if (sale && !isValidImportedSalePaymentRows(sale.net_total_syp, sale.on_account_syp ?? 0, total, sale.change_syp ?? 0)) { summary.conflicts += 1; issues.push({ entity: 'sale_payments', row: 0, value: saleUuid, code: 'PAYMENT_SETTLEMENT_CONFLICT', action: 'review' }); } }
   }
   if (options.entities.includes('categories')) {
     const local = new Set((await db.getAllAsync<{ uuid: string }>('SELECT uuid FROM categories')).map(row => row.uuid));

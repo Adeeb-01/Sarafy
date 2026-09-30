@@ -38,6 +38,9 @@ export interface SaleItem {
   unit_cost_syp: number;
   line_total_syp: number;
   line_cost_syp: number;
+  accounting_cogs_syp?: number | null;
+  accounting_restocked_quantity?: number;
+  accounting_restored_cogs_syp?: number;
   created_at: string;
   updated_at: string;
   inventory_sale_movement?: number;
@@ -55,6 +58,7 @@ export interface SalePayment {
   amount_minor: number;
   syp_equivalent: number;
   exchange_rate_syp_per_usd: number | null;
+  accounting_cash_carrying_syp?: number | null;
   created_at: string;
 }
 
@@ -86,6 +90,8 @@ export interface SaleReturnItem {
   quantity: number;
   refund_amount_syp: number;
   cost_reversal_syp: number;
+  restock_quantity?: number | null;
+  accounting_restored_cogs_syp?: number | null;
   created_at: string;
   updated_at: string;
   product_name: string;
@@ -186,6 +192,7 @@ export interface CustomerPaymentTender {
   amount_minor: number;
   syp_equivalent: number;
   exchange_rate_syp_per_usd: number | null;
+  accounting_cash_carrying_syp?: number | null;
   created_at: string;
 }
 
@@ -384,6 +391,7 @@ export interface SupplierPaymentTender {
   amount_minor: number;
   usd_equivalent_cents: number;
   exchange_rate_syp_per_usd: number | null;
+  accounting_cash_carrying_syp?: number | null;
   created_at: string;
 }
 
@@ -400,6 +408,10 @@ export interface SupplierPayment {
   occurred_at: string;
   created_at: string;
   balance_after_usd_cents: number;
+  accounting_payable_relief_syp?: number | null;
+  accounting_consideration_syp?: number | null;
+  accounting_advance_created_syp?: number | null;
+  accounting_realized_fx_syp?: number | null;
   tenders?: SupplierPaymentTender[];
 }
 
@@ -445,6 +457,11 @@ export interface PurchaseReceiptItem {
   unit_cost_usd_cents: number;
   line_total_usd_cents: number;
   created_at: string;
+  accounting_line_syp?: number | null;
+  accounting_advance_usd_cents?: number | null;
+  accounting_advance_syp?: number | null;
+  accounting_payable_usd_cents?: number | null;
+  accounting_payable_syp?: number | null;
   returned_quantity?: number;
   remaining_returnable_quantity?: number;
   inventory_quantity?: number;
@@ -461,6 +478,12 @@ export interface PurchaseReceipt {
   note: string | null;
   received_at: string;
   created_at: string;
+  accounting_exchange_rate_syp_per_usd?: number | null;
+  accounting_total_syp?: number | null;
+  accounting_advance_usd_cents?: number | null;
+  accounting_advance_syp?: number | null;
+  accounting_payable_usd_cents?: number | null;
+  accounting_payable_syp?: number | null;
   item_count: number;
   total_quantity: number;
   total_cost_usd_cents: number;
@@ -487,6 +510,10 @@ export interface PurchaseReturnItem {
   unit_cost_usd_cents: number;
   line_total_usd_cents: number;
   created_at: string;
+  accounting_inventory_relief_syp?: number | null;
+  accounting_position_relief_syp?: number | null;
+  accounting_advance_created_syp?: number | null;
+  accounting_variance_syp?: number | null;
 }
 
 export interface PurchaseReturn {
@@ -501,6 +528,11 @@ export interface PurchaseReturn {
   total_value_usd_cents: number;
   reference_number: string | null;
   note: string | null;
+  accounting_exchange_rate_syp_per_usd?: number | null;
+  accounting_inventory_relief_syp?: number | null;
+  accounting_position_relief_syp?: number | null;
+  accounting_advance_created_syp?: number | null;
+  accounting_variance_syp?: number | null;
   items?: PurchaseReturnItem[];
 }
 
@@ -634,6 +666,9 @@ export interface CashSession {
   closing_supplier_payments_usd_cents: number;
   closing_customer_payments_syp: number;
   closing_customer_payments_usd_cents: number;
+  closing_book_cash_syp?: number | null;
+  closing_book_cash_usd_cents?: number | null;
+  closing_book_cash_usd_carrying_syp?: number | null;
   opening_note: string | null;
   closing_note: string | null;
   created_at: string;

@@ -24,3 +24,16 @@ export function isValidImportedSaleSettlement(netTotalSyp: number, onAccountSyp:
   if (!Number.isSafeInteger(netTotalSyp) || netTotalSyp < 0 || !Number.isSafeInteger(onAccountSyp) || onAccountSyp < 0 || onAccountSyp > netTotalSyp) return false;
   return amountPaidSyp == null || (Number.isSafeInteger(amountPaidSyp) && amountPaidSyp >= netTotalSyp - onAccountSyp);
 }
+
+export function isValidImportedSalePaymentRows(
+  netTotalSyp: number,
+  onAccountSyp: number,
+  tenderSyp: number,
+  changeSyp: number,
+) {
+  return Number.isSafeInteger(netTotalSyp) && netTotalSyp >= 0 &&
+    Number.isSafeInteger(onAccountSyp) && onAccountSyp >= 0 && onAccountSyp <= netTotalSyp &&
+    Number.isSafeInteger(tenderSyp) && tenderSyp >= 0 &&
+    Number.isSafeInteger(changeSyp) && changeSyp >= 0 &&
+    tenderSyp - changeSyp + onAccountSyp === netTotalSyp;
+}

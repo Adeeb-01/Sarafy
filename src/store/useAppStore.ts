@@ -71,8 +71,8 @@ interface AppState extends Settings {
   queryInventory: (query?: InventoryQuery) => Promise<InventoryListItem[]>;
   getInventoryMetrics: () => Promise<InventoryMetrics>;
   getInventoryDetail: (productId: number) => Promise<InventoryDetail | null>;
-  enableInventoryTracking: (productId: number, openingQuantity: number, threshold: number | null, note?: string | null) => Promise<void>;
-  adjustInventory: (productId: number, mode: 'stock_in' | 'stock_out' | 'physical_count', quantity: number, note?: string | null) => Promise<void>;
+  enableInventoryTracking: (productId: number, openingQuantity: number, threshold: number | null, note?: string | null, accountingOpeningValueSyp?: number) => Promise<void>;
+  adjustInventory: (productId: number, mode: 'stock_in' | 'stock_out' | 'physical_count', quantity: number, note?: string | null, accountingIncreaseValueSyp?: number) => Promise<void>;
   updateInventoryThreshold: (productId: number, threshold: number | null) => Promise<void>;
   auditInventoryHealth: () => Promise<InventoryHealthReport>;
   getSuppliers: (search?: string, sort?: SupplierSort, includeInactive?: boolean) => Promise<Supplier[]>;

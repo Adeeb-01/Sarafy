@@ -8,10 +8,38 @@ import { DEFAULT_EXPENSE_CATEGORIES, OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/
 import { calculateSettlement } from '@/utils/multiCurrency';
 import { calculateSupplierPaymentEquivalent } from '@/utils/supplierAccounts';
 import { calculateCustomerPaymentEquivalent } from '@/utils/customerAccounts';
+import { ACCOUNTING_V19_SCHEMA_SQL, SYSTEM_ACCOUNTS } from '@/accounting/accountingSchema';
+import {
+  accountingIsEnabled,
+  addCashUsd,
+  activateAccountingCutover,
+  AccountingCutoverInput,
+  changeCashSyp,
+  consumeSupplierPositionLayers,
+  createSupplierPositionLayer,
+  postJournalEntry,
+  recordInventoryValueChange,
+  removeCashUsd,
+  relieveInventoryValue,
+  signedControlTransitionLines,
+} from '@/accounting/accountingCore';
+import type { JournalLineInput } from '@/accounting/accountingCore';
+import { allocateIntegerByLargestRemainder, allocatePurchaseSypByLargestRemainder, incrementalHalfUpAllocation, splitCarryingValueAtZero, usdCentsToSyp } from '@/accounting/accountingMath';
+import {
+  auditAccountingHealth as auditAccountingHealthReport,
+  buildAccountingReconciliation,
+  buildAccountLedger,
+  buildBalanceSheet,
+  buildProfitAndLoss,
+  buildTrialBalance,
+  readAccountingSettings,
+  readGeneralJournal,
+  readJournalDetail,
+} from '@/accounting/accountingReports';
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 18;
+export const SCHEMA_VERSION = 19;
 
 export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
@@ -645,6 +673,104 @@ async function migrateCustomerAccountsV18() {
   });
 }
 
+async function addColumnsIfMissing(
+  transaction: SQLite.SQLiteDatabase,
+  table: string,
+  additions: readonly (readonly [name: string, definition: string])[],
+) {
+  const columns = await transaction.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);
+  const existing = new Set(columns.map(column => column.name));
+  for (const [name, definition] of additions) {
+    if (!existing.has(name)) await transaction.execAsync(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  }
+}
+
+async function migrateAccountingCoreV19() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 19) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    await addColumnsIfMissing(transaction, 'purchase_receipts', [
+      ['accounting_exchange_rate_syp_per_usd', 'INTEGER CHECK(accounting_exchange_rate_syp_per_usd IS NULL OR accounting_exchange_rate_syp_per_usd>0)'],
+      ['accounting_total_syp', 'INTEGER CHECK(accounting_total_syp IS NULL OR accounting_total_syp>=0)'],
+      ['accounting_advance_usd_cents', 'INTEGER CHECK(accounting_advance_usd_cents IS NULL OR accounting_advance_usd_cents>=0)'],
+      ['accounting_advance_syp', 'INTEGER CHECK(accounting_advance_syp IS NULL OR accounting_advance_syp>=0)'],
+      ['accounting_payable_usd_cents', 'INTEGER CHECK(accounting_payable_usd_cents IS NULL OR accounting_payable_usd_cents>=0)'],
+      ['accounting_payable_syp', 'INTEGER CHECK(accounting_payable_syp IS NULL OR accounting_payable_syp>=0)'],
+    ]);
+    await addColumnsIfMissing(transaction, 'purchase_receipt_items', [
+      ['accounting_line_syp', 'INTEGER CHECK(accounting_line_syp IS NULL OR accounting_line_syp>=0)'],
+      ['accounting_advance_usd_cents', 'INTEGER CHECK(accounting_advance_usd_cents IS NULL OR accounting_advance_usd_cents>=0)'],
+      ['accounting_advance_syp', 'INTEGER CHECK(accounting_advance_syp IS NULL OR accounting_advance_syp>=0)'],
+      ['accounting_payable_usd_cents', 'INTEGER CHECK(accounting_payable_usd_cents IS NULL OR accounting_payable_usd_cents>=0)'],
+      ['accounting_payable_syp', 'INTEGER CHECK(accounting_payable_syp IS NULL OR accounting_payable_syp>=0)'],
+    ]);
+    await addColumnsIfMissing(transaction, 'purchase_returns', [
+      ['accounting_exchange_rate_syp_per_usd', 'INTEGER CHECK(accounting_exchange_rate_syp_per_usd IS NULL OR accounting_exchange_rate_syp_per_usd>0)'],
+      ['accounting_inventory_relief_syp', 'INTEGER CHECK(accounting_inventory_relief_syp IS NULL OR accounting_inventory_relief_syp>=0)'],
+      ['accounting_position_relief_syp', 'INTEGER CHECK(accounting_position_relief_syp IS NULL OR accounting_position_relief_syp>=0)'],
+      ['accounting_advance_created_syp', 'INTEGER CHECK(accounting_advance_created_syp IS NULL OR accounting_advance_created_syp>=0)'],
+      ['accounting_variance_syp', 'INTEGER'],
+    ]);
+    await addColumnsIfMissing(transaction, 'purchase_return_items', [
+      ['accounting_inventory_relief_syp', 'INTEGER CHECK(accounting_inventory_relief_syp IS NULL OR accounting_inventory_relief_syp>=0)'],
+      ['accounting_position_relief_syp', 'INTEGER CHECK(accounting_position_relief_syp IS NULL OR accounting_position_relief_syp>=0)'],
+      ['accounting_advance_created_syp', 'INTEGER CHECK(accounting_advance_created_syp IS NULL OR accounting_advance_created_syp>=0)'],
+      ['accounting_variance_syp', 'INTEGER'],
+    ]);
+    await addColumnsIfMissing(transaction, 'sale_items', [
+      ['accounting_cogs_syp', 'INTEGER CHECK(accounting_cogs_syp IS NULL OR accounting_cogs_syp>=0)'],
+      ['accounting_restocked_quantity', 'INTEGER NOT NULL DEFAULT 0 CHECK(accounting_restocked_quantity>=0)'],
+      ['accounting_restored_cogs_syp', 'INTEGER NOT NULL DEFAULT 0 CHECK(accounting_restored_cogs_syp>=0)'],
+    ]);
+    await addColumnsIfMissing(transaction, 'sale_return_items', [
+      ['restock_quantity', 'INTEGER CHECK(restock_quantity IS NULL OR restock_quantity>=0)'],
+      ['accounting_restored_cogs_syp', 'INTEGER CHECK(accounting_restored_cogs_syp IS NULL OR accounting_restored_cogs_syp>=0)'],
+    ]);
+    await addColumnsIfMissing(transaction, 'sale_payments', [
+      ['accounting_cash_carrying_syp', 'INTEGER CHECK(accounting_cash_carrying_syp IS NULL OR accounting_cash_carrying_syp>=0)'],
+    ]);
+    await addColumnsIfMissing(transaction, 'customer_payment_tenders', [
+      ['accounting_cash_carrying_syp', 'INTEGER CHECK(accounting_cash_carrying_syp IS NULL OR accounting_cash_carrying_syp>=0)'],
+    ]);
+    await addColumnsIfMissing(transaction, 'supplier_payments', [
+      ['accounting_payable_relief_syp', 'INTEGER CHECK(accounting_payable_relief_syp IS NULL OR accounting_payable_relief_syp>=0)'],
+      ['accounting_consideration_syp', 'INTEGER CHECK(accounting_consideration_syp IS NULL OR accounting_consideration_syp>=0)'],
+      ['accounting_advance_created_syp', 'INTEGER CHECK(accounting_advance_created_syp IS NULL OR accounting_advance_created_syp>=0)'],
+      ['accounting_realized_fx_syp', 'INTEGER'],
+    ]);
+    await addColumnsIfMissing(transaction, 'supplier_payment_tenders', [
+      ['accounting_cash_carrying_syp', 'INTEGER CHECK(accounting_cash_carrying_syp IS NULL OR accounting_cash_carrying_syp>=0)'],
+    ]);
+    await addColumnsIfMissing(transaction, 'cash_sessions', [
+      ['closing_book_cash_syp', 'INTEGER CHECK(closing_book_cash_syp IS NULL OR closing_book_cash_syp>=0)'],
+      ['closing_book_cash_usd_cents', 'INTEGER CHECK(closing_book_cash_usd_cents IS NULL OR closing_book_cash_usd_cents>=0)'],
+      ['closing_book_cash_usd_carrying_syp', 'INTEGER CHECK(closing_book_cash_usd_carrying_syp IS NULL OR closing_book_cash_usd_carrying_syp>=0)'],
+    ]);
+    await transaction.execAsync(ACCOUNTING_V19_SCHEMA_SQL);
+    const now = new Date().toISOString();
+    for (const account of SYSTEM_ACCOUNTS) {
+      const result = await transaction.runAsync(
+        `INSERT INTO gl_accounts(uuid,code,system_key,name_ar,name_en,account_type,normal_side,is_system,active,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,1,1,?,?)`,
+        createDeterministicUuid(`gl-account:${account.systemKey}`), account.code, account.systemKey,
+        account.nameAr, account.nameEn, account.accountType, account.normalSide, now, now,
+      );
+      await transaction.runAsync(
+        'INSERT INTO gl_account_balances(account_id,debit_total_syp,credit_total_syp,net_balance_syp,updated_at) VALUES(?,0,0,0,?)',
+        result.lastInsertRowId, now,
+      );
+    }
+    await transaction.runAsync(
+      `INSERT INTO accounting_settings(id,accounting_enabled,accounting_started_at,functional_currency,cutover_exchange_rate_syp_per_usd,opening_journal_entry_id,created_at,updated_at)
+       VALUES(1,0,NULL,'SYP',NULL,NULL,?,?)`,
+      now, now,
+    );
+    await transaction.execAsync('PRAGMA user_version = 19');
+  });
+}
+
 export async function initializeDatabase() {
   const db = await dbPromise;
   await db.execAsync(`
@@ -720,6 +846,7 @@ export async function initializeDatabase() {
   await migratePurchaseReturnsV16();
   await migrateSupplierAccountsV17();
   await migrateCustomerAccountsV18();
+  await migrateAccountingCoreV19();
   await db.runAsync(`DELETE FROM sale_draft_items
     WHERE NOT EXISTS (SELECT 1 FROM sale_drafts WHERE sale_drafts.id=sale_draft_items.draft_id)`);
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
@@ -739,6 +866,110 @@ export async function initializeDatabase() {
     }
   }
   await cleanupTemporaryProductImages();
+}
+
+export async function activateAccounting(input: AccountingCutoverInput) {
+  const db = await dbPromise;
+  let result: Awaited<ReturnType<typeof activateAccountingCutover>> | undefined;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    result = await activateAccountingCutover(transaction, input);
+  });
+  if (!result) throw new Error('ACCOUNTING_CUTOVER_FAILED');
+  return result;
+}
+
+export const getAccountingSettings = async () => readAccountingSettings(await dbPromise);
+export const getGeneralJournal = async (input: Parameters<typeof readGeneralJournal>[1] = {}) => readGeneralJournal(await dbPromise, input);
+export const getJournalDetail = async (id: number) => readJournalDetail(await dbPromise, id);
+export const getAccountLedger = async (accountId: number, input: Parameters<typeof buildAccountLedger>[2] = {}) => buildAccountLedger(await dbPromise, accountId, input);
+export const getTrialBalance = async (asOf?: string | null) => buildTrialBalance(await dbPromise, asOf);
+export const getProfitAndLoss = async (input: Parameters<typeof buildProfitAndLoss>[1] = {}) => buildProfitAndLoss(await dbPromise, input);
+export const getBalanceSheet = async (asOf?: string | null) => buildBalanceSheet(await dbPromise, asOf);
+export const auditAccountingHealth = async () => auditAccountingHealthReport(await dbPromise);
+export const getAccountingReconciliation = async () => buildAccountingReconciliation(await dbPromise);
+
+export interface AccountingCutoverPreview {
+  activeCashSession: boolean;
+  currentExchangeRateSypPerUsd: number;
+  customers: Array<{ customerId: number; customerUuid: string; customerName: string; balanceSyp: number }>;
+  suppliers: Array<{ supplierId: number; supplierUuid: string; supplierName: string; balanceUsdCents: number }>;
+  inventory: Array<{ productId: number; productUuid: string; productName: string; quantity: number; currentCostUsd: number }>;
+}
+
+export async function getAccountingCutoverPreview(): Promise<AccountingCutoverPreview> {
+  const db = await dbPromise;
+  const [settings, activeSession, customers, suppliers, inventory] = await Promise.all([
+    db.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='exchangeRate'"),
+    db.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1'),
+    db.getAllAsync<{ customer_id: number; uuid: string; name: string; balance_syp: number }>(`SELECT b.customer_id,c.uuid,c.name,b.balance_syp FROM customer_account_balances b JOIN customers c ON c.id=b.customer_id ORDER BY c.name COLLATE NOCASE,c.id`),
+    db.getAllAsync<{ supplier_id: number; uuid: string; name: string; balance_usd_cents: number }>(`SELECT b.supplier_id,s.uuid,s.name,b.balance_usd_cents FROM supplier_account_balances b JOIN suppliers s ON s.id=b.supplier_id ORDER BY s.name COLLATE NOCASE,s.id`),
+    db.getAllAsync<{ product_id: number; uuid: string; name: string; quantity: number; cost_usd: number }>(`SELECT b.product_id,p.uuid,p.name,b.quantity,p.cost_usd FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE b.tracking_enabled=1 ORDER BY p.name COLLATE NOCASE,p.id`),
+  ]);
+  const parsed: unknown = settings ? JSON.parse(settings.value) : 15000;
+  if (!Number.isSafeInteger(parsed) || (parsed as number) <= 0) throw new Error('INVALID_EXCHANGE_RATE');
+  return {
+    activeCashSession: !!activeSession,
+    currentExchangeRateSypPerUsd: parsed as number,
+    customers: customers.map(row => ({ customerId: row.customer_id, customerUuid: row.uuid, customerName: row.name, balanceSyp: row.balance_syp })),
+    suppliers: suppliers.map(row => ({ supplierId: row.supplier_id, supplierUuid: row.uuid, supplierName: row.name, balanceUsdCents: row.balance_usd_cents })),
+    inventory: inventory.map(row => ({ productId: row.product_id, productUuid: row.uuid, productName: row.name, quantity: row.quantity, currentCostUsd: row.cost_usd })),
+  };
+}
+
+export async function getAccountingCashControl() {
+  const db = await dbPromise;
+  return db.getFirstAsync<{ cash_syp: number; cash_usd_cents: number; cash_usd_carrying_syp: number; updated_at: string }>('SELECT cash_syp,cash_usd_cents,cash_usd_carrying_syp,updated_at FROM cash_control WHERE id=1');
+}
+
+export type CashAdjustmentReason = 'OWNER_CONTRIBUTION' | 'OWNER_WITHDRAWAL' | 'CASH_OVER' | 'CASH_SHORT';
+export interface CashAdjustmentInput { currency: 'SYP' | 'USD'; amountMinor: number; reason: CashAdjustmentReason; note?: string | null }
+
+export async function createCashAdjustment(input: CashAdjustmentInput) {
+  if (!Number.isSafeInteger(input.amountMinor) || input.amountMinor === 0) throw new Error('INVALID_CASH_ADJUSTMENT_AMOUNT');
+  const inflow = input.reason === 'OWNER_CONTRIBUTION' || input.reason === 'CASH_OVER';
+  if ((inflow && input.amountMinor < 0) || (!inflow && input.amountMinor > 0)) throw new Error('CASH_ADJUSTMENT_DIRECTION_MISMATCH');
+  const note = normalizeOptionalText(input.note, 240); const db = await dbPromise; let id = 0;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    if (!await accountingIsEnabled(transaction)) throw new Error('ACCOUNTING_NOT_ENABLED');
+    if (await transaction.getFirstAsync('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1')) throw new Error('CASH_ADJUSTMENT_ACTIVE_SESSION');
+    const now = new Date().toISOString(); const magnitude = Math.abs(input.amountMinor);
+    let carryingValueSyp: number; let exchangeRateSypPerUsd: number | null = null; let cashLine: JournalLineInput;
+    if (input.currency === 'SYP') {
+      carryingValueSyp = magnitude;
+      cashLine = await changeCashSyp(transaction, input.amountMinor, now);
+    } else {
+      const rateRow = await transaction.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='exchangeRate'");
+      const parsed: unknown = rateRow ? JSON.parse(rateRow.value) : null;
+      if (!Number.isSafeInteger(parsed) || (parsed as number) <= 0) throw new Error('INVALID_EXCHANGE_RATE');
+      exchangeRateSypPerUsd = parsed as number;
+      if (inflow) {
+        carryingValueSyp = usdCentsToSyp(magnitude, exchangeRateSypPerUsd);
+        if (carryingValueSyp <= 0) throw new Error('INVALID_CASH_ADJUSTMENT_AMOUNT');
+        cashLine = await addCashUsd(transaction, magnitude, carryingValueSyp, exchangeRateSypPerUsd, now);
+      } else {
+        const removed = await removeCashUsd(transaction, magnitude, exchangeRateSypPerUsd, now);
+        carryingValueSyp = removed.carryingReliefSyp;
+        if (carryingValueSyp <= 0) throw new Error('INVALID_CASH_ADJUSTMENT_AMOUNT');
+        cashLine = removed.line;
+      }
+    }
+    const adjustmentUuid = createUuid();
+    const inserted = await transaction.runAsync(`INSERT INTO cash_adjustments(uuid,currency,amount_minor,carrying_value_syp,exchange_rate_syp_per_usd,reason,note,occurred_at,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?)`, adjustmentUuid, input.currency, input.amountMinor, carryingValueSyp, exchangeRateSypPerUsd, input.reason, note, now, now);
+    id = inserted.lastInsertRowId;
+    const offset: JournalLineInput = input.reason === 'OWNER_CONTRIBUTION'
+      ? { account: 'OWNER_CONTRIBUTIONS', creditSyp: carryingValueSyp }
+      : input.reason === 'OWNER_WITHDRAWAL'
+        ? { account: 'OWNER_DRAWINGS', debitSyp: carryingValueSyp }
+        : input.reason === 'CASH_OVER'
+          ? { account: 'CASH_OVER_SHORT', creditSyp: carryingValueSyp }
+          : { account: 'CASH_OVER_SHORT', debitSyp: carryingValueSyp };
+    await postJournalEntry(transaction, { sourceType: 'cash_adjustment', sourceId: id, sourceUuid: adjustmentUuid, occurredAt: now,
+      description: `Cash adjustment — ${input.reason}`, lines: [cashLine, offset] });
+  });
+  const row = await db.getFirstAsync('SELECT * FROM cash_adjustments WHERE id=?', id);
+  if (!row) throw new Error('CASH_ADJUSTMENT_NOT_FOUND');
+  return row;
 }
 
 export async function getProducts() {
@@ -884,35 +1115,66 @@ export async function getInventoryDetail(productId: number): Promise<InventoryDe
   return { ...balance, movements };
 }
 
-export async function enableInventoryTracking(productId: number, openingQuantity: number, threshold: number | null, note?: string | null) {
+export async function enableInventoryTracking(productId: number, openingQuantity: number, threshold: number | null, note?: string | null, accountingOpeningValueSyp?: number) {
   if (![productId, openingQuantity].every(Number.isSafeInteger) || productId <= 0 || openingQuantity < 0 || (threshold != null && (!Number.isSafeInteger(threshold) || threshold < 0))) throw new Error('INVALID_INVENTORY_INPUT');
   const db = await dbPromise; const now = new Date().toISOString();
   await db.withExclusiveTransactionAsync(async transaction => {
+    const accountingEnabled = await accountingIsEnabled(transaction);
+    if (accountingEnabled && (!Number.isSafeInteger(accountingOpeningValueSyp) || (accountingOpeningValueSyp ?? -1) < 0 || (openingQuantity === 0 && accountingOpeningValueSyp !== 0))) throw new Error('ACCOUNTING_INVENTORY_VALUE_REQUIRED');
     const product = await transaction.getFirstAsync<Product>('SELECT * FROM products WHERE id=? AND is_active<>0', productId);
     if (!product) throw new Error('PRODUCT_NOT_FOUND');
     const existing = await transaction.getFirstAsync<{ tracking_enabled: number }>('SELECT tracking_enabled FROM inventory_balances WHERE product_id=?', productId);
     if (existing?.tracking_enabled) throw new Error('INVENTORY_ALREADY_ENABLED');
     await transaction.runAsync(`INSERT INTO inventory_balances(product_id,tracking_enabled,quantity,low_stock_threshold,created_at,updated_at) VALUES(?,1,?,?,?,?)
       ON CONFLICT(product_id) DO UPDATE SET tracking_enabled=1,quantity=excluded.quantity,low_stock_threshold=excluded.low_stock_threshold,updated_at=excluded.updated_at`, productId, openingQuantity, threshold, now, now);
-    if (openingQuantity > 0) await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,note,created_at)
-      VALUES(?,?,?,?,?,'opening',?,0,?,?,?)`, createUuid(), product.id, product.uuid, product.name, product.barcode, openingQuantity, openingQuantity, note?.trim() || null, now);
+    if (accountingEnabled) await transaction.runAsync('INSERT INTO inventory_value_balances(product_id,quantity_snapshot,carrying_value_syp,updated_at) VALUES(?,?,?,?)', productId, 0, 0, now);
+    if (openingQuantity > 0) {
+      const movementUuid = createUuid();
+      const movement = await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,note,created_at)
+        VALUES(?,?,?,?,?,'opening',?,0,?,?,?)`, movementUuid, product.id, product.uuid, product.name, product.barcode, openingQuantity, openingQuantity, note?.trim() || null, now);
+      if (accountingEnabled) {
+        await recordInventoryValueChange(transaction, { sourceType: 'opening', sourceId: movement.lastInsertRowId, sourceItemId: movement.lastInsertRowId,
+          productId, quantityDelta: openingQuantity, valueDeltaSyp: accountingOpeningValueSyp ?? 0, occurredAt: now });
+        await postJournalEntry(transaction, { sourceType: 'inventory_adjustment', sourceId: movement.lastInsertRowId, sourceUuid: movementUuid, occurredAt: now,
+          description: `Opening inventory — ${product.name}`, lines: [
+            { account: 'INVENTORY', debitSyp: accountingOpeningValueSyp ?? 0 },
+            { account: 'INVENTORY_ADJUSTMENT_GAIN', creditSyp: accountingOpeningValueSyp ?? 0 },
+          ] });
+      }
+    }
   });
 }
 
-export async function adjustInventory(productId: number, mode: 'stock_in' | 'stock_out' | 'physical_count', quantity: number, note?: string | null) {
+export async function adjustInventory(productId: number, mode: 'stock_in' | 'stock_out' | 'physical_count', quantity: number, note?: string | null, accountingIncreaseValueSyp?: number) {
   if (!Number.isSafeInteger(productId) || productId <= 0 || !Number.isSafeInteger(quantity) || quantity < 0 || (mode !== 'physical_count' && quantity === 0)) throw new Error('INVALID_INVENTORY_INPUT');
   const db = await dbPromise; const now = new Date().toISOString();
   await db.withExclusiveTransactionAsync(async transaction => {
+    const accountingEnabled = await accountingIsEnabled(transaction);
     const row = await transaction.getFirstAsync<InventoryListItem>(`SELECT b.*,p.uuid AS product_uuid,p.name AS product_name,p.barcode,p.is_active,'in_stock' AS status FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE b.product_id=? AND b.tracking_enabled=1`, productId);
     if (!row) throw new Error('INVENTORY_NOT_TRACKED');
     const after = mode === 'stock_in' ? row.quantity + quantity : mode === 'stock_out' ? row.quantity - quantity : quantity;
     if (!Number.isSafeInteger(after) || after < 0) throw new Error('INSUFFICIENT_STOCK');
     const delta = after - row.quantity;
     if (delta === 0) return;
+    if (accountingEnabled && delta > 0 && (!Number.isSafeInteger(accountingIncreaseValueSyp) || (accountingIncreaseValueSyp ?? -1) < 0)) throw new Error('ACCOUNTING_INVENTORY_VALUE_REQUIRED');
     const movementType: InventoryMovementType = mode === 'physical_count' ? 'adjustment' : mode;
     await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND quantity=?', after, now, productId, row.quantity);
-    await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,note,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, createUuid(), productId, row.product_uuid, row.product_name, row.barcode, movementType, delta, row.quantity, after, note?.trim() || null, now);
+    const movementUuid = createUuid();
+    const movement = await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,note,created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, movementUuid, productId, row.product_uuid, row.product_name, row.barcode, movementType, delta, row.quantity, after, note?.trim() || null, now);
+    if (accountingEnabled) {
+      const value = delta > 0
+        ? accountingIncreaseValueSyp ?? 0
+        : -await relieveInventoryValue(transaction, { sourceType: movementType, sourceId: movement.lastInsertRowId, sourceItemId: movement.lastInsertRowId,
+          productId, quantityOut: -delta, occurredAt: now });
+      if (delta > 0) await recordInventoryValueChange(transaction, { sourceType: movementType, sourceId: movement.lastInsertRowId, sourceItemId: movement.lastInsertRowId,
+        productId, quantityDelta: delta, valueDeltaSyp: value, occurredAt: now });
+      const amount = Math.abs(value); const lines: JournalLineInput[] = delta > 0
+        ? [{ account: 'INVENTORY', debitSyp: amount }, { account: 'INVENTORY_ADJUSTMENT_GAIN', creditSyp: amount }]
+        : [{ account: 'INVENTORY_ADJUSTMENT_LOSS', debitSyp: amount }, { account: 'INVENTORY', creditSyp: amount }];
+      await postJournalEntry(transaction, { sourceType: 'inventory_adjustment', sourceId: movement.lastInsertRowId, sourceUuid: movementUuid, occurredAt: now,
+        description: `Inventory adjustment — ${row.product_name}`, lines });
+    }
   });
 }
 
@@ -1000,6 +1262,7 @@ export async function activateCustomerAccount(customerId: number, openingBalance
   if (!Number.isSafeInteger(customerId) || customerId <= 0 || !Number.isSafeInteger(openingBalanceSyp)) throw new Error('INVALID_CUSTOMER_ACCOUNT_AMOUNT');
   const db = await dbPromise; const now = new Date().toISOString();
   await db.withExclusiveTransactionAsync(async transaction => {
+    if (await accountingIsEnabled(transaction) && openingBalanceSyp !== 0) throw new Error('POST_CUTOVER_NONZERO_ACCOUNT_OPENING');
     const customer = await transaction.getFirstAsync<Customer>('SELECT * FROM customers WHERE id=?', customerId);
     if (!customer) throw new Error('CUSTOMER_NOT_FOUND');
     if (customer.accounting_enabled) throw new Error('CUSTOMER_ACCOUNT_ALREADY_ACTIVE');
@@ -1060,12 +1323,19 @@ export async function createCustomerPayment(input: CustomerPaymentInput): Promis
     if (!current) throw new Error('CUSTOMER_ACCOUNT_BALANCE_MISSING');
     const after = current.balance_syp - calculated.totalSyp;
     if (!Number.isSafeInteger(after)) throw new Error('INVALID_CUSTOMER_ACCOUNT_AMOUNT');
+    const accountingEnabled = await accountingIsEnabled(transaction); const paymentUuid = createUuid();
     const result = await transaction.runAsync(`INSERT INTO customer_payments(uuid,customer_id,cash_session_id,payment_mode,total_syp_equivalent,exchange_rate_syp_per_usd,customer_name_snapshot,note,occurred_at,created_at,balance_after_syp)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, createUuid(), customer.id, session.id, calculated.input.mode, calculated.totalSyp, calculated.input.mode === 'SYP' ? null : rate as number, customer.name, note, now, now, after);
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, paymentUuid, customer.id, session.id, calculated.input.mode, calculated.totalSyp, calculated.input.mode === 'SYP' ? null : rate as number, customer.name, note, now, now, after);
     paymentId = result.lastInsertRowId;
-    if (calculated.input.sypAmount > 0) await transaction.runAsync(`INSERT INTO customer_payment_tenders(uuid,customer_payment_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,created_at) VALUES(?,?,'SYP',?,?,NULL,?)`, createUuid(), paymentId, calculated.input.sypAmount, calculated.input.sypAmount, now);
-    if (calculated.input.usdCents > 0) await transaction.runAsync(`INSERT INTO customer_payment_tenders(uuid,customer_payment_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,created_at) VALUES(?,?,'USD',?,?,?,?)`, createUuid(), paymentId, calculated.input.usdCents, calculated.usdEquivalentSyp, rate as number, now);
+    if (calculated.input.sypAmount > 0) await transaction.runAsync(`INSERT INTO customer_payment_tenders(uuid,customer_payment_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,accounting_cash_carrying_syp,created_at) VALUES(?,?,'SYP',?,?,NULL,?,?)`, createUuid(), paymentId, calculated.input.sypAmount, calculated.input.sypAmount, accountingEnabled ? calculated.input.sypAmount : null, now);
+    if (calculated.input.usdCents > 0) await transaction.runAsync(`INSERT INTO customer_payment_tenders(uuid,customer_payment_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,accounting_cash_carrying_syp,created_at) VALUES(?,?,'USD',?,?,?,?,?)`, createUuid(), paymentId, calculated.input.usdCents, calculated.usdEquivalentSyp, rate as number, accountingEnabled ? calculated.usdEquivalentSyp : null, now);
     await postCustomerAccountEntry(transaction, customer, { type: 'payment', delta: -calculated.totalSyp, occurredAt: now, note, customerPaymentId: paymentId });
+    if (accountingEnabled) {
+      const lines = signedControlTransitionLines(current.balance_syp, after, 'ACCOUNTS_RECEIVABLE', 'CUSTOMER_CREDITS');
+      if (calculated.input.sypAmount > 0) lines.push(await changeCashSyp(transaction, calculated.input.sypAmount, now));
+      if (calculated.input.usdCents > 0) lines.push(await addCashUsd(transaction, calculated.input.usdCents, calculated.usdEquivalentSyp, rate as number, now));
+      await postJournalEntry(transaction, { sourceType: 'customer_payment', sourceId: paymentId, sourceUuid: paymentUuid, occurredAt: now, description: `Customer payment — ${customer.name}`, lines });
+    }
   });
   const payment = await getCustomerPaymentDetail(paymentId); if (!payment) throw new Error('CUSTOMER_PAYMENT_NOT_FOUND'); return payment;
 }
@@ -1123,6 +1393,7 @@ export async function activateSupplierAccount(supplierId: number, openingBalance
   if (!Number.isSafeInteger(supplierId) || supplierId <= 0 || !Number.isSafeInteger(openingBalanceUsdCents)) throw new Error('INVALID_SUPPLIER_ACCOUNT_AMOUNT');
   const db = await dbPromise; const now = new Date().toISOString();
   await db.withExclusiveTransactionAsync(async transaction => {
+    if (await accountingIsEnabled(transaction) && openingBalanceUsdCents !== 0) throw new Error('POST_CUTOVER_NONZERO_ACCOUNT_OPENING');
     const supplier = await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=?', supplierId);
     if (!supplier) throw new Error('SUPPLIER_NOT_FOUND');
     if (supplier.accounting_enabled) throw new Error('SUPPLIER_ACCOUNT_ALREADY_ACTIVE');
@@ -1208,15 +1479,41 @@ export async function createSupplierPayment(input: SupplierPaymentInput): Promis
     if (!current) throw new Error('SUPPLIER_ACCOUNT_BALANCE_MISSING');
     const after = current.balance_usd_cents - calculated.totalUsdCents;
     if (!Number.isSafeInteger(after)) throw new Error('INVALID_SUPPLIER_ACCOUNT_AMOUNT');
+    const accountingEnabled = await accountingIsEnabled(transaction); const paymentUuid = createUuid();
     const header = await transaction.runAsync(`INSERT INTO supplier_payments
       (uuid,supplier_id,cash_session_id,payment_mode,total_usd_equivalent_cents,exchange_rate_syp_per_usd,supplier_name_snapshot,note,occurred_at,created_at,balance_after_usd_cents)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, createUuid(), supplier.id, session.id, calculated.input.mode, calculated.totalUsdCents, rate, supplier.name, note, now, now, after);
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`, paymentUuid, supplier.id, session.id, calculated.input.mode, calculated.totalUsdCents, rate, supplier.name, note, now, now, after);
     paymentId = header.lastInsertRowId;
-    if (calculated.input.sypAmount > 0) await transaction.runAsync(`INSERT INTO supplier_payment_tenders(uuid,supplier_payment_id,currency,amount_minor,usd_equivalent_cents,exchange_rate_syp_per_usd,created_at)
-      VALUES(?,?,'SYP',?,?,?,?)`, createUuid(), paymentId, calculated.input.sypAmount, calculated.sypUsdCents, parsedRate as number, now);
-    if (calculated.input.usdCents > 0) await transaction.runAsync(`INSERT INTO supplier_payment_tenders(uuid,supplier_payment_id,currency,amount_minor,usd_equivalent_cents,exchange_rate_syp_per_usd,created_at)
-      VALUES(?,?,'USD',?,?,NULL,?)`, createUuid(), paymentId, calculated.input.usdCents, calculated.input.usdCents, now);
+    let usdCashCarryingSyp = 0;
+    if (accountingEnabled && calculated.input.usdCents > 0) usdCashCarryingSyp = (await removeCashUsd(transaction, calculated.input.usdCents, parsedRate as number, now)).carryingReliefSyp;
+    if (calculated.input.sypAmount > 0) await transaction.runAsync(`INSERT INTO supplier_payment_tenders(uuid,supplier_payment_id,currency,amount_minor,usd_equivalent_cents,exchange_rate_syp_per_usd,accounting_cash_carrying_syp,created_at)
+      VALUES(?,?,'SYP',?,?,?,?,?)`, createUuid(), paymentId, calculated.input.sypAmount, calculated.sypUsdCents, parsedRate as number, accountingEnabled ? calculated.input.sypAmount : null, now);
+    if (calculated.input.usdCents > 0) await transaction.runAsync(`INSERT INTO supplier_payment_tenders(uuid,supplier_payment_id,currency,amount_minor,usd_equivalent_cents,exchange_rate_syp_per_usd,accounting_cash_carrying_syp,created_at)
+      VALUES(?,?,'USD',?,?,NULL,?,?)`, createUuid(), paymentId, calculated.input.usdCents, calculated.input.usdCents, accountingEnabled ? usdCashCarryingSyp : null, now);
     await postSupplierAccountEntry(transaction, supplier, { type: 'payment', delta: -calculated.totalUsdCents, occurredAt: now, note, supplierPaymentId: paymentId });
+    if (accountingEnabled) {
+      const payableNative = Math.min(Math.max(current.balance_usd_cents, 0), calculated.totalUsdCents);
+      const payableReliefSyp = payableNative > 0 ? await consumeSupplierPositionLayers(transaction, { supplierId: supplier.id, positionType: 'PAYABLE', sourceType: 'supplier_payment', sourceId: paymentId, nativeUsdCents: payableNative, occurredAt: now }) : 0;
+      const totalConsiderationSyp = calculated.input.sypAmount + usdCashCarryingSyp;
+      if (!Number.isSafeInteger(totalConsiderationSyp)) throw new Error('SUPPLIER_PAYMENT_ACCOUNTING_OVERFLOW');
+      const split = splitCarryingValueAtZero(totalConsiderationSyp, payableNative, calculated.totalUsdCents);
+      const advanceNative = calculated.totalUsdCents - payableNative;
+      const realizedFx = payableReliefSyp - split.payableConsiderationSyp;
+      await transaction.runAsync(`UPDATE supplier_payments SET accounting_payable_relief_syp=?,accounting_consideration_syp=?,accounting_advance_created_syp=?,accounting_realized_fx_syp=? WHERE id=?`,
+      payableReliefSyp, totalConsiderationSyp, split.advanceConsiderationSyp, realizedFx, paymentId);
+      if (advanceNative > 0) await createSupplierPositionLayer(transaction, { supplierId: supplier.id, positionType: 'ADVANCE', sourceType: 'supplier_payment', sourceId: paymentId,
+        nativeUsdCents: advanceNative, carryingSyp: split.advanceConsiderationSyp, exchangeRateSypPerUsd: rate, occurredAt: now });
+      const lines: JournalLineInput[] = [
+        { account: 'ACCOUNTS_PAYABLE', debitSyp: payableReliefSyp },
+        { account: 'SUPPLIER_ADVANCES', debitSyp: split.advanceConsiderationSyp },
+      ];
+      if (calculated.input.sypAmount > 0) lines.push(await changeCashSyp(transaction, -calculated.input.sypAmount, now));
+      if (calculated.input.usdCents > 0) lines.push({ account: 'CASH_USD', creditSyp: usdCashCarryingSyp, sourceCurrency: 'USD', sourceAmountMinor: calculated.input.usdCents, exchangeRateSypPerUsd: parsedRate as number });
+      if (realizedFx > 0) lines.push({ account: 'REALIZED_FX_GAIN', creditSyp: realizedFx });
+      if (realizedFx < 0) lines.push({ account: 'REALIZED_FX_LOSS', debitSyp: -realizedFx });
+      await postJournalEntry(transaction, { sourceType: 'supplier_payment', sourceId: paymentId, sourceUuid: paymentUuid, occurredAt: now,
+        description: `Supplier payment — ${supplier.name}`, lines });
+    }
   });
   const payment = await getSupplierPaymentDetail(paymentId); if (!payment) throw new Error('SUPPLIER_PAYMENT_NOT_FOUND'); return payment;
 }
@@ -1342,22 +1639,76 @@ export async function createPurchaseReceipt(input: PurchaseReceiptInput): Promis
   await db.withExclusiveTransactionAsync(async transaction => {
     const supplier = await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=? AND is_active=1', input.supplierId);
     if (!supplier) throw new Error('SUPPLIER_INACTIVE');
-    const result = await transaction.runAsync(`INSERT INTO purchase_receipts(uuid,supplier_id,supplier_uuid_snapshot,supplier_name_snapshot,reference_number,note,received_at,created_at)
-      VALUES(?,?,?,?,?,?,?,?)`, createUuid(), supplier.id, supplier.uuid, supplier.name, reference, note, now, now);
+    const accountingEnabled = await accountingIsEnabled(transaction);
+    const setting = accountingEnabled ? await transaction.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='exchangeRate'") : null;
+    const parsedRate: unknown = setting ? JSON.parse(setting.value) : null;
+    if (accountingEnabled && (!Number.isSafeInteger(parsedRate) || (parsedRate as number) <= 0)) throw new Error('INVALID_EXCHANGE_RATE');
+    const supplierBalance = accountingEnabled
+      ? await transaction.getFirstAsync<{ balance_usd_cents: number }>('SELECT balance_usd_cents FROM supplier_account_balances WHERE supplier_id=?', supplier.id)
+      : null;
+    if (accountingEnabled && (!supplier.accounting_enabled || !supplierBalance)) throw new Error('SUPPLIER_ACCOUNT_INACTIVE');
+    const advanceNative = accountingEnabled ? Math.min(receiptTotalUsdCents, Math.max(-(supplierBalance?.balance_usd_cents ?? 0), 0)) : 0;
+    const payableNative = accountingEnabled ? receiptTotalUsdCents - advanceNative : 0;
+    const payableSyp = accountingEnabled ? usdCentsToSyp(payableNative, parsedRate as number) : 0;
+    const receiptUuid = createUuid();
+    const result = await transaction.runAsync(`INSERT INTO purchase_receipts(uuid,supplier_id,supplier_uuid_snapshot,supplier_name_snapshot,reference_number,note,received_at,created_at,
+      accounting_exchange_rate_syp_per_usd,accounting_total_syp,accounting_advance_usd_cents,accounting_advance_syp,accounting_payable_usd_cents,accounting_payable_syp)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, receiptUuid, supplier.id, supplier.uuid, supplier.name, reference, note, now, now,
+    accountingEnabled ? parsedRate as number : null, null, accountingEnabled ? advanceNative : null, null, accountingEnabled ? payableNative : null, accountingEnabled ? payableSyp : null);
     receiptId = result.lastInsertRowId;
-    for (const item of input.items) {
+    const advanceSyp = accountingEnabled && advanceNative > 0 ? await consumeSupplierPositionLayers(transaction, {
+      supplierId: supplier.id, positionType: 'ADVANCE', sourceType: 'purchase', sourceId: receiptId, nativeUsdCents: advanceNative, occurredAt: now,
+    }) : 0;
+    const accountingTotalSyp = advanceSyp + payableSyp;
+    if (!Number.isSafeInteger(accountingTotalSyp)) throw new Error('PURCHASE_ACCOUNTING_OVERFLOW');
+    if (accountingEnabled) await transaction.runAsync('UPDATE purchase_receipts SET accounting_total_syp=?,accounting_advance_syp=? WHERE id=?', accountingTotalSyp, advanceSyp, receiptId);
+    const itemPlans = input.items.map((item, sequence) => ({ item, uuid: createUuid(), sequence, native: item.quantity * item.unitCostUsdCents }));
+    // Purchase line allocation is tied to the immutable receipt insertion sequence.
+    // A generated UUID is portable identity, but must not decide accounting residuals.
+    const stablePlans = itemPlans;
+    let advanceRemaining = advanceNative; let advanceCumulative = 0;
+    const allocations = new Map<number, { advanceNative: number; advanceSyp: number; payableNative: number; payableSyp: number }>();
+    for (const plan of stablePlans) {
+      const lineAdvanceNative = Math.min(plan.native, advanceRemaining); const prior = advanceCumulative;
+      advanceCumulative += lineAdvanceNative; advanceRemaining -= lineAdvanceNative;
+      const lineAdvanceSyp = advanceNative > 0 ? incrementalHalfUpAllocation(advanceSyp, prior, advanceCumulative, advanceNative) : 0;
+      allocations.set(plan.sequence, { advanceNative: lineAdvanceNative, advanceSyp: lineAdvanceSyp, payableNative: plan.native - lineAdvanceNative, payableSyp: 0 });
+    }
+    if (advanceRemaining !== 0) throw new Error('PURCHASE_ADVANCE_ALLOCATION_MISMATCH');
+    if (payableNative > 0) {
+      const payableAllocation = allocatePurchaseSypByLargestRemainder(stablePlans.map(plan => ({ key: plan.sequence, usdCents: allocations.get(plan.sequence)!.payableNative })), parsedRate as number);
+      for (const line of payableAllocation.allocations) allocations.get(line.key)!.payableSyp = line.accountingSyp;
+      if (payableAllocation.totalSyp !== payableSyp) throw new Error('PURCHASE_PAYABLE_ALLOCATION_MISMATCH');
+    }
+    for (const plan of itemPlans) {
+      const item = plan.item; const allocation = allocations.get(plan.sequence)!;
       const product = await transaction.getFirstAsync<Product & { tracking_enabled: number; quantity: number }>(`SELECT p.*,b.tracking_enabled,b.quantity FROM products p JOIN inventory_balances b ON b.product_id=p.id WHERE p.id=? AND p.is_active=1 AND b.tracking_enabled=1`, item.productId);
       if (!product) throw new Error('PRODUCT_NOT_TRACKED');
-      const lineTotal = item.quantity * item.unitCostUsdCents;
-      const itemResult = await transaction.runAsync(`INSERT INTO purchase_receipt_items(uuid,purchase_receipt_id,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,quantity,unit_cost_usd_cents,line_total_usd_cents,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?)`, createUuid(), receiptId, product.id, product.uuid, product.name, product.barcode, item.quantity, item.unitCostUsdCents, lineTotal, now);
+      const lineTotal = plan.native; const lineAccountingSyp = allocation.advanceSyp + allocation.payableSyp;
+      const itemResult = await transaction.runAsync(`INSERT INTO purchase_receipt_items(uuid,purchase_receipt_id,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,quantity,unit_cost_usd_cents,line_total_usd_cents,created_at,
+        accounting_line_syp,accounting_advance_usd_cents,accounting_advance_syp,accounting_payable_usd_cents,accounting_payable_syp)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, plan.uuid, receiptId, product.id, product.uuid, product.name, product.barcode, item.quantity, item.unitCostUsdCents, lineTotal, now,
+      accountingEnabled ? lineAccountingSyp : null, accountingEnabled ? allocation.advanceNative : null, accountingEnabled ? allocation.advanceSyp : null,
+      accountingEnabled ? allocation.payableNative : null, accountingEnabled ? allocation.payableSyp : null);
       const after = product.quantity + item.quantity; if (!Number.isSafeInteger(after)) throw new Error('INVALID_PURCHASE_ITEM');
+      if (accountingEnabled) await recordInventoryValueChange(transaction, { sourceType: 'purchase', sourceId: receiptId, sourceItemId: itemResult.lastInsertRowId,
+        productId: product.id, quantityDelta: item.quantity, valueDeltaSyp: lineAccountingSyp, occurredAt: now });
       const changed = await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND quantity=? AND tracking_enabled=1', after, now, product.id, product.quantity);
       if (!changed.changes) throw new Error('INVENTORY_CONCURRENT_UPDATE');
       await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,purchase_receipt_item_id,note,created_at)
         VALUES(?,?,?,?,?,'purchase',?,?,?,?,?,?)`, createUuid(), product.id, product.uuid, product.name, product.barcode, item.quantity, product.quantity, after, itemResult.lastInsertRowId, reference, now);
     }
     if (supplier.accounting_enabled) await postSupplierAccountEntry(transaction, supplier, { type: 'purchase', delta: receiptTotalUsdCents, occurredAt: now, note, purchaseReceiptId: receiptId });
+    if (accountingEnabled) {
+      if (payableNative > 0) await createSupplierPositionLayer(transaction, { supplierId: supplier.id, positionType: 'PAYABLE', sourceType: 'purchase', sourceId: receiptId,
+        nativeUsdCents: payableNative, carryingSyp: payableSyp, exchangeRateSypPerUsd: parsedRate as number, occurredAt: now });
+      await postJournalEntry(transaction, { sourceType: 'purchase', sourceId: receiptId, sourceUuid: receiptUuid, reference, occurredAt: now,
+        description: `Purchase receipt — ${supplier.name}`, lines: [
+          { account: 'INVENTORY', debitSyp: accountingTotalSyp },
+          { account: 'SUPPLIER_ADVANCES', creditSyp: advanceSyp },
+          { account: 'ACCOUNTS_PAYABLE', creditSyp: payableSyp },
+        ] });
+    }
   });
   const receipt = await getPurchaseReceiptDetail(receiptId); if (!receipt) throw new Error('PURCHASE_RECEIPT_NOT_FOUND'); return receipt;
 }
@@ -1400,14 +1751,14 @@ export async function createPurchaseReturn(input: PurchaseReturnInput): Promise<
   }
   const db = await dbPromise; const now = new Date().toISOString(); let returnId = 0;
   await db.withExclusiveTransactionAsync(async transaction => {
-    const receipt = await transaction.getFirstAsync<PurchaseReceipt>('SELECT * FROM purchase_receipts WHERE id=?', input.purchaseReceiptId);
+    const receipt = await transaction.getFirstAsync<PurchaseReceipt & { accounting_total_syp: number | null; accounting_exchange_rate_syp_per_usd: number | null }>('SELECT * FROM purchase_receipts WHERE id=?', input.purchaseReceiptId);
     if (!receipt) throw new Error('PURCHASE_RECEIPT_NOT_FOUND');
-    const rows = await transaction.getAllAsync<PurchaseReceiptItem & { returned_quantity: number; inventory_quantity: number; tracking_enabled: number }>(`SELECT pi.*,
+    const rows = await transaction.getAllAsync<PurchaseReceiptItem & { accounting_line_syp: number | null; returned_quantity: number; inventory_quantity: number; tracking_enabled: number }>(`SELECT pi.*,
       COALESCE(SUM(ri.quantity),0) AS returned_quantity,COALESCE(b.quantity,0) AS inventory_quantity,COALESCE(b.tracking_enabled,0) AS tracking_enabled
       FROM purchase_receipt_items pi LEFT JOIN purchase_return_items ri ON ri.purchase_receipt_item_id=pi.id
       LEFT JOIN inventory_balances b ON b.product_id=pi.product_id
       WHERE pi.purchase_receipt_id=? GROUP BY pi.id`, input.purchaseReceiptId);
-    const byId = new Map(rows.map(row => [row.id, row])); let totalQuantity = 0; let totalValue = 0;
+    const byId = new Map(rows.map(row => [row.id, row])); let totalQuantity = 0; let totalValue = 0; let receiptBasisSyp = 0;
     for (const [itemId, quantity] of requested) {
       const item = byId.get(itemId); if (!item) throw new Error('PURCHASE_RETURN_ITEM_NOT_FOUND');
       if (!item.product_id || item.tracking_enabled !== 1) throw new Error('PURCHASE_RETURN_PRODUCT_UNAVAILABLE');
@@ -1417,23 +1768,83 @@ export async function createPurchaseReturn(input: PurchaseReturnInput): Promise<
       const lineTotal = BigInt(quantity) * BigInt(item.unit_cost_usd_cents);
       if (lineTotal > BigInt(Number.MAX_SAFE_INTEGER) || !Number.isSafeInteger(totalQuantity + quantity) || BigInt(totalValue) + lineTotal > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('INVALID_PURCHASE_RETURN_ITEM');
       totalQuantity += quantity; totalValue += Number(lineTotal);
+      if (receipt.accounting_total_syp != null) {
+        if (!Number.isSafeInteger(item.accounting_line_syp) || (item.accounting_line_syp ?? 0) < 0) throw new Error('INVALID_PURCHASE_ACCOUNTING_SNAPSHOT');
+        const lineBasis = incrementalHalfUpAllocation(item.accounting_line_syp ?? 0, item.returned_quantity, item.returned_quantity + quantity, item.quantity);
+        receiptBasisSyp += lineBasis; if (!Number.isSafeInteger(receiptBasisSyp)) throw new Error('PURCHASE_RETURN_ACCOUNTING_OVERFLOW');
+      }
     }
-    const header = await transaction.runAsync(`INSERT INTO purchase_returns(uuid,purchase_receipt_id,supplier_uuid_snapshot,supplier_name_snapshot,created_at,total_quantity,total_value_usd_cents,reference_number,note)
-      VALUES(?,?,?,?,?,?,?,?,?)`, createUuid(), receipt.id, receipt.supplier_uuid_snapshot, receipt.supplier_name_snapshot, now, totalQuantity, totalValue, reference, note);
+    const accountingEnabled = await accountingIsEnabled(transaction);
+    const supplier = accountingEnabled && receipt.supplier_id
+      ? await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=? AND accounting_enabled=1', receipt.supplier_id)
+      : null;
+    if (accountingEnabled && !supplier) throw new Error('SUPPLIER_ACCOUNT_INACTIVE');
+    const supplierBalance = accountingEnabled
+      ? await transaction.getFirstAsync<{ balance_usd_cents: number }>('SELECT balance_usd_cents FROM supplier_account_balances WHERE supplier_id=?', supplier!.id)
+      : null;
+    if (accountingEnabled && !supplierBalance) throw new Error('SUPPLIER_ACCOUNT_BALANCE_MISSING');
+    const setting = accountingEnabled ? await transaction.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='exchangeRate'") : null;
+    const parsedRate: unknown = setting ? JSON.parse(setting.value) : null;
+    if (accountingEnabled && (!Number.isSafeInteger(parsedRate) || (parsedRate as number) <= 0)) throw new Error('INVALID_EXCHANGE_RATE');
+    const payableNative = accountingEnabled ? Math.min(Math.max(supplierBalance?.balance_usd_cents ?? 0, 0), totalValue) : 0;
+    const advanceNative = accountingEnabled ? totalValue - payableNative : 0;
+    const returnUuid = createUuid();
+    const header = await transaction.runAsync(`INSERT INTO purchase_returns(uuid,purchase_receipt_id,supplier_uuid_snapshot,supplier_name_snapshot,created_at,total_quantity,total_value_usd_cents,reference_number,note,accounting_exchange_rate_syp_per_usd)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`, returnUuid, receipt.id, receipt.supplier_uuid_snapshot, receipt.supplier_name_snapshot, now, totalQuantity, totalValue, reference, note,
+    accountingEnabled ? parsedRate as number : null);
     returnId = header.lastInsertRowId;
+    const payableReliefSyp = accountingEnabled && payableNative > 0 ? await consumeSupplierPositionLayers(transaction, {
+      supplierId: supplier!.id, positionType: 'PAYABLE', sourceType: 'supplier_return', sourceId: returnId, nativeUsdCents: payableNative, occurredAt: now,
+    }) : 0;
+    const advanceCreatedSyp = accountingEnabled && advanceNative > 0
+      ? receipt.accounting_total_syp != null
+        ? splitCarryingValueAtZero(receiptBasisSyp, payableNative, totalValue).advanceConsiderationSyp
+        : usdCentsToSyp(advanceNative, parsedRate as number)
+      : 0;
+    const positionReliefSyp = payableReliefSyp + advanceCreatedSyp;
+    if (!Number.isSafeInteger(positionReliefSyp)) throw new Error('PURCHASE_RETURN_ACCOUNTING_OVERFLOW');
+    const positionByItem = accountingEnabled ? new Map(allocateIntegerByLargestRemainder(positionReliefSyp,
+      [...requested].map(([itemId, quantity]) => ({ key: itemId, weight: quantity * byId.get(itemId)!.unit_cost_usd_cents }))).map(row => [row.key, row.amount])) : new Map<number, number>();
+    const advanceByItem = accountingEnabled ? new Map(allocateIntegerByLargestRemainder(advanceCreatedSyp,
+      [...requested].map(([itemId, quantity]) => ({ key: itemId, weight: quantity * byId.get(itemId)!.unit_cost_usd_cents }))).map(row => [row.key, row.amount])) : new Map<number, number>();
+    let inventoryReliefSyp = 0; let varianceSyp = 0;
     for (const [itemId, quantity] of requested) {
       const item = byId.get(itemId)!; const after = item.inventory_quantity - quantity;
       const changed = await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND tracking_enabled=1 AND quantity=?', after, now, item.product_id, item.inventory_quantity);
       if (!changed.changes) throw new Error('INVENTORY_CONCURRENT_UPDATE');
       const lineTotal = quantity * item.unit_cost_usd_cents;
+      const itemUuid = createUuid();
       const inserted = await transaction.runAsync(`INSERT INTO purchase_return_items(uuid,purchase_return_id,purchase_receipt_item_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,quantity,unit_cost_usd_cents,line_total_usd_cents,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?)`, createUuid(), returnId, item.id, item.product_uuid_snapshot, item.product_name_snapshot, item.barcode_snapshot, quantity, item.unit_cost_usd_cents, lineTotal, now);
+        VALUES(?,?,?,?,?,?,?,?,?,?)`, itemUuid, returnId, item.id, item.product_uuid_snapshot, item.product_name_snapshot, item.barcode_snapshot, quantity, item.unit_cost_usd_cents, lineTotal, now);
+      const itemInventoryRelief = accountingEnabled ? await relieveInventoryValue(transaction, { sourceType: 'supplier_return', sourceId: returnId,
+        sourceItemId: inserted.lastInsertRowId, productId: item.product_id!, quantityOut: quantity, occurredAt: now }) : 0;
+      const itemPositionRelief = positionByItem.get(itemId) ?? 0; const itemAdvance = advanceByItem.get(itemId) ?? 0;
+      const itemVariance = itemInventoryRelief - itemPositionRelief;
+      if (accountingEnabled) await transaction.runAsync(`UPDATE purchase_return_items SET accounting_inventory_relief_syp=?,accounting_position_relief_syp=?,accounting_advance_created_syp=?,accounting_variance_syp=? WHERE id=?`,
+      itemInventoryRelief, itemPositionRelief, itemAdvance, itemVariance, inserted.lastInsertRowId);
+      inventoryReliefSyp += itemInventoryRelief; varianceSyp += itemVariance;
+      if (![inventoryReliefSyp, varianceSyp].every(Number.isSafeInteger)) throw new Error('PURCHASE_RETURN_ACCOUNTING_OVERFLOW');
       await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,purchase_return_item_id,note,created_at)
         VALUES(?,?,?,?,?,'purchase_return',?,?,?,?,?,?)`, createUuid(), item.product_id, item.product_uuid_snapshot, item.product_name_snapshot, item.barcode_snapshot, -quantity, item.inventory_quantity, after, inserted.lastInsertRowId, reference, now);
     }
     if (receipt.supplier_id) {
-      const supplier = await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=? AND accounting_enabled=1', receipt.supplier_id);
-      if (supplier) await postSupplierAccountEntry(transaction, supplier, { type: 'purchase_return', delta: -totalValue, occurredAt: now, note, purchaseReturnId: returnId });
+      const accountSupplier = supplier ?? await transaction.getFirstAsync<Supplier>('SELECT * FROM suppliers WHERE id=? AND accounting_enabled=1', receipt.supplier_id);
+      if (accountSupplier) await postSupplierAccountEntry(transaction, accountSupplier, { type: 'purchase_return', delta: -totalValue, occurredAt: now, note, purchaseReturnId: returnId });
+    }
+    if (accountingEnabled) {
+      await transaction.runAsync(`UPDATE purchase_returns SET accounting_inventory_relief_syp=?,accounting_position_relief_syp=?,accounting_advance_created_syp=?,accounting_variance_syp=? WHERE id=?`,
+      inventoryReliefSyp, positionReliefSyp, advanceCreatedSyp, varianceSyp, returnId);
+      if (advanceNative > 0) await createSupplierPositionLayer(transaction, { supplierId: supplier!.id, positionType: 'ADVANCE', sourceType: 'supplier_return', sourceId: returnId,
+        nativeUsdCents: advanceNative, carryingSyp: advanceCreatedSyp, exchangeRateSypPerUsd: parsedRate as number, occurredAt: now });
+      const lines: JournalLineInput[] = [
+        { account: 'ACCOUNTS_PAYABLE', debitSyp: payableReliefSyp },
+        { account: 'SUPPLIER_ADVANCES', debitSyp: advanceCreatedSyp },
+        { account: 'INVENTORY', creditSyp: inventoryReliefSyp },
+      ];
+      if (varianceSyp > 0) lines.push({ account: 'INVENTORY_VALUATION_VARIANCE', debitSyp: varianceSyp });
+      if (varianceSyp < 0) lines.push({ account: 'INVENTORY_VALUATION_VARIANCE', creditSyp: -varianceSyp });
+      await postJournalEntry(transaction, { sourceType: 'supplier_return', sourceId: returnId, sourceUuid: returnUuid, reference, occurredAt: now,
+        description: `Supplier return — ${receipt.supplier_name_snapshot}`, lines });
     }
   });
   const record = await getPurchaseReturnDetail(returnId); if (!record) throw new Error('PURCHASE_RETURN_NOT_FOUND'); return record;
@@ -1738,6 +2149,11 @@ export async function createSale(
     const customer = accountInput?.customerId == null ? null : await transaction.getFirstAsync<Customer>('SELECT * FROM customers WHERE id=? AND is_active=1', accountInput.customerId);
     if (accountInput?.customerId != null && !customer) throw new Error('CUSTOMER_INACTIVE');
     if (onAccountSyp > 0 && !customer?.accounting_enabled) throw new Error('CUSTOMER_ACCOUNT_INACTIVE');
+    const accountingEnabled = await accountingIsEnabled(transaction);
+    const customerBalanceBefore = accountingEnabled && customer && onAccountSyp > 0
+      ? await transaction.getFirstAsync<{ balance_syp: number }>('SELECT balance_syp FROM customer_account_balances WHERE customer_id=?', customer.id)
+      : null;
+    if (accountingEnabled && customer && onAccountSyp > 0 && !customerBalanceBefore) throw new Error('CUSTOMER_ACCOUNT_BALANCE_MISSING');
     if (draftId != null) {
       const draft = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_drafts WHERE id=?', draftId);
       if (!draft) throw new Error('DRAFT_NOT_FOUND');
@@ -1761,14 +2177,16 @@ export async function createSale(
       const stock = tracked.get(productId);
       if (stock && stock.quantity < requested) throw new Error('INSUFFICIENT_STOCK');
     }
+    const saleUuid = createUuid();
     const result = await transaction.runAsync(
       `INSERT INTO sales
        (uuid,invoice_number,exchange_rate,subtotal_syp,discount_syp,net_total_syp,cost_syp,profit_syp,amount_paid_syp,change_syp,created_at,updated_at,cash_session_id,customer_id,customer_uuid_snapshot,customer_name_snapshot,on_account_syp)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      createUuid(), invoiceNumber, exchangeRate, subtotal, discount, net, cost, profit, settlement.totalTenderEquivalentSyp, settlement.changeSyp, createdAt, createdAt, activeSession.id,
+      saleUuid, invoiceNumber, exchangeRate, subtotal, discount, net, cost, profit, settlement.totalTenderEquivalentSyp, settlement.changeSyp, createdAt, createdAt, activeSession.id,
       customer?.id ?? null, customer?.uuid ?? null, customer?.name ?? null, onAccountSyp,
     );
     saleId = result.lastInsertRowId;
+    let accountingCogsSyp = 0;
     for (const [index, item] of items.entries()) {
       const insertedItem = await transaction.runAsync(
         `INSERT INTO sale_items
@@ -1783,6 +2201,15 @@ export async function createSale(
         if (stock) {
           const before = stock.quantity; const after = before - item.quantity;
           if (after < 0) throw new Error('INSUFFICIENT_STOCK');
+          const itemAccountingCogs = accountingEnabled ? await relieveInventoryValue(transaction, {
+            sourceType: 'sale', sourceId: saleId, sourceItemId: insertedItem.lastInsertRowId,
+            productId: item.productId, quantityOut: item.quantity, occurredAt: createdAt,
+          }) : 0;
+          if (accountingEnabled) {
+            accountingCogsSyp += itemAccountingCogs;
+            if (!Number.isSafeInteger(accountingCogsSyp)) throw new Error('ACCOUNTING_COGS_OVERFLOW');
+            await transaction.runAsync('UPDATE sale_items SET accounting_cogs_syp=? WHERE id=?', itemAccountingCogs, insertedItem.lastInsertRowId);
+          }
           const changed = await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND quantity=?', after, createdAt, item.productId, before);
           if (changed.changes !== 1) throw new Error('INVENTORY_CONCURRENT_CHANGE');
           await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,sale_item_id,note,created_at)
@@ -1792,10 +2219,23 @@ export async function createSale(
       }
     }
     for (const payment of settlement.payments) await transaction.runAsync(
-      `INSERT INTO sale_payments(uuid,sale_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,created_at)
-       VALUES(?,?,?,?,?,?,?)`, createUuid(), saleId, payment.currency, payment.amount_minor, payment.syp_equivalent, payment.exchange_rate_syp_per_usd, createdAt,
+      `INSERT INTO sale_payments(uuid,sale_id,currency,amount_minor,syp_equivalent,exchange_rate_syp_per_usd,accounting_cash_carrying_syp,created_at)
+       VALUES(?,?,?,?,?,?,?,?)`, createUuid(), saleId, payment.currency, payment.amount_minor, payment.syp_equivalent, payment.exchange_rate_syp_per_usd, accountingEnabled ? payment.syp_equivalent : null, createdAt,
     );
-    if (customer && onAccountSyp > 0) await postCustomerAccountEntry(transaction, customer, { type: 'sale', delta: onAccountSyp, occurredAt: createdAt, saleId });
+    const customerBalanceAfter = customer && onAccountSyp > 0
+      ? await postCustomerAccountEntry(transaction, customer, { type: 'sale', delta: onAccountSyp, occurredAt: createdAt, saleId })
+      : null;
+    if (accountingEnabled) {
+      const lines: JournalLineInput[] = [{ account: 'SALES_REVENUE', creditSyp: net }];
+      const sypTender = settlement.payments.find(payment => payment.currency === 'SYP')?.amount_minor ?? 0;
+      const sypCashEffect = sypTender - settlement.changeSyp;
+      if (sypCashEffect !== 0) lines.push(await changeCashSyp(transaction, sypCashEffect, createdAt));
+      const usdTender = settlement.payments.find(payment => payment.currency === 'USD');
+      if (usdTender && usdTender.amount_minor > 0) lines.push(await addCashUsd(transaction, usdTender.amount_minor, usdTender.syp_equivalent, exchangeRate, createdAt));
+      if (customerBalanceBefore && customerBalanceAfter != null) lines.push(...signedControlTransitionLines(customerBalanceBefore.balance_syp, customerBalanceAfter, 'ACCOUNTS_RECEIVABLE', 'CUSTOMER_CREDITS'));
+      if (accountingCogsSyp > 0) lines.push({ account: 'COGS', debitSyp: accountingCogsSyp }, { account: 'INVENTORY', creditSyp: accountingCogsSyp });
+      await postJournalEntry(transaction, { sourceType: 'sale', sourceId: saleId, sourceUuid: saleUuid, reference: invoiceNumber, occurredAt: createdAt, description: `Sale ${invoiceNumber}`, lines });
+    }
     if (draftId != null) {
       await transaction.runAsync('DELETE FROM sale_draft_items WHERE draft_id=?', draftId);
       await transaction.runAsync('DELETE FROM sale_drafts WHERE id=?', draftId);
@@ -1815,7 +2255,7 @@ export async function createSaleReturn(saleId: number, selections: ReturnSelecti
     const activeSession = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
     const header = await transaction.getFirstAsync<Omit<Sale, 'items'>>('SELECT * FROM sales WHERE id=?', saleId);
     if (!header) throw new Error('SALE_NOT_FOUND');
-    const saleItems = await transaction.getAllAsync<SaleItem>('SELECT * FROM sale_items WHERE sale_id=? ORDER BY id', saleId);
+    const saleItems = await transaction.getAllAsync<SaleItem & { accounting_cogs_syp: number | null; accounting_restocked_quantity: number; accounting_restored_cogs_syp: number }>('SELECT * FROM sale_items WHERE sale_id=? ORDER BY id', saleId);
     const returnHeaders = await transaction.getAllAsync<Omit<SaleReturn, 'items'>>('SELECT * FROM sale_returns WHERE sale_id=? ORDER BY id', saleId);
     const priorItems: SaleReturnItem[] = [];
     for (let offset = 0; offset < returnHeaders.length; offset += 800) {
@@ -1834,6 +2274,14 @@ export async function createSaleReturn(saleId: number, selections: ReturnSelecti
     const customer = header.customer_id == null ? null : await transaction.getFirstAsync<Customer>('SELECT * FROM customers WHERE id=? AND accounting_enabled=1', header.customer_id);
     if (customerAccountCreditSyp > 0 && !customer) throw new Error('CUSTOMER_ACCOUNT_INACTIVE');
     const cashRefundSyp = preview.refundTotalSyp - customerAccountCreditSyp;
+    const accountingEnabled = await accountingIsEnabled(transaction);
+    const sourceSalePosted = accountingEnabled
+      ? Boolean(await transaction.getFirstAsync('SELECT id FROM journal_entries WHERE source_type=\'sale\' AND source_id=?', saleId))
+      : false;
+    const customerBalanceBefore = accountingEnabled && customer && customerAccountCreditSyp > 0
+      ? await transaction.getFirstAsync<{ balance_syp: number }>('SELECT balance_syp FROM customer_account_balances WHERE customer_id=?', customer.id)
+      : null;
+    if (accountingEnabled && customer && customerAccountCreditSyp > 0 && !customerBalanceBefore) throw new Error('CUSTOMER_ACCOUNT_BALANCE_MISSING');
     if (cashRefundSyp > 0 && !activeSession) throw new Error('CASH_SESSION_REQUIRED');
     const cash = activeSession ? await transaction.getFirstAsync<{ available_syp: number }>(`SELECT cs.opening_cash_syp
       +COALESCE((SELECT SUM(sp.amount_minor) FROM sale_payments sp JOIN sales s ON s.id=sp.sale_id WHERE s.cash_session_id=cs.id AND sp.currency='SYP'),0)
@@ -1845,34 +2293,72 @@ export async function createSaleReturn(saleId: number, selections: ReturnSelecti
       FROM cash_sessions cs WHERE cs.id=?`, activeSession.id) : null;
     if (cashRefundSyp > 0 && (!cash || !Number.isSafeInteger(cash.available_syp) || cashRefundSyp > cash.available_syp)) throw new Error('INSUFFICIENT_CASH_SESSION_FUNDS');
     const now = new Date().toISOString();
+    const returnUuid = createUuid();
     const inserted = await transaction.runAsync(
       'INSERT INTO sale_returns(uuid,sale_id,refund_total_syp,returned_cost_syp,created_at,updated_at,cash_session_id,customer_account_credit_syp) VALUES(?,?,?,?,?,?,?,?)',
-      createUuid(), saleId, preview.refundTotalSyp, preview.returnedCostSyp, now, now, activeSession?.id ?? null, customerAccountCreditSyp,
+      returnUuid, saleId, preview.refundTotalSyp, preview.returnedCostSyp, now, now, activeSession?.id ?? null, customerAccountCreditSyp,
     );
     returnId = inserted.lastInsertRowId;
     const selectionByItem = new Map(selections.map(selection => [selection.saleItemId, selection]));
+    let restoredAccountingCogsSyp = 0;
     for (const item of preview.items) {
       const selectedRestock = selectionByItem.get(item.saleItemId)?.restockQuantity ?? item.quantity;
       if (!Number.isSafeInteger(selectedRestock) || selectedRestock < 0 || selectedRestock > item.quantity) throw new Error('INVALID_RESTOCK_QUANTITY');
-      const insertedItem = await transaction.runAsync(
-        `INSERT INTO sale_return_items(uuid,return_id,sale_item_id,quantity,refund_amount_syp,cost_reversal_syp,created_at,updated_at)
-         VALUES(?,?,?,?,?,?,?,?)`, createUuid(), returnId, item.saleItemId, item.quantity, item.refundAmountSyp, item.costReversalSyp, now, now,
-      );
-      if (selectedRestock === 0) continue;
       const sold = saleItems.find(saleItem => saleItem.id === item.saleItemId);
-      if (!sold?.product_id) continue;
-      const eligible = await transaction.getFirstAsync<{ product_id: number }>("SELECT product_id FROM inventory_movements WHERE sale_item_id=? AND movement_type='sale' LIMIT 1", sold.id);
-      if (!eligible) continue;
-      const balance = await transaction.getFirstAsync<{ quantity: number; product_uuid: string; product_name: string; barcode: string | null }>(`SELECT b.quantity,p.uuid AS product_uuid,p.name AS product_name,p.barcode FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE b.product_id=? AND b.tracking_enabled=1`, sold.product_id);
-      if (!balance) continue;
-      const after = balance.quantity + selectedRestock;
+      if (!sold) throw new Error('RETURN_ITEM_NOT_FOUND');
+      const eligible = selectedRestock > 0 && sold.product_id
+        ? await transaction.getFirstAsync<{ product_id: number }>("SELECT product_id FROM inventory_movements WHERE sale_item_id=? AND movement_type='sale' LIMIT 1", sold.id)
+        : null;
+      const balance = eligible && sold.product_id
+        ? await transaction.getFirstAsync<{ quantity: number; product_uuid: string; product_name: string; barcode: string | null }>(`SELECT b.quantity,p.uuid AS product_uuid,p.name AS product_name,p.barcode FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE b.product_id=? AND b.tracking_enabled=1`, sold.product_id)
+        : null;
+      const actualRestock = balance ? selectedRestock : 0;
+      let restoredForItem = 0;
+      if (accountingEnabled && actualRestock > 0) {
+        const totalCogs = sourceSalePosted ? sold.accounting_cogs_syp : sold.line_cost_syp;
+        if (!Number.isSafeInteger(totalCogs) || (totalCogs ?? 0) < 0) throw new Error('INVALID_HISTORICAL_COGS');
+        const beforeRestock = sold.accounting_restocked_quantity ?? 0; const afterRestock = beforeRestock + actualRestock;
+        if (!Number.isSafeInteger(afterRestock) || afterRestock > sold.quantity) throw new Error('RETURN_RESTOCK_OVER_SOLD');
+        restoredForItem = incrementalHalfUpAllocation(totalCogs ?? 0, beforeRestock, afterRestock, sold.quantity);
+      }
+      const insertedItem = await transaction.runAsync(
+        `INSERT INTO sale_return_items(uuid,return_id,sale_item_id,quantity,refund_amount_syp,cost_reversal_syp,restock_quantity,accounting_restored_cogs_syp,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?)`, createUuid(), returnId, item.saleItemId, item.quantity, item.refundAmountSyp, item.costReversalSyp, actualRestock,
+        accountingEnabled ? restoredForItem : null, now, now,
+      );
+      if (actualRestock === 0 || !sold.product_id || !balance) continue;
+      const after = balance.quantity + actualRestock;
       if (!Number.isSafeInteger(after)) throw new Error('INVALID_RESTOCK_QUANTITY');
       const changed = await transaction.runAsync('UPDATE inventory_balances SET quantity=?,updated_at=? WHERE product_id=? AND quantity=?', after, now, sold.product_id, balance.quantity);
       if (changed.changes !== 1) throw new Error('INVENTORY_CONCURRENT_CHANGE');
+      if (accountingEnabled) {
+        await recordInventoryValueChange(transaction, { sourceType: 'sale_return', sourceId: returnId, sourceItemId: insertedItem.lastInsertRowId,
+          productId: sold.product_id, quantityDelta: actualRestock, valueDeltaSyp: restoredForItem, occurredAt: now });
+        const updated = await transaction.runAsync(`UPDATE sale_items SET accounting_restocked_quantity=accounting_restocked_quantity+?,accounting_restored_cogs_syp=accounting_restored_cogs_syp+?
+          WHERE id=? AND accounting_restocked_quantity=?`, actualRestock, restoredForItem, sold.id, sold.accounting_restocked_quantity ?? 0);
+        if (updated.changes !== 1) throw new Error('RETURN_RESTOCK_CONCURRENT_UPDATE');
+        sold.accounting_restocked_quantity = (sold.accounting_restocked_quantity ?? 0) + actualRestock;
+        sold.accounting_restored_cogs_syp = (sold.accounting_restored_cogs_syp ?? 0) + restoredForItem;
+        restoredAccountingCogsSyp += restoredForItem;
+        if (!Number.isSafeInteger(restoredAccountingCogsSyp)) throw new Error('ACCOUNTING_COGS_OVERFLOW');
+      }
       await transaction.runAsync(`INSERT INTO inventory_movements(uuid,product_id,product_uuid_snapshot,product_name_snapshot,barcode_snapshot,movement_type,quantity_delta,quantity_before,quantity_after,return_item_id,note,created_at)
-        VALUES(?,?,?,?,?,'return',?,?,?,?,NULL,?)`, createUuid(), sold.product_id, balance.product_uuid, sold.product_name, sold.barcode_snapshot, selectedRestock, balance.quantity, after, insertedItem.lastInsertRowId, now);
+        VALUES(?,?,?,?,?,'return',?,?,?,?,NULL,?)`, createUuid(), sold.product_id, balance.product_uuid, sold.product_name, sold.barcode_snapshot, actualRestock, balance.quantity, after, insertedItem.lastInsertRowId, now);
     }
-    if (customer && customerAccountCreditSyp > 0) await postCustomerAccountEntry(transaction, customer, { type: 'sale_return', delta: -customerAccountCreditSyp, occurredAt: now, saleReturnId: returnId });
+    const customerBalanceAfter = customer && customerAccountCreditSyp > 0
+      ? await postCustomerAccountEntry(transaction, customer, { type: 'sale_return', delta: -customerAccountCreditSyp, occurredAt: now, saleReturnId: returnId })
+      : null;
+    if (accountingEnabled) {
+      const financialAccount = sourceSalePosted ? 'SALES_RETURNS' as const : 'PRIOR_PERIOD_ADJUSTMENT' as const;
+      const lines: JournalLineInput[] = [{ account: financialAccount, debitSyp: preview.refundTotalSyp }];
+      if (cashRefundSyp > 0) lines.push(await changeCashSyp(transaction, -cashRefundSyp, now));
+      if (customerBalanceBefore && customerBalanceAfter != null) lines.push(...signedControlTransitionLines(customerBalanceBefore.balance_syp, customerBalanceAfter, 'ACCOUNTS_RECEIVABLE', 'CUSTOMER_CREDITS'));
+      if (restoredAccountingCogsSyp > 0) lines.push(
+        { account: 'INVENTORY', debitSyp: restoredAccountingCogsSyp },
+        { account: sourceSalePosted ? 'COGS' : 'PRIOR_PERIOD_ADJUSTMENT', creditSyp: restoredAccountingCogsSyp },
+      );
+      await postJournalEntry(transaction, { sourceType: 'sale_return', sourceId: returnId, sourceUuid: returnUuid, occurredAt: now, description: `Customer return — ${header.invoice_number}`, lines });
+    }
   });
   const record = (await getReturns()).find(item => item.id === returnId);
   if (!record) throw new Error('RETURN_NOT_FOUND');
@@ -2031,10 +2517,19 @@ export async function addExpense(categoryId: number, amountSyp: number, note?: s
     const category = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM expense_categories WHERE id=? AND is_active=1', categoryId);
     if (!category) throw new Error('EXPENSE_CATEGORY_INACTIVE');
     const now = new Date().toISOString();
-    await transaction.runAsync(
+    const expenseUuid = createUuid();
+    const result = await transaction.runAsync(
       'INSERT INTO expenses (uuid,description,amount_syp,category_id,note,created_at,updated_at,cash_session_id) VALUES (?,?,?,?,?,?,?,?)',
-      createUuid(), normalizedNote ?? '', amountSyp, categoryId, normalizedNote, now, now, activeSession.id,
+      expenseUuid, normalizedNote ?? '', amountSyp, categoryId, normalizedNote, now, now, activeSession.id,
     );
+    if (await accountingIsEnabled(transaction)) {
+      const cashLine = await changeCashSyp(transaction, -amountSyp, now);
+      await postJournalEntry(transaction, {
+        sourceType: 'expense', sourceId: result.lastInsertRowId, sourceUuid: expenseUuid, occurredAt: now,
+        description: normalizedNote ?? 'Operating expense',
+        lines: [{ account: 'OPERATING_EXPENSE', debitSyp: amountSyp }, cashLine],
+      });
+    }
   });
 }
 
@@ -2101,6 +2596,10 @@ export async function openCashSession(openingCashSyp: number, openingCashUsdCent
   await db.withExclusiveTransactionAsync(async transaction => {
     const active = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1');
     if (active) throw new Error('CASH_SESSION_ALREADY_OPEN');
+    if (await accountingIsEnabled(transaction)) {
+      const control = await transaction.getFirstAsync<{ cash_syp: number; cash_usd_cents: number }>('SELECT cash_syp,cash_usd_cents FROM cash_control WHERE id=1');
+      if (!control || control.cash_syp !== openingCashSyp || control.cash_usd_cents !== openingCashUsdCents) throw new Error('CASH_SESSION_OPENING_MUST_MATCH_BOOK');
+    }
     const now = new Date().toISOString();
     const result = await transaction.runAsync(`INSERT INTO cash_sessions
       (uuid,opened_at,opening_cash_syp,opening_cash_usd_cents,opening_note,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`,
@@ -2143,12 +2642,16 @@ export async function closeCashSession(actualCashSyp: number, actualCashUsdCents
     const differenceUsd = actualCashUsdCents - expectedUsd;
     if (![sales, refunds, cashRefunds, expenses, cashSyp, cashUsd, changeSyp, supplierSyp, supplierUsd, customerSyp, customerUsd, expected, expectedUsd, difference, differenceUsd].every(Number.isSafeInteger) || expected < 0 || expectedUsd < 0) throw new Error('INVALID_CASH_TOTAL');
     const now = new Date().toISOString();
+    const accountingEnabled = await accountingIsEnabled(transaction);
+    const book = accountingEnabled ? await transaction.getFirstAsync<{ cash_syp: number; cash_usd_cents: number; cash_usd_carrying_syp: number }>('SELECT cash_syp,cash_usd_cents,cash_usd_carrying_syp FROM cash_control WHERE id=1') : null;
+    if (accountingEnabled && !book) throw new Error('CASH_CONTROL_MISSING');
     const result = await transaction.runAsync(`UPDATE cash_sessions SET closed_at=?,closing_actual_cash_syp=?,
       closing_sales_total_syp=?,closing_refunds_total_syp=?,closing_expenses_total_syp=?,
       closing_expected_cash_syp=?,closing_difference_syp=?,closing_actual_cash_usd_cents=?,closing_expected_cash_usd_cents=?,
-      closing_difference_usd_cents=?,closing_cash_received_syp=?,closing_cash_received_usd_cents=?,closing_change_given_syp=?,closing_supplier_payments_syp=?,closing_supplier_payments_usd_cents=?,closing_customer_payments_syp=?,closing_customer_payments_usd_cents=?,closing_note=?,updated_at=?
+      closing_difference_usd_cents=?,closing_cash_received_syp=?,closing_cash_received_usd_cents=?,closing_change_given_syp=?,closing_supplier_payments_syp=?,closing_supplier_payments_usd_cents=?,closing_customer_payments_syp=?,closing_customer_payments_usd_cents=?,closing_book_cash_syp=?,closing_book_cash_usd_cents=?,closing_book_cash_usd_carrying_syp=?,closing_note=?,updated_at=?
       WHERE id=? AND closed_at IS NULL`, now, actualCashSyp, sales, refunds, expenses, expected, difference, actualCashUsdCents, expectedUsd,
-    differenceUsd, cashSyp, cashUsd, changeSyp, supplierSyp, supplierUsd, customerSyp, customerUsd, note, now, active.id);
+    differenceUsd, cashSyp, cashUsd, changeSyp, supplierSyp, supplierUsd, customerSyp, customerUsd,
+    book?.cash_syp ?? null, book?.cash_usd_cents ?? null, book?.cash_usd_carrying_syp ?? null, note, now, active.id);
     if (result.changes !== 1) throw new Error('CASH_SESSION_ALREADY_CLOSED');
     id = active.id;
   });
@@ -2195,6 +2698,7 @@ export async function deleteExpense(id: number) {
   if (!Number.isSafeInteger(id) || id <= 0) throw new Error('INVALID_EXPENSE');
   const db = await dbPromise;
   await db.withExclusiveTransactionAsync(async transaction => {
+    if (await accountingIsEnabled(transaction)) throw new Error('POST_CUTOVER_SOURCE_IMMUTABLE');
     const expense = await transaction.getFirstAsync<{ session_closed_at: string | null }>(`SELECT cs.closed_at AS session_closed_at FROM expenses e LEFT JOIN cash_sessions cs ON cs.id=e.cash_session_id WHERE e.id=?`, id);
     if (!expense) throw new Error('EXPENSE_NOT_FOUND');
     if (expense.session_closed_at) throw new Error('CLOSED_SESSION_EXPENSE_IMMUTABLE');

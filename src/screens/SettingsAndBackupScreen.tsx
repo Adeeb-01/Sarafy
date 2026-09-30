@@ -14,6 +14,8 @@ import { ImportEntity, ImportMode, ImportPayload, ImportPreview } from '@/import
 import { createDeterministicUuid } from '@/utils/uuid';
 import { checkProductImages, cleanupTemporaryProductImages, cleanupUnusedProductImages } from '@/media/productImageStorage';
 import { haptics } from '@/utils/haptics';
+import { AccountingScreen } from '@/screens/AccountingScreen';
+import { accountingText } from '@/i18n/accounting';
 
 type PendingImport = { preview: ImportPreview; payload: ImportPayload; portableBackup?: SarafyBackup };
 type InfoSheet = { title: string; description: string; empty?: boolean };
@@ -26,8 +28,10 @@ export function SettingsAndBackupScreen() {
   const [busy, setBusy] = useState(false); const [lastBackupId, setLastBackupId] = useState<string | null>(null);
   const [activeOperation, setActiveOperation] = useState<Operation | null>(null);
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(null); const [confirmUndo, setConfirmUndo] = useState(false); const [info, setInfo] = useState<InfoSheet | null>(null);
+  const [accountingOpen, setAccountingOpen] = useState(false);
   const operationRunning = useRef(false); const rtl = state.language === 'ar';
   const copy = uiText(state.language);
+  const accountingCopy = accountingText(state.language);
   const settings = { exchangeRate: state.exchangeRate, isRoundingEnabled: state.isRoundingEnabled, roundingTarget: state.roundingTarget, language: state.language };
 
   const showError = (error: unknown) => { if (__DEV__) console.error('[SafeImportBackup]', error); haptics.error(); snackbar.show({ text: t(state.language, 'error'), tone: 'error' }); };
@@ -62,7 +66,7 @@ export function SettingsAndBackupScreen() {
     finally { if (portableBackup) await cleanupPickedBackup(portableBackup).catch(() => undefined); await cleanupTemporaryProductImages().catch(() => undefined); }
   });
 
-  const onExportExcel = () => void runBusy('excelExport', async () => { try { const [rateHistory, closedSessions, portable, inventory] = await Promise.all([state.getExchangeRateHistory(), state.getCashSessionsForExport(), collectPortableData(), state.queryInventory()]); await exportExcel(state.products, state.categories, settings, state.sales, state.expenses, state.expenseCategories, rateHistory, state.activeCashSession ? [state.activeCashSession, ...closedSessions] : closedSessions, portable.salePayments, inventory, portable.inventoryMovements, portable.suppliers, portable.purchaseReceipts, portable.purchaseReturns, portable.supplierAccountBalances, portable.supplierAccountEntries, portable.supplierPayments, portable.customers, portable.customerAccountBalances, portable.customerAccountEntries, portable.customerPayments); haptics.success(); snackbar.show({ text: copy.settings.excelExported, tone: 'success' }); } catch (error) { showError(error); } });
+  const onExportExcel = () => void runBusy('excelExport', async () => { try { const [rateHistory, closedSessions, portable, inventory] = await Promise.all([state.getExchangeRateHistory(), state.getCashSessionsForExport(), collectPortableData(), state.queryInventory()]); await exportExcel(state.products, state.categories, settings, state.sales, state.expenses, state.expenseCategories, rateHistory, state.activeCashSession ? [state.activeCashSession, ...closedSessions] : closedSessions, portable.salePayments, inventory, portable.inventoryMovements, portable.suppliers, portable.purchaseReceipts, portable.purchaseReturns, portable.supplierAccountBalances, portable.supplierAccountEntries, portable.supplierPayments, portable.customers, portable.customerAccountBalances, portable.customerAccountEntries, portable.customerPayments, portable.accounting); haptics.success(); snackbar.show({ text: copy.settings.excelExported, tone: 'success' }); } catch (error) { showError(error); } });
   const onImportExcel = () => void runBusy('excelImport', async () => { try { const data = await pickExcel(settings); if (!data) return; const now = new Date().toISOString(); await previewAndImport({ version: 4, exportedAt: now, products: data.products, categories: data.categories.map(name => ({ uuid: createDeterministicUuid(`category:${name.toLocaleLowerCase()}`), name, created_at: now, updated_at: now })), settings: data.settings, sales: [], expenses: [] }); } catch (error) { showError(error); } });
   const onImageHealth = () => void runBusy('images', async () => { try { const report = await checkProductImages(state.products.map(product => product.image_uri ?? '')); const hasIssues = report.missing.length > 0 || report.orphaned.length > 0; setInfo(hasIssues ? { title: t(state.language, 'imageHealth'), description: copy.settings.imageHealthSummary(formatNumber(report.healthy, state.language), formatNumber(report.missing.length, state.language), formatNumber(report.orphaned.length, state.language)) } : { title: copy.settings.noImageIssues, description: copy.settings.noImageIssuesDescription, empty: true }); } catch (error) { showError(error); } });
   const onListBackups = () => void runBusy('backups', async () => { try { const backups = await listAutomaticBackups(); setInfo(backups.length ? { title: t(state.language, 'automaticBackups'), description: backups.map(item => `${item.name} (${Math.ceil(item.size / 1024)} KB)`).join('\n') } : { title: t(state.language, 'automaticBackups'), description: copy.settings.noBackupsDescription, empty: true }); } catch (error) { showError(error); } });
@@ -79,12 +83,16 @@ export function SettingsAndBackupScreen() {
   const purchaseReturnHistorySkipped = pendingImport?.preview.issues.some(issue => issue.code === 'SUPPLIER_PURCHASE_RETURN_SKIPPED_OPERATIONAL_INVENTORY') ?? false;
   const supplierAccountSkipped = pendingImport?.preview.issues.some(issue => issue.code === 'SUPPLIER_ACCOUNT_SKIPPED_OPERATIONAL_FINANCE') ?? false;
   const customerAccountSkipped = pendingImport?.preview.issues.some(issue => issue.code === 'CUSTOMER_ACCOUNT_SKIPPED_OPERATIONAL_FINANCE') ?? false;
+  const generalLedgerSkipped = pendingImport?.preview.issues.some(issue => issue.code === 'GENERAL_LEDGER_SKIPPED_OPERATIONAL_FINANCE') ?? false;
+
+  if (accountingOpen) return <AccountingScreen onBack={() => setAccountingOpen(false)} />;
 
   return <ScreenContainer><ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
     <View style={styles.pageHeading}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{t(state.language, 'settings')}</Text><Text style={[typography.body, { color: colors.textSecondary, textAlign: rtl ? 'right' : 'left' }]}>{copy.app.settingsSubtitle}</Text></View>
 
     <SettingsSection title={t(state.language, 'roundingTarget')} subtitle={copy.settings.roundingSubtitle} rtl={rtl}><SegmentedControl rtl={rtl} value={state.roundingTarget} onChange={value => void state.updateSetting('roundingTarget', value)} options={([5, 10, 500, 1000] as const).map(value => ({ value, label: `${formatNumber(value, state.language)} ${t(state.language, 'syp')}` }))} /></SettingsSection>
     <SettingsSection title={t(state.language, 'language')} rtl={rtl}><SegmentedControl rtl={rtl} value={state.language} onChange={value => void state.updateSetting('language', value)} options={[{ value: 'ar' as const, label: t(state.language, 'arabic') }, { value: 'en' as const, label: t(state.language, 'english') }]} /></SettingsSection>
+    <SettingsSection title={accountingCopy.title} rtl={rtl}><ListItem icon="book-open" title={`${accountingCopy.journal} · ${accountingCopy.reports}`} description={accountingCopy.subtitle} rtl={rtl} onPress={() => setAccountingOpen(true)} /></SettingsSection>
 
     <SettingsSection title={t(state.language, 'backup')} subtitle={copy.settings.backupSubtitle} rtl={rtl}>
       <View style={styles.inner}><SegmentedControl rtl={rtl} value={importMode} onChange={setImportMode} options={(['safe_merge', 'selective', 'full_restore'] as const).map(value => ({ value, label: t(state.language, value) }))} />
@@ -109,6 +117,7 @@ export function SettingsAndBackupScreen() {
     {purchaseHistorySkipped && <View style={[styles.safety, { backgroundColor: colors.warningSoft, flexDirection: rtl ? 'row-reverse' : 'row' }]}><Feather name="info" size={18} color={colors.warning} /><Text style={[typography.caption, { flex: 1, color: colors.warning, textAlign: rtl ? 'right' : 'left' }]}>{t(state.language, 'purchaseHistorySkipped')}</Text></View>}
     {supplierAccountSkipped && <View style={[styles.safety, { backgroundColor: colors.warningSoft, flexDirection: rtl ? 'row-reverse' : 'row' }]}><Feather name="info" size={18} color={colors.warning} /><Text style={[typography.caption, { flex: 1, color: colors.warning, textAlign: rtl ? 'right' : 'left' }]}>{t(state.language, 'supplierAccountSkipped')}</Text></View>}
     {customerAccountSkipped && <View style={[styles.safety, { backgroundColor: colors.warningSoft, flexDirection: rtl ? 'row-reverse' : 'row' }]}><Feather name="info" size={18} color={colors.warning} /><Text style={[typography.caption, { flex: 1, color: colors.warning, textAlign: rtl ? 'right' : 'left' }]}>{t(state.language, 'customerAccountSkipped')}</Text></View>}
+    {generalLedgerSkipped && <View style={[styles.safety, { backgroundColor: colors.warningSoft, flexDirection: rtl ? 'row-reverse' : 'row' }]}><Feather name="info" size={18} color={colors.warning} /><Text style={[typography.caption, { flex: 1, color: colors.warning, textAlign: rtl ? 'right' : 'left' }]}>{t(state.language, 'generalLedgerSkipped')}</Text></View>}
     {purchaseReturnHistorySkipped && <View style={[styles.safety, { backgroundColor: colors.warningSoft, flexDirection: rtl ? 'row-reverse' : 'row' }]}><Feather name="info" size={18} color={colors.warning} /><Text style={[typography.caption, { flex: 1, color: colors.warning, textAlign: rtl ? 'right' : 'left' }]}>{t(state.language, 'purchaseReturnHistorySkipped')}</Text></View>}
   </ConfirmSheet>
   <ConfirmSheet visible={confirmUndo} onClose={() => setConfirmUndo(false)} onConfirm={undoLastImport} title={t(state.language, 'undoImport')} description={t(state.language, 'undoWarning')} confirmLabel={t(state.language, 'confirm')} cancelLabel={t(state.language, 'cancel')} tone="danger" loading={busy} rtl={rtl} />

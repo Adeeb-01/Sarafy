@@ -6,7 +6,7 @@ import { isStoredProductImagePath } from '@/media/productImageStorage';
 import { normalizeBarcode } from '@/utils/barcode';
 import { calculateCashDifference, calculateExpectedCash, calculateExpectedCashWithSettlements } from '@/utils/cashSession';
 import { usdCentsToSyp } from '@/utils/multiCurrency';
-import { isValidImportedSaleSettlement } from '@/utils/customerAccounts';
+import { isValidImportedSalePaymentRows, isValidImportedSaleSettlement } from '@/utils/customerAccounts';
 import { insertFullRestorePayload } from './fullRestoreInserter';
 
 const SETTING_KEYS = ['exchangeRate', 'isRoundingEnabled', 'roundingTarget', 'language'] as const;
@@ -40,6 +40,17 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
   const isFullRestore = options.mode === 'full_restore';
   await db.withExclusiveTransactionAsync(async transaction => {
     if (isFullRestore) {
+      await transaction.runAsync(`UPDATE accounting_settings SET accounting_enabled=0,accounting_started_at=NULL,cutover_exchange_rate_syp_per_usd=NULL,opening_journal_entry_id=NULL,updated_at=? WHERE id=1`, new Date().toISOString());
+      await transaction.runAsync('DELETE FROM journal_lines');
+      await transaction.runAsync('DELETE FROM journal_entries');
+      await transaction.runAsync('DELETE FROM supplier_foreign_allocations');
+      await transaction.runAsync('DELETE FROM supplier_foreign_position_layers');
+      await transaction.runAsync('DELETE FROM inventory_value_movements');
+      await transaction.runAsync('DELETE FROM inventory_value_balances');
+      await transaction.runAsync('DELETE FROM accounting_cutover_positions');
+      await transaction.runAsync('DELETE FROM cash_control');
+      await transaction.runAsync('DELETE FROM cash_adjustments');
+      await transaction.runAsync(`UPDATE gl_account_balances SET debit_total_syp=0,credit_total_syp=0,net_balance_syp=0,updated_at=?`, new Date().toISOString());
       await transaction.runAsync('DELETE FROM supplier_payment_tenders');
       await transaction.runAsync('DELETE FROM supplier_account_entries');
       await transaction.runAsync('DELETE FROM supplier_account_balances');
@@ -457,7 +468,7 @@ export function defaultImportOptions(mode: ImportOptions['mode'] = 'safe_merge')
     mode,
     conflictStrategy: 'newest',
     entities: mode === 'full_restore'
-      ? ['products', 'categories', 'settings', 'cash_sessions', 'customers', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'purchase_receipts', 'purchase_receipt_items', 'purchase_returns', 'purchase_return_items', 'supplier_account_balances', 'supplier_account_entries', 'supplier_payments', 'supplier_payment_tenders', 'customer_account_balances', 'customer_account_entries', 'customer_payments', 'customer_payment_tenders', 'inventory_balances', 'inventory_movements', 'product_images', 'sale_drafts', 'sale_draft_items']
+      ? ['products', 'categories', 'settings', 'cash_sessions', 'customers', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'purchase_receipts', 'purchase_receipt_items', 'purchase_returns', 'purchase_return_items', 'supplier_account_balances', 'supplier_account_entries', 'supplier_payments', 'supplier_payment_tenders', 'customer_account_balances', 'customer_account_entries', 'customer_payments', 'customer_payment_tenders', 'inventory_balances', 'inventory_movements', 'accounting', 'product_images', 'sale_drafts', 'sale_draft_items']
       : ['products', 'categories', 'cash_sessions', 'sales', 'sale_items', 'sale_payments', 'sale_returns', 'sale_return_items', 'expense_categories', 'expenses', 'exchange_rate_history', 'suppliers', 'product_images'],
     importSettings: mode === 'full_restore',
   };
@@ -472,6 +483,59 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
   if (payload.version > 8) throw new Error('BACKUP_NEWER_THAN_APP');
   const validDate = (input: unknown) => typeof input === 'string' && Number.isFinite(Date.parse(input));
   const finite = (input: unknown) => typeof input === 'number' && Number.isFinite(input);
+  if (payload.accounting) {
+    const state = payload.accounting;
+    if (!isRecord(state.settings) || ![0, 1].includes(state.settings.accounting_enabled) || state.settings.functional_currency !== 'SYP' ||
+        !Array.isArray(state.cutoverPositions) || !Array.isArray(state.accounts) || !Array.isArray(state.journalEntries) ||
+        !Array.isArray(state.journalLines) || !Array.isArray(state.accountBalances) || !Array.isArray(state.inventoryValueBalances) ||
+        !Array.isArray(state.inventoryValueMovements) || !Array.isArray(state.supplierPositionLayers) || !Array.isArray(state.supplierAllocations) ||
+        !Array.isArray(state.cashAdjustments)) throw new Error('INVALID_ACCOUNTING_BACKUP');
+    if (state.settings.accounting_enabled === 1
+      ? !validDate(state.settings.accounting_started_at) || !Number.isSafeInteger(state.settings.cutover_exchange_rate_syp_per_usd) || (state.settings.cutover_exchange_rate_syp_per_usd ?? 0) <= 0
+      : state.settings.accounting_started_at != null || state.settings.cutover_exchange_rate_syp_per_usd != null || state.settings.opening_journal_uuid != null) throw new Error('INVALID_ACCOUNTING_SETTINGS');
+    const entryUuids = new Set<string>(); const accountUuids = new Set<string>(); const lineUuids = new Set<string>();
+    for (const account of state.accounts) {
+      if (!isUuid(account.uuid) || accountUuids.has(account.uuid) || typeof account.code !== 'string' || typeof account.system_key !== 'string' ||
+          typeof account.name_ar !== 'string' || typeof account.name_en !== 'string' || !['DEBIT', 'CREDIT'].includes(account.normal_side) ||
+          ![0, 1].includes(account.is_system) || ![0, 1].includes(account.active) || !validDate(account.created_at) || !validDate(account.updated_at)) throw new Error('INVALID_ACCOUNTING_ACCOUNT');
+      accountUuids.add(account.uuid);
+    }
+    const sourceTypes = new Set(['opening', 'sale', 'sale_return', 'expense', 'purchase', 'supplier_return', 'supplier_payment', 'customer_payment', 'inventory_adjustment', 'cash_adjustment', 'reversal']);
+    const sourceIdentities = new Set<string>(); let openingEntries = 0;
+    for (const entry of state.journalEntries) {
+      if (!isUuid(entry.uuid) || entryUuids.has(entry.uuid) || !sourceTypes.has(entry.source_type) || !validDate(entry.occurred_at) || !validDate(entry.created_at) ||
+          typeof entry.description_snapshot !== 'string' || (entry.source_type === 'opening' ? entry.source_uuid != null : !isUuid(entry.source_uuid)) ||
+          (entry.reversal_of_entry_uuid != null && !isUuid(entry.reversal_of_entry_uuid))) throw new Error('INVALID_ACCOUNTING_JOURNAL');
+      if (entry.source_type === 'opening') {
+        openingEntries += 1;
+        if (openingEntries > 1 || entry.reversal_of_entry_uuid != null) throw new Error('INVALID_ACCOUNTING_JOURNAL');
+      } else if (entry.source_type !== 'reversal') {
+        if (entry.reversal_of_entry_uuid != null) throw new Error('INVALID_ACCOUNTING_JOURNAL');
+        const identity = `${entry.source_type}:${entry.source_uuid}`;
+        if (sourceIdentities.has(identity)) throw new Error('INVALID_ACCOUNTING_JOURNAL');
+        sourceIdentities.add(identity);
+      }
+      entryUuids.add(entry.uuid);
+    }
+    const entryByUuid = new Map(state.journalEntries.map(entry => [entry.uuid, entry])); const reversalTargets = new Set<string>();
+    for (const entry of state.journalEntries) {
+      if (entry.source_type !== 'reversal') continue;
+      const originalUuid = entry.reversal_of_entry_uuid;
+      const original = originalUuid ? entryByUuid.get(originalUuid) : null;
+      if (!originalUuid || entry.source_uuid !== originalUuid || !original || original.source_type === 'reversal' || reversalTargets.has(originalUuid)) throw new Error('INVALID_ACCOUNTING_REVERSAL');
+      reversalTargets.add(originalUuid);
+    }
+    const totals = new Map<string, { debit: number; credit: number; lines: number }>();
+    for (const line of state.journalLines) {
+      if (!isUuid(line.uuid) || lineUuids.has(line.uuid) || !entryUuids.has(line.journal_entry_uuid) || !accountUuids.has(line.account_uuid) ||
+          !Number.isSafeInteger(line.debit_syp) || !Number.isSafeInteger(line.credit_syp) || (line.debit_syp > 0) === (line.credit_syp > 0) ||
+          line.debit_syp < 0 || line.credit_syp < 0 || !validDate(line.created_at)) throw new Error('INVALID_ACCOUNTING_JOURNAL_LINE');
+      lineUuids.add(line.uuid); const total = totals.get(line.journal_entry_uuid) ?? { debit: 0, credit: 0, lines: 0 };
+      total.debit += line.debit_syp; total.credit += line.credit_syp; total.lines += 1;
+      if (![total.debit, total.credit].every(Number.isSafeInteger)) throw new Error('INVALID_ACCOUNTING_JOURNAL_LINE'); totals.set(line.journal_entry_uuid, total);
+    }
+    if (state.journalEntries.some(entry => { const total = totals.get(entry.uuid); return !total || total.lines < 2 || total.debit <= 0 || total.debit !== total.credit; })) throw new Error('INVALID_ACCOUNTING_JOURNAL');
+  }
   for (const product of payload.products) {
     if (!product || !isRecord(product) || !isUuid(product.uuid) || typeof product.name !== 'string' ||
         !product.name.trim() || typeof product.category !== 'string' || !product.category.trim() ||
@@ -642,7 +706,7 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
     const key = `${payment.sale_uuid}:${payment.currency}`; if (paymentCurrencies.has(key)) throw new Error('DUPLICATE_SALE_PAYMENT'); paymentCurrencies.add(key);
     paymentTotals.set(payment.sale_uuid, (paymentTotals.get(payment.sale_uuid) ?? 0) + payment.syp_equivalent);
   }
-  for (const [saleUuid, tender] of paymentTotals) { const sale = saleByUuid.get(saleUuid)!; if (tender - (sale.change_syp ?? 0) !== sale.net_total_syp) throw new Error('PAYMENT_SETTLEMENT_CONFLICT'); }
+  for (const [saleUuid, tender] of paymentTotals) { const sale = saleByUuid.get(saleUuid)!; if (!isValidImportedSalePaymentRows(sale.net_total_syp, sale.on_account_syp ?? 0, tender, sale.change_syp ?? 0)) throw new Error('PAYMENT_SETTLEMENT_CONFLICT'); }
   for (const draft of payload.drafts ?? []) {
     if (!draft || !isRecord(draft) || !isUuid(draft.uuid) || !validDate(draft.created_at) || !validDate(draft.updated_at) ||
         !finite(draft.exchange_rate) || draft.exchange_rate <= 0 || !finite(draft.discount_syp) || draft.discount_syp < 0 || !Array.isArray(draft.items)) {

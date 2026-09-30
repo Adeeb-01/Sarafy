@@ -4,14 +4,14 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { getDatabase } from '@/database/database';
 import { CashSession, Customer, CustomerAccountEntry, CustomerPayment, CustomerPaymentTender, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryBalance, InventoryMovement, Product, PurchaseReceipt, PurchaseReceiptItem, PurchaseReturn, PurchaseReturnItem, Sale, SaleItem, SalePayment, SaleReturn, SaleReturnItem, Settings, Supplier, SupplierAccountBalance, SupplierAccountEntry, SupplierPayment, SupplierPaymentTender, SuspendedSale, SuspendedSaleItem } from '@/types';
-import { ImportPayload, PortableCategory } from '@/import/importTypes';
+import { ImportPayload, PortableAccountingState, PortableCategory } from '@/import/importTypes';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { readSarafyArchive, writeSarafyArchive } from './backupArchive';
 import { assertReadableNonEmptyFile, ensureBackupDirectory, getBackupDirectory } from './backupStorage';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 
 const BACKUP_VERSION = 8;
-const SCHEMA_VERSION = 18;
+const SCHEMA_VERSION = 19;
 const APPLICATION_ID = 'com.sarafy.catalog';
 const ROOT = getBackupDirectory().uri;
 const PRE_IMPORT_LIMIT = 5;
@@ -26,7 +26,7 @@ export interface BackupManifest {
   backupType: 'manual' | 'pre-import';
   reason: string;
   includes: { dataJson: true; productImages: boolean; drafts?: boolean };
-  counts: { products: number; categories: number; sales: number; saleItems: number; salePayments?: number; expenses: number; images: number; drafts?: number; draftItems?: number; returns?: number; returnItems?: number; expenseCategories?: number; exchangeRateHistory?: number; cashSessions?: number; inventoryBalances?: number; inventoryMovements?: number; suppliers?: number; purchaseReceipts?: number; purchaseReceiptItems?: number; purchaseReturns?: number; purchaseReturnItems?: number; supplierAccountBalances?: number; supplierAccountEntries?: number; supplierPayments?: number; supplierPaymentTenders?: number; customers?: number; customerAccountBalances?: number; customerAccountEntries?: number; customerPayments?: number; customerPaymentTenders?: number };
+  counts: { products: number; categories: number; sales: number; saleItems: number; salePayments?: number; expenses: number; images: number; drafts?: number; draftItems?: number; returns?: number; returnItems?: number; expenseCategories?: number; exchangeRateHistory?: number; cashSessions?: number; inventoryBalances?: number; inventoryMovements?: number; suppliers?: number; purchaseReceipts?: number; purchaseReceiptItems?: number; purchaseReturns?: number; purchaseReturnItems?: number; supplierAccountBalances?: number; supplierAccountEntries?: number; supplierPayments?: number; supplierPaymentTenders?: number; customers?: number; customerAccountBalances?: number; customerAccountEntries?: number; customerPayments?: number; customerPaymentTenders?: number; journalEntries?: number; journalLines?: number };
 }
 
 export interface SarafyBackup {
@@ -69,6 +69,20 @@ export async function collectPortableData(): Promise<ImportPayload> {
     db.getAllAsync<CustomerPayment>('SELECT * FROM customer_payments ORDER BY id'),
     db.getAllAsync<CustomerPaymentTender>('SELECT * FROM customer_payment_tenders ORDER BY id'),
   ]);
+  const [accountingSettings, cutoverPositions, accounts, journalEntries, journalLines, accountBalances, inventoryValueBalances, inventoryValueMovements, cashControl, supplierPositionLayers, supplierAllocations, cashAdjustments] = await Promise.all([
+    db.getFirstAsync<{ accounting_enabled: number; accounting_started_at: string | null; functional_currency: 'SYP'; cutover_exchange_rate_syp_per_usd: number | null; opening_journal_entry_id: number | null; created_at: string; updated_at: string }>('SELECT * FROM accounting_settings WHERE id=1'),
+    db.getAllAsync<{ uuid: string; position_type: string; entity_type: string; entity_id: number; native_amount_minor: number; carrying_value_syp: number; created_at: string }>('SELECT * FROM accounting_cutover_positions ORDER BY id'),
+    db.getAllAsync<{ id: number; uuid: string; code: string; system_key: string; name_ar: string; name_en: string; account_type: string; normal_side: string; is_system: number; active: number; created_at: string; updated_at: string }>('SELECT * FROM gl_accounts ORDER BY id'),
+    db.getAllAsync<{ id: number; uuid: string; source_type: string; source_id: number | null; source_uuid: string | null; reference: string | null; occurred_at: string; created_at: string; description_snapshot: string; reversal_of_entry_id: number | null }>('SELECT * FROM journal_entries ORDER BY id'),
+    db.getAllAsync<{ uuid: string; journal_entry_id: number; account_id: number; debit_syp: number; credit_syp: number; source_currency: 'SYP' | 'USD' | null; source_amount_minor: number | null; exchange_rate_syp_per_usd: number | null; memo: string | null; created_at: string }>('SELECT * FROM journal_lines ORDER BY id'),
+    db.getAllAsync<{ account_id: number; debit_total_syp: number; credit_total_syp: number; net_balance_syp: number; updated_at: string }>('SELECT * FROM gl_account_balances ORDER BY account_id'),
+    db.getAllAsync<{ product_id: number; quantity_snapshot: number; carrying_value_syp: number; updated_at: string }>('SELECT * FROM inventory_value_balances ORDER BY product_id'),
+    db.getAllAsync<{ uuid: string; product_id: number; source_type: string; source_id: number | null; source_item_id: number | null; quantity_delta: number; quantity_before: number; quantity_after: number; value_delta_syp: number; value_before_syp: number; value_after_syp: number; created_at: string }>('SELECT * FROM inventory_value_movements ORDER BY id'),
+    db.getFirstAsync<{ cash_syp: number; cash_usd_cents: number; cash_usd_carrying_syp: number; updated_at: string }>('SELECT cash_syp,cash_usd_cents,cash_usd_carrying_syp,updated_at FROM cash_control WHERE id=1'),
+    db.getAllAsync<{ id: number; uuid: string; supplier_id: number; position_type: 'PAYABLE' | 'ADVANCE'; source_type: string; source_id: number | null; original_usd_cents: number; remaining_usd_cents: number; original_carrying_syp: number; remaining_carrying_syp: number; exchange_rate_syp_per_usd: number | null; created_at: string; updated_at: string }>('SELECT * FROM supplier_foreign_position_layers ORDER BY id'),
+    db.getAllAsync<{ uuid: string; layer_id: number; source_type: string; source_id: number; native_usd_cents: number; carrying_value_syp: number; created_at: string }>('SELECT * FROM supplier_foreign_allocations ORDER BY id'),
+    db.getAllAsync<{ id: number; uuid: string; currency: 'SYP' | 'USD'; amount_minor: number; carrying_value_syp: number; exchange_rate_syp_per_usd: number | null; reason: string; note: string | null; occurred_at: string; created_at: string }>('SELECT * FROM cash_adjustments ORDER BY id'),
+  ]);
   const stored = Object.fromEntries(settingsRows.map(row => [row.key, JSON.parse(row.value)])) as Partial<Settings>;
   const settings: Settings = {
     exchangeRate: stored.exchangeRate ?? 15000,
@@ -98,10 +112,51 @@ export async function collectPortableData(): Promise<ImportPayload> {
   const supplierUuidById = new Map(suppliers.map(supplier => [supplier.id, supplier.uuid]));
   const purchaseReturnUuidById = new Map(purchaseReturns.map(item => [item.id, item.uuid]));
   const supplierPaymentUuidById = new Map(supplierPayments.map(item => [item.id, item.uuid]));
+  const customerPaymentUuidById = new Map(customerPayments.map(item => [item.id, item.uuid]));
+  const expenseUuidById = new Map(expenses.map(item => [item.id, item.uuid]));
+  const inventoryMovementUuidById = new Map(inventoryMovements.map(item => [item.id, item.uuid]));
+  const cashAdjustmentUuidById = new Map(cashAdjustments.map(item => [item.id, item.uuid]));
+  const accountUuidById = new Map(accounts.map(item => [item.id, item.uuid]));
+  const journalUuidById = new Map(journalEntries.map(item => [item.id, item.uuid]));
+  const supplierLayerUuidById = new Map(supplierPositionLayers.map(item => [item.id, item.uuid]));
+  const sourceUuid = (type: string, id: number | null) => {
+    if (id == null) return null;
+    if (type === 'sale') return saleUuidById.get(id) ?? null;
+    if (type === 'sale_return') return saleReturnUuidById.get(id) ?? null;
+    if (type === 'expense') return expenseUuidById.get(id) ?? null;
+    if (type === 'purchase') return purchaseReceiptUuidById.get(id) ?? null;
+    if (type === 'supplier_return') return purchaseReturnUuidById.get(id) ?? null;
+    if (type === 'supplier_payment') return supplierPaymentUuidById.get(id) ?? null;
+    if (type === 'customer_payment') return customerPaymentUuidById.get(id) ?? null;
+    if (type === 'inventory_adjustment') return inventoryMovementUuidById.get(id) ?? null;
+    if (type === 'cash_adjustment') return cashAdjustmentUuidById.get(id) ?? null;
+    return null;
+  };
+  const inventoryValueSourceUuid = (type: string, id: number | null) => {
+    if (type === 'sale') return id == null ? null : saleUuidById.get(id) ?? null;
+    if (type === 'sale_return') return id == null ? null : saleReturnUuidById.get(id) ?? null;
+    if (type === 'purchase') return id == null ? null : purchaseReceiptUuidById.get(id) ?? null;
+    if (type === 'supplier_return') return id == null ? null : purchaseReturnUuidById.get(id) ?? null;
+    return id == null ? null : inventoryMovementUuidById.get(id) ?? null;
+  };
+  const inventoryValueSourceItemUuid = (type: string, id: number | null) => {
+    if (id == null) return null;
+    if (type === 'sale') return saleItemUuidById.get(id) ?? null;
+    if (type === 'sale_return') return returnItemUuidById.get(id) ?? null;
+    if (type === 'purchase') return purchaseItemUuidById.get(id) ?? null;
+    if (type === 'supplier_return') return purchaseReturnItemUuidById.get(id) ?? null;
+    return inventoryMovementUuidById.get(id) ?? null;
+  };
+  const supplierSourceUuid = (type: string, id: number | null) => {
+    if (id == null) return null;
+    if (type === 'purchase') return purchaseReceiptUuidById.get(id) ?? null;
+    if (type === 'supplier_return') return purchaseReturnUuidById.get(id) ?? null;
+    if (type === 'supplier_payment') return supplierPaymentUuidById.get(id) ?? null;
+    return null;
+  };
   const paymentTendersByPayment = new Map<number, SupplierPaymentTender[]>();
   for (const tender of supplierPaymentTenders) paymentTendersByPayment.set(tender.supplier_payment_id, [...(paymentTendersByPayment.get(tender.supplier_payment_id) ?? []), tender]);
   const customerUuidById = new Map(customers.map(customer => [customer.id, customer.uuid]));
-  const customerPaymentUuidById = new Map(customerPayments.map(payment => [payment.id, payment.uuid]));
   const customerTendersByPayment = new Map<number, CustomerPaymentTender[]>();
   for (const tender of customerPaymentTenders) customerTendersByPayment.set(tender.customer_payment_id, [...(customerTendersByPayment.get(tender.customer_payment_id) ?? []), tender]);
   const saleReturnUuidById = new Map(returnRows.map(record => [record.id, record.uuid]));
@@ -111,10 +166,40 @@ export async function collectPortableData(): Promise<ImportPayload> {
   for (const item of purchaseReturnItems) purchaseReturnItemsByReturn.set(item.purchase_return_id, [...(purchaseReturnItemsByReturn.get(item.purchase_return_id) ?? []), item]);
   const returnItemsByReturn = new Map<number, SaleReturnItem[]>();
   for (const item of returnItems) returnItemsByReturn.set(item.return_id, [...(returnItemsByReturn.get(item.return_id) ?? []), item]);
+  const accounting: PortableAccountingState | undefined = accountingSettings ? {
+    settings: { accounting_enabled: accountingSettings.accounting_enabled, accounting_started_at: accountingSettings.accounting_started_at,
+      functional_currency: accountingSettings.functional_currency, cutover_exchange_rate_syp_per_usd: accountingSettings.cutover_exchange_rate_syp_per_usd,
+      opening_journal_uuid: accountingSettings.opening_journal_entry_id == null ? null : journalUuidById.get(accountingSettings.opening_journal_entry_id) ?? null,
+      created_at: accountingSettings.created_at, updated_at: accountingSettings.updated_at },
+    cutoverPositions: cutoverPositions.map(row => ({ uuid: row.uuid, position_type: row.position_type, entity_type: row.entity_type,
+      entity_uuid: row.entity_type === 'PRODUCT' ? productUuidById.get(row.entity_id) ?? null : row.entity_type === 'SUPPLIER' ? supplierUuidById.get(row.entity_id) ?? null : row.entity_type === 'CUSTOMER' ? customerUuidById.get(row.entity_id) ?? null : null,
+      native_amount_minor: row.native_amount_minor, carrying_value_syp: row.carrying_value_syp, created_at: row.created_at })),
+    accounts: accounts.map(({ id: _id, ...row }) => row),
+    journalEntries: journalEntries.map(row => ({ uuid: row.uuid, source_type: row.source_type, source_uuid: row.source_uuid ?? sourceUuid(row.source_type, row.source_id), reference: row.reference,
+      occurred_at: row.occurred_at, created_at: row.created_at, description_snapshot: row.description_snapshot,
+      reversal_of_entry_uuid: row.reversal_of_entry_id == null ? null : journalUuidById.get(row.reversal_of_entry_id) ?? null })),
+    journalLines: journalLines.map(row => ({ uuid: row.uuid, journal_entry_uuid: journalUuidById.get(row.journal_entry_id) ?? '', account_uuid: accountUuidById.get(row.account_id) ?? '',
+      debit_syp: row.debit_syp, credit_syp: row.credit_syp, source_currency: row.source_currency, source_amount_minor: row.source_amount_minor,
+      exchange_rate_syp_per_usd: row.exchange_rate_syp_per_usd, memo: row.memo, created_at: row.created_at })),
+    accountBalances: accountBalances.map(row => ({ account_uuid: accountUuidById.get(row.account_id) ?? '', debit_total_syp: row.debit_total_syp, credit_total_syp: row.credit_total_syp, net_balance_syp: row.net_balance_syp, updated_at: row.updated_at })),
+    inventoryValueBalances: inventoryValueBalances.map(row => ({ product_uuid: productUuidById.get(row.product_id) ?? '', quantity_snapshot: row.quantity_snapshot, carrying_value_syp: row.carrying_value_syp, updated_at: row.updated_at })),
+    inventoryValueMovements: inventoryValueMovements.map(row => ({ uuid: row.uuid, product_uuid: productUuidById.get(row.product_id) ?? '', source_type: row.source_type,
+      source_uuid: inventoryValueSourceUuid(row.source_type, row.source_id), source_item_uuid: inventoryValueSourceItemUuid(row.source_type, row.source_item_id),
+      quantity_delta: row.quantity_delta, quantity_before: row.quantity_before, quantity_after: row.quantity_after, value_delta_syp: row.value_delta_syp,
+      value_before_syp: row.value_before_syp, value_after_syp: row.value_after_syp, created_at: row.created_at })),
+    cashControl: cashControl ?? null,
+    supplierPositionLayers: supplierPositionLayers.map(row => ({ uuid: row.uuid, supplier_uuid: supplierUuidById.get(row.supplier_id) ?? '', position_type: row.position_type,
+      source_type: row.source_type, source_uuid: supplierSourceUuid(row.source_type, row.source_id), original_usd_cents: row.original_usd_cents,
+      remaining_usd_cents: row.remaining_usd_cents, original_carrying_syp: row.original_carrying_syp, remaining_carrying_syp: row.remaining_carrying_syp,
+      exchange_rate_syp_per_usd: row.exchange_rate_syp_per_usd, created_at: row.created_at, updated_at: row.updated_at })),
+    supplierAllocations: supplierAllocations.map(row => ({ uuid: row.uuid, layer_uuid: supplierLayerUuidById.get(row.layer_id) ?? '', source_type: row.source_type,
+      source_uuid: supplierSourceUuid(row.source_type, row.source_id) ?? '', native_usd_cents: row.native_usd_cents, carrying_value_syp: row.carrying_value_syp, created_at: row.created_at })),
+    cashAdjustments: cashAdjustments.map(({ id: _id, ...row }) => row),
+  } : undefined;
   return {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
-    products, categories, settings, expenseCategories, exchangeRateHistory,
+    products, categories, settings, expenseCategories, exchangeRateHistory, accounting,
     customers: customers.map(({ id: _id, balance_syp: _balance, sale_count: _count, latest_sale_at: _latest, ...customer }) => customer),
     customerAccountBalances: customerAccountBalances.map(balance => ({ customer_uuid: customerUuidById.get(balance.customer_id) ?? '', balance_syp: balance.balance_syp, updated_at: balance.updated_at })),
     customerPayments: customerPayments.map(({ id, customer_id, cash_session_id, tenders: _tenders, ...payment }) => ({ ...payment, customer_uuid: customerUuidById.get(customer_id) ?? '', cash_session_uuid: sessionUuidById.get(cash_session_id) ?? '', tenders: (customerTendersByPayment.get(id) ?? []).map(({ id: _id, customer_payment_id: _paymentId, ...tender }) => tender) })),
@@ -149,7 +234,8 @@ suppliers: suppliers.map(({ id: _id, receipt_count: _count, latest_receipt_at: _
       uuid: record.uuid, sale_uuid: saleUuidById.get(record.sale_id) ?? '', cash_session_uuid: record.cash_session_id ? sessionUuidById.get(record.cash_session_id) ?? null : null, refund_total_syp: record.refund_total_syp,
       returned_cost_syp: record.returned_cost_syp, created_at: record.created_at, updated_at: record.updated_at,
       customer_account_credit_syp: record.customer_account_credit_syp ?? 0,
-      items: (returnItemsByReturn.get(record.id) ?? []).map(item => ({ uuid: item.uuid, sale_item_uuid: saleItemUuidById.get(item.sale_item_id) ?? '', quantity: item.quantity, refund_amount_syp: item.refund_amount_syp, cost_reversal_syp: item.cost_reversal_syp, created_at: item.created_at, updated_at: item.updated_at })),
+      items: (returnItemsByReturn.get(record.id) ?? []).map(item => ({ uuid: item.uuid, sale_item_uuid: saleItemUuidById.get(item.sale_item_id) ?? '', quantity: item.quantity, refund_amount_syp: item.refund_amount_syp, cost_reversal_syp: item.cost_reversal_syp,
+        restock_quantity: item.restock_quantity ?? null, accounting_restored_cogs_syp: item.accounting_restored_cogs_syp ?? null, created_at: item.created_at, updated_at: item.updated_at })),
     })),
   };
 }
@@ -197,6 +283,8 @@ async function buildBackup(type: BackupManifest['backupType'], reason: string): 
         customerAccountEntries: data.customerAccountEntries?.length ?? 0,
         customerPayments: data.customerPayments?.length ?? 0,
         customerPaymentTenders: data.customerPayments?.reduce((sum, payment) => sum + payment.tenders.length, 0) ?? 0,
+        journalEntries: data.accounting?.journalEntries.length ?? 0,
+        journalLines: data.accounting?.journalLines.length ?? 0,
       },
     },
     data,

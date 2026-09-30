@@ -3,7 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as XLSX from 'xlsx';
 import { CashSessionSummary, ExchangeRateHistoryEntry, Expense, ExpenseCategory, InventoryListItem, Product, Sale, SalePayment, Settings } from '@/types';
-import { PortableCustomer, PortableCustomerAccountBalance, PortableCustomerAccountEntry, PortableCustomerPayment, PortableInventoryMovement, PortablePurchaseReceipt, PortablePurchaseReturn, PortableSupplier, PortableSupplierAccountBalance, PortableSupplierAccountEntry, PortableSupplierPayment } from '@/import/importTypes';
+import { PortableAccountingState, PortableCustomer, PortableCustomerAccountBalance, PortableCustomerAccountEntry, PortableCustomerPayment, PortableInventoryMovement, PortablePurchaseReceipt, PortablePurchaseReturn, PortableSupplier, PortableSupplierAccountBalance, PortableSupplierAccountEntry, PortableSupplierPayment } from '@/import/importTypes';
 import { exchangeRateChangePercent } from '@/utils/exchangeRate';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
@@ -55,6 +55,7 @@ export async function exportExcel(
   customerAccountBalances: PortableCustomerAccountBalance[] = [],
   customerAccountEntries: PortableCustomerAccountEntry[] = [],
   customerPayments: PortableCustomerPayment[] = [],
+  accounting?: PortableAccountingState,
 ) {
   const workbook = XLSX.utils.book_new();
   const sessionUuidById = new Map(cashSessions.map(session => [session.id, session.uuid]));
@@ -231,6 +232,39 @@ export async function exportExcel(
   const customerTenderSheet = XLSX.utils.json_to_sheet(customerPayments.flatMap(payment => payment.tenders.map(tender => ({ tender_uuid: tender.uuid, payment_uuid: payment.uuid, currency: tender.currency, amount_minor: tender.amount_minor, syp_equivalent: tender.syp_equivalent, exchange_rate: tender.exchange_rate_syp_per_usd ?? '', created_at: tender.created_at }))));
   customerTenderSheet['!cols'] = Array.from({ length: 7 }, () => ({ wch: 28 }));
   XLSX.utils.book_append_sheet(workbook, customerTenderSheet, 'Customer Payment Tenders');
+
+  if (accounting) {
+    const accountByUuid = new Map(accounting.accounts.map(account => [account.uuid, account]));
+    const entryByUuid = new Map(accounting.journalEntries.map(entry => [entry.uuid, entry]));
+    const linesByEntry = new Map<string, typeof accounting.journalLines>();
+    for (const line of accounting.journalLines) linesByEntry.set(line.journal_entry_uuid, [...(linesByEntry.get(line.journal_entry_uuid) ?? []), line]);
+    const chartSheet = XLSX.utils.json_to_sheet(accounting.accounts.map(account => ({
+      code: account.code, system_key: account.system_key, name_ar: account.name_ar, name_en: account.name_en,
+      account_type: account.account_type, normal_side: account.normal_side, active: account.active,
+    })));
+    chartSheet['!cols'] = [{ wch: 12 }, { wch: 34 }, { wch: 30 }, { wch: 30 }, { wch: 20 }, { wch: 14 }, { wch: 10 }];
+    XLSX.utils.book_append_sheet(workbook, chartSheet, 'Chart of Accounts');
+    const journalSheet = XLSX.utils.json_to_sheet(accounting.journalEntries.map(entry => {
+      const lines = linesByEntry.get(entry.uuid) ?? [];
+      return { journal_uuid: entry.uuid, occurred_at: entry.occurred_at, source_type: entry.source_type, source_uuid: entry.source_uuid ?? '', reference: entry.reference ?? '', description: entry.description_snapshot,
+        total_debit_syp: lines.reduce((sum, line) => sum + line.debit_syp, 0), total_credit_syp: lines.reduce((sum, line) => sum + line.credit_syp, 0) };
+    }));
+    journalSheet['!cols'] = [{ wch: 38 }, { wch: 24 }, { wch: 22 }, { wch: 38 }, { wch: 24 }, { wch: 44 }, { wch: 20 }, { wch: 20 }];
+    XLSX.utils.book_append_sheet(workbook, journalSheet, 'General Journal');
+    const journalLinesSheet = XLSX.utils.json_to_sheet(accounting.journalLines.map(line => {
+      const entry = entryByUuid.get(line.journal_entry_uuid); const account = accountByUuid.get(line.account_uuid);
+      return { line_uuid: line.uuid, journal_uuid: line.journal_entry_uuid, occurred_at: entry?.occurred_at ?? '', reference: entry?.reference ?? '', account_code: account?.code ?? '', account_key: account?.system_key ?? '', debit_syp: line.debit_syp, credit_syp: line.credit_syp, source_currency: line.source_currency ?? '', source_amount_minor: line.source_amount_minor ?? '', exchange_rate_syp_per_usd: line.exchange_rate_syp_per_usd ?? '', memo: line.memo ?? '' };
+    }));
+    journalLinesSheet['!cols'] = Array.from({ length: 12 }, () => ({ wch: 24 }));
+    XLSX.utils.book_append_sheet(workbook, journalLinesSheet, 'Journal Lines');
+    const balanceByAccount = new Map(accounting.accountBalances.map(balance => [balance.account_uuid, balance]));
+    const trialSheet = XLSX.utils.json_to_sheet(accounting.accounts.map(account => {
+      const balance = balanceByAccount.get(account.uuid); const net = balance?.net_balance_syp ?? 0;
+      return { code: account.code, account_ar: account.name_ar, account_en: account.name_en, debit_balance_syp: Math.max(net, 0), credit_balance_syp: Math.max(-net, 0) };
+    }));
+    trialSheet['!cols'] = [{ wch: 12 }, { wch: 30 }, { wch: 30 }, { wch: 22 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(workbook, trialSheet, 'Trial Balance');
+  }
 
   const filename = `sarafy-products-${new Date().toISOString().slice(0, 10)}.xlsx`;
   const uri = `${FileSystem.cacheDirectory}${filename}`;
