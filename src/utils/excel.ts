@@ -264,6 +264,118 @@ export async function exportExcel(
     }));
     trialSheet['!cols'] = [{ wch: 12 }, { wch: 30 }, { wch: 30 }, { wch: 22 }, { wch: 22 }];
     XLSX.utils.book_append_sheet(workbook, trialSheet, 'Trial Balance');
+
+    const netByKey = new Map(accounting.accounts.map(account => [account.system_key, balanceByAccount.get(account.uuid)?.net_balance_syp ?? 0]));
+    const net = (key: string) => netByKey.get(key) ?? 0;
+    const salesRevenueSyp = -net('SALES_REVENUE');
+    const salesReturnsSyp = net('SALES_RETURNS');
+    const netSalesSyp = salesRevenueSyp - salesReturnsSyp;
+    const cogsSyp = net('COGS');
+    const grossProfitSyp = netSalesSyp - cogsSyp;
+    const operatingExpensesSyp = net('OPERATING_EXPENSE');
+    const inventoryValuationVarianceSyp = net('INVENTORY_VALUATION_VARIANCE');
+    const inventoryAdjustmentNetSyp = -net('INVENTORY_ADJUSTMENT_GAIN') - net('INVENTORY_ADJUSTMENT_LOSS');
+    const cashOverShortNetSyp = -net('CASH_OVER_SHORT');
+    const realizedFxNetSyp = -net('REALIZED_FX_GAIN') - net('REALIZED_FX_LOSS');
+    const netProfitSyp = grossProfitSyp - operatingExpensesSyp - inventoryValuationVarianceSyp
+      + inventoryAdjustmentNetSyp + cashOverShortNetSyp + realizedFxNetSyp;
+    const profitLossSheet = XLSX.utils.json_to_sheet([
+      ['Sales Revenue', salesRevenueSyp], ['Sales Returns', -salesReturnsSyp], ['Net Sales', netSalesSyp],
+      ['COGS', -cogsSyp], ['Gross Profit', grossProfitSyp], ['Operating Expenses', -operatingExpensesSyp],
+      ['Inventory Valuation Variance', -inventoryValuationVarianceSyp], ['Inventory Adjustment Net', inventoryAdjustmentNetSyp],
+      ['Cash Over / Short Net', cashOverShortNetSyp], ['Realized FX Net', realizedFxNetSyp], ['Net Profit', netProfitSyp],
+    ].map(([metric, amount_syp]) => ({ metric, amount_syp })));
+    profitLossSheet['!cols'] = [{ wch: 34 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(workbook, profitLossSheet, 'Profit & Loss');
+
+    const trialRows = accounting.accounts.map(account => {
+      const value = balanceByAccount.get(account.uuid)?.net_balance_syp ?? 0;
+      return { account, value, debit: Math.max(value, 0), credit: Math.max(-value, 0) };
+    });
+    const trialDebitSyp = trialRows.reduce((sum, row) => sum + row.debit, 0);
+    const trialCreditSyp = trialRows.reduce((sum, row) => sum + row.credit, 0);
+    const assetsSyp = trialRows.filter(row => row.account.account_type === 'ASSET').reduce((sum, row) => sum + row.value, 0);
+    const liabilitiesSyp = -trialRows.filter(row => row.account.account_type === 'LIABILITY').reduce((sum, row) => sum + row.value, 0);
+    const openingEquitySyp = -net('OPENING_EQUITY');
+    const ownerContributionsSyp = -net('OWNER_CONTRIBUTIONS');
+    const ownerDrawingsSyp = net('OWNER_DRAWINGS');
+    const priorPeriodAdjustmentSyp = -net('PRIOR_PERIOD_ADJUSTMENT');
+    const equitySyp = openingEquitySyp + ownerContributionsSyp - ownerDrawingsSyp + priorPeriodAdjustmentSyp + netProfitSyp;
+    const liabilitiesAndEquitySyp = liabilitiesSyp + equitySyp;
+    const balanceSheet = XLSX.utils.json_to_sheet([
+      ['Assets', assetsSyp], ['Liabilities', liabilitiesSyp], ['Opening Equity', openingEquitySyp],
+      ['Owner Contributions', ownerContributionsSyp], ['Owner Drawings', -ownerDrawingsSyp],
+      ['Prior Period Adjustment', priorPeriodAdjustmentSyp], ['Current Earnings', netProfitSyp],
+      ['Equity', equitySyp], ['Liabilities + Equity', liabilitiesAndEquitySyp],
+      ['Trial Balance Balanced', trialDebitSyp === trialCreditSyp ? 'YES' : 'NO'],
+      ['Balance Sheet Balanced', assetsSyp === liabilitiesAndEquitySyp ? 'YES' : 'NO'],
+    ].map(([metric, value]) => ({ metric, value })));
+    balanceSheet['!cols'] = [{ wch: 34 }, { wch: 24 }];
+    XLSX.utils.book_append_sheet(workbook, balanceSheet, 'Balance Sheet');
+
+    const productByUuid = new Map(products.map(product => [product.uuid, product]));
+    const inventoryValuationSheet = XLSX.utils.json_to_sheet(accounting.inventoryValueBalances.map(balance => ({
+      product_uuid: balance.product_uuid,
+      product_name: productByUuid.get(balance.product_uuid)?.name ?? '',
+      quantity: balance.quantity_snapshot,
+      carrying_value_syp: balance.carrying_value_syp,
+      average_unit_value_syp: balance.quantity_snapshot > 0 ? balance.carrying_value_syp / balance.quantity_snapshot : 0,
+      updated_at: balance.updated_at,
+    })));
+    inventoryValuationSheet['!cols'] = [{ wch: 38 }, { wch: 30 }, { wch: 14 }, { wch: 22 }, { wch: 24 }, { wch: 24 }];
+    XLSX.utils.book_append_sheet(workbook, inventoryValuationSheet, 'Inventory Valuation');
+
+    const cashControlSheet = XLSX.utils.json_to_sheet(accounting.cashControl ? [{
+      cash_syp: accounting.cashControl.cash_syp,
+      cash_usd_cents: accounting.cashControl.cash_usd_cents,
+      cash_usd_carrying_syp: accounting.cashControl.cash_usd_carrying_syp,
+      updated_at: accounting.cashControl.updated_at,
+    }] : []);
+    cashControlSheet['!cols'] = [{ wch: 22 }, { wch: 22 }, { wch: 28 }, { wch: 24 }];
+    XLSX.utils.book_append_sheet(workbook, cashControlSheet, 'Cash Control');
+
+    const supplierByUuid = new Map(suppliers.map(supplier => [supplier.uuid, supplier]));
+    const supplierPositionsSheet = XLSX.utils.json_to_sheet(accounting.supplierPositionLayers.map(layer => ({
+      layer_uuid: layer.uuid,
+      supplier_uuid: layer.supplier_uuid,
+      supplier_name: supplierByUuid.get(layer.supplier_uuid)?.name ?? '',
+      position_type: layer.position_type,
+      source_type: layer.source_type,
+      source_uuid: layer.source_uuid ?? '',
+      original_usd_cents: layer.original_usd_cents,
+      remaining_usd_cents: layer.remaining_usd_cents,
+      original_carrying_syp: layer.original_carrying_syp,
+      remaining_carrying_syp: layer.remaining_carrying_syp,
+      exchange_rate_syp_per_usd: layer.exchange_rate_syp_per_usd ?? '',
+      created_at: layer.created_at,
+      updated_at: layer.updated_at,
+    })));
+    supplierPositionsSheet['!cols'] = Array.from({ length: 13 }, () => ({ wch: 26 }));
+    XLSX.utils.book_append_sheet(workbook, supplierPositionsSheet, 'Supplier Positions');
+
+    const customerReceivableSyp = customerAccountBalances.reduce((sum, balance) => sum + Math.max(balance.balance_syp, 0), 0);
+    const customerCreditsSyp = customerAccountBalances.reduce((sum, balance) => sum + Math.max(-balance.balance_syp, 0), 0);
+    const inventoryCarryingSyp = accounting.inventoryValueBalances.reduce((sum, balance) => sum + balance.carrying_value_syp, 0);
+    const supplierPayableSyp = accounting.supplierPositionLayers.filter(layer => layer.position_type === 'PAYABLE').reduce((sum, layer) => sum + layer.remaining_carrying_syp, 0);
+    const supplierAdvanceSyp = accounting.supplierPositionLayers.filter(layer => layer.position_type === 'ADVANCE').reduce((sum, layer) => sum + layer.remaining_carrying_syp, 0);
+    const controls = [
+      ['CASH_SYP', accounting.cashControl?.cash_syp ?? 0, net('CASH_SYP')],
+      ['CASH_USD', accounting.cashControl?.cash_usd_carrying_syp ?? 0, net('CASH_USD')],
+      ['ACCOUNTS_RECEIVABLE', customerReceivableSyp, net('ACCOUNTS_RECEIVABLE')],
+      ['CUSTOMER_CREDITS', -customerCreditsSyp, net('CUSTOMER_CREDITS')],
+      ['INVENTORY', inventoryCarryingSyp, net('INVENTORY')],
+      ['ACCOUNTS_PAYABLE', -supplierPayableSyp, net('ACCOUNTS_PAYABLE')],
+      ['SUPPLIER_ADVANCES', supplierAdvanceSyp, net('SUPPLIER_ADVANCES')],
+    ] as const;
+    const reconciliationSheet = XLSX.utils.json_to_sheet(controls.map(([control, control_syp, ledger_syp]) => ({
+      control,
+      control_syp,
+      ledger_syp,
+      difference_syp: control_syp - ledger_syp,
+      matched: control_syp === ledger_syp ? 'YES' : 'NO',
+    })));
+    reconciliationSheet['!cols'] = [{ wch: 28 }, { wch: 22 }, { wch: 22 }, { wch: 22 }, { wch: 14 }];
+    XLSX.utils.book_append_sheet(workbook, reconciliationSheet, 'Reconciliation');
   }
 
   const filename = `sarafy-products-${new Date().toISOString().slice(0, 10)}.xlsx`;

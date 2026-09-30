@@ -334,6 +334,15 @@ test('Excel accounting sheets are report-only and cannot mutate the General Ledg
   assert.doesNotMatch(importSection, /journal_entries|journal_lines|gl_account_balances|accounting_settings/);
 });
 
+test('Excel accounting report export includes release-gate control and financial sheets', () => {
+  for (const sheet of ['Profit & Loss', 'Balance Sheet', 'Reconciliation', 'Inventory Valuation', 'Cash Control', 'Supplier Positions']) {
+    assert.match(excelSource, new RegExp(sheet));
+  }
+  assert.match(excelSource, /customerReceivableSyp/);
+  assert.match(excelSource, /supplierPayableSyp/);
+  assert.match(excelSource, /difference_syp/);
+});
+
 test('accounting UI wires activation, immutable reports, health, ledger, PDF and cash adjustment', () => {
   assert.match(accountingScreenSource, /getAccountingCutoverPreview/);
   assert.match(accountingScreenSource, /activateAccounting/);
