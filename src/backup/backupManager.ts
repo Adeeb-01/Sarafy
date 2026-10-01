@@ -11,7 +11,7 @@ import { assertReadableNonEmptyFile, ensureBackupDirectory, getBackupDirectory }
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 
 const BACKUP_VERSION = 8;
-const SCHEMA_VERSION = 19;
+const SCHEMA_VERSION = 20;
 const APPLICATION_ID = 'com.sarafy.catalog';
 const ROOT = getBackupDirectory().uri;
 const PRE_IMPORT_LIMIT = 5;
@@ -480,6 +480,10 @@ function migrateLegacyJsonBackup(value: Record<string, unknown>): SarafyBackup {
       uuid: isUuid(row.uuid) ? row.uuid : createDeterministicUuid(`legacy:product:${id}:${row.name}`),
       name: row.name, category: row.category, price_usd: row.price_usd,
       cost_usd: typeof row.cost_usd === 'number' ? row.cost_usd : 0,
+      sale_price_currency: row.sale_price_currency === 'SYP' ? 'SYP' : 'USD',
+      sale_price_syp: typeof row.sale_price_syp === 'number' ? row.sale_price_syp : null,
+      cost_currency: row.cost_currency === 'SYP' ? 'SYP' : 'USD',
+      cost_syp: typeof row.cost_syp === 'number' ? row.cost_syp : null,
       image_uri: isStoredProductImagePath(typeof row.image_uri === 'string' ? row.image_uri : null) ? row.image_uri as string : null,
       barcode: typeof row.barcode === 'string' ? row.barcode : null,
       created_at: createdAt,

@@ -1,4 +1,5 @@
 export type Language = 'ar' | 'en';
+export type ProductPricingCurrency = 'USD' | 'SYP';
 
 export interface Product {
   id: number;
@@ -7,6 +8,10 @@ export interface Product {
   category: string;
   price_usd: number;
   cost_usd: number;
+  sale_price_currency: ProductPricingCurrency;
+  sale_price_syp: number | null;
+  cost_currency: ProductPricingCurrency;
+  cost_syp: number | null;
   image_uri: string | null;
   barcode: string | null;
   created_at: string;
@@ -38,6 +43,16 @@ export interface SaleItem {
   unit_cost_syp: number;
   line_total_syp: number;
   line_cost_syp: number;
+  sale_price_source_currency?: ProductPricingCurrency | null;
+  sale_price_native_decimal?: string | null;
+  sale_price_native_syp?: number | null;
+  sale_price_exchange_rate?: number | null;
+  sale_price_rounding_enabled?: number | null;
+  sale_price_rounding_target?: number | null;
+  cost_source_currency?: ProductPricingCurrency | null;
+  cost_native_decimal?: string | null;
+  cost_native_syp?: number | null;
+  cost_exchange_rate?: number | null;
   accounting_cogs_syp?: number | null;
   accounting_restocked_quantity?: number;
   accounting_restored_cogs_syp?: number;
@@ -266,6 +281,16 @@ export interface SaleItemInput {
   quantity: number;
   unitPriceSyp: number;
   unitCostSyp: number;
+  salePriceSourceCurrency?: ProductPricingCurrency | null;
+  salePriceNativeDecimal?: string | null;
+  salePriceNativeSyp?: number | null;
+  salePriceExchangeRate?: number | null;
+  salePriceRoundingEnabled?: boolean | null;
+  salePriceRoundingTarget?: number | null;
+  costSourceCurrency?: ProductPricingCurrency | null;
+  costNativeDecimal?: string | null;
+  costNativeSyp?: number | null;
+  costExchangeRate?: number | null;
 }
 
 export type InventoryMovementType = 'opening' | 'stock_in' | 'stock_out' | 'adjustment' | 'sale' | 'return' | 'purchase' | 'purchase_return';
@@ -334,6 +359,9 @@ export interface InventoryHealthReport {
   missingPurchaseReturnMovements: number;
   cumulativePurchaseOverReturns: number;
   orphanPurchaseReturnItems: number;
+  invalidProductPricing: number;
+  invalidSalePricingSnapshots: number;
+  invalidDraftPricingSnapshots: number;
 }
 
 export interface Supplier {
@@ -555,6 +583,16 @@ export interface SuspendedSaleItem {
   quantity: number;
   unit_price_syp: number;
   unit_cost_syp: number;
+  sale_price_source_currency?: ProductPricingCurrency | null;
+  sale_price_native_decimal?: string | null;
+  sale_price_native_syp?: number | null;
+  sale_price_exchange_rate?: number | null;
+  sale_price_rounding_enabled?: number | null;
+  sale_price_rounding_target?: number | null;
+  cost_source_currency?: ProductPricingCurrency | null;
+  cost_native_decimal?: string | null;
+  cost_native_syp?: number | null;
+  cost_exchange_rate?: number | null;
   created_at: string;
   updated_at: string;
 }

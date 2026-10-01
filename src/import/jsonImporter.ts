@@ -8,6 +8,7 @@ import { calculateCashDifference, calculateExpectedCash, calculateExpectedCashWi
 import { usdCentsToSyp } from '@/utils/multiCurrency';
 import { isValidImportedSalePaymentRows, isValidImportedSaleSettlement } from '@/utils/customerAccounts';
 import { insertFullRestorePayload } from './fullRestoreInserter';
+import { canonicalizeLegacyUsdNumber, validateNewUsdDecimal, validatePricingSnapshot } from '@/utils/productPricing';
 
 const SETTING_KEYS = ['exchangeRate', 'isRoundingEnabled', 'roundingTarget', 'language'] as const;
 
@@ -154,6 +155,12 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
     if (options.entities.includes('products')) {
       for (const item of payload.products) {
         const barcode = normalizeBarcode(item.barcode);
+        const saleCurrency = item.sale_price_currency ?? 'USD';
+        const costCurrency = item.cost_currency ?? 'USD';
+        const saleSyp = item.sale_price_syp ?? null;
+        const costSyp = item.cost_syp ?? null;
+        if (saleCurrency === 'USD') validateNewUsdDecimal(canonicalizeLegacyUsdNumber(item.price_usd));
+        if (costCurrency === 'USD') validateNewUsdDecimal(canonicalizeLegacyUsdNumber(item.cost_usd));
         importedProductIds.set(item.id, item.uuid);
         const local = await transaction.getFirstAsync<{ id: number; uuid: string; updated_at: string }>(
           'SELECT id,uuid,updated_at FROM products WHERE uuid=? OR (barcode IS NOT NULL AND barcode=?) LIMIT 1',
@@ -161,17 +168,17 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
         );
         if (!local) {
           const result = await transaction.runAsync(
-            `INSERT INTO products(uuid,name,category,price_usd,cost_usd,image_uri,barcode,created_at,updated_at,is_active)
-             VALUES(?,?,?,?,?,?,?,?,?,?)`,
-            item.uuid, item.name, item.category, item.price_usd, item.cost_usd, item.image_uri,
+            `INSERT INTO products(uuid,name,category,price_usd,cost_usd,sale_price_currency,sale_price_syp,cost_currency,cost_syp,image_uri,barcode,created_at,updated_at,is_active)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            item.uuid, item.name, item.category, item.price_usd, item.cost_usd, saleCurrency, saleSyp, costCurrency, costSyp, item.image_uri,
             barcode, item.created_at, item.updated_at, item.is_active ?? 1,
           );
           localProductByImportedId.set(item.id, result.lastInsertRowId);
           inserted += 1;
         } else if (shouldUseImported(local.updated_at, item.updated_at, options)) {
           await transaction.runAsync(
-            `UPDATE products SET name=?,category=?,price_usd=?,cost_usd=?,barcode=?,updated_at=?,is_active=? WHERE uuid=?`,
-            item.name, item.category, item.price_usd, item.cost_usd, barcode,
+            `UPDATE products SET name=?,category=?,price_usd=?,cost_usd=?,sale_price_currency=?,sale_price_syp=?,cost_currency=?,cost_syp=?,barcode=?,updated_at=?,is_active=? WHERE uuid=?`,
+            item.name, item.category, item.price_usd, item.cost_usd, saleCurrency, saleSyp, costCurrency, costSyp, barcode,
             item.updated_at, item.is_active ?? 1, local.uuid,
           );
           localProductByImportedId.set(item.id, local.id);
@@ -233,11 +240,17 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
             const exists = await transaction.getFirstAsync<{ id: number }>('SELECT id FROM sale_items WHERE uuid=?', item.uuid);
             if (exists) { skipped += 1; continue; }
             await transaction.runAsync(
-              `INSERT INTO sale_items(uuid,sale_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,line_total_syp,line_cost_syp,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+              `INSERT INTO sale_items(uuid,sale_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,line_total_syp,line_cost_syp,
+                sale_price_source_currency,sale_price_native_decimal,sale_price_native_syp,sale_price_exchange_rate,sale_price_rounding_enabled,sale_price_rounding_target,
+                cost_source_currency,cost_native_decimal,cost_native_syp,cost_exchange_rate,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
               item.uuid, saleId, item.product_id ? localProductByImportedId.get(item.product_id) ?? null : null,
               item.product_name, item.barcode_snapshot ?? null, item.quantity, item.unit_price_syp, item.unit_cost_syp,
-              item.line_total_syp, item.line_cost_syp, item.created_at, item.updated_at,
+              item.line_total_syp, item.line_cost_syp,
+              item.sale_price_source_currency ?? null, item.sale_price_native_decimal ?? null, item.sale_price_native_syp ?? null,
+              item.sale_price_exchange_rate ?? null, item.sale_price_rounding_enabled ?? null, item.sale_price_rounding_target ?? null,
+              item.cost_source_currency ?? null, item.cost_native_decimal ?? null, item.cost_native_syp ?? null, item.cost_exchange_rate ?? null,
+              item.created_at, item.updated_at,
             );
             inserted += 1;
           }
@@ -316,12 +329,18 @@ async function executeImportInternal(preview: ImportPreview): Promise<ImportResu
         if (!options.entities.includes('sale_draft_items')) continue;
         for (const item of draft.items) {
           await transaction.runAsync(
-            `INSERT INTO sale_draft_items(uuid,draft_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,created_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?)`,
+            `INSERT INTO sale_draft_items(uuid,draft_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,
+              sale_price_source_currency,sale_price_native_decimal,sale_price_native_syp,sale_price_exchange_rate,sale_price_rounding_enabled,sale_price_rounding_target,
+              cost_source_currency,cost_native_decimal,cost_native_syp,cost_exchange_rate,created_at,updated_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             item.uuid, result.lastInsertRowId,
             item.product_id ? localProductByImportedId.get(item.product_id) ?? null : null,
             item.product_name, item.barcode_snapshot ?? null, item.quantity,
-            item.unit_price_syp, item.unit_cost_syp, item.created_at, item.updated_at,
+            item.unit_price_syp, item.unit_cost_syp,
+            item.sale_price_source_currency ?? null, item.sale_price_native_decimal ?? null, item.sale_price_native_syp ?? null,
+            item.sale_price_exchange_rate ?? null, item.sale_price_rounding_enabled ?? null, item.sale_price_rounding_target ?? null,
+            item.cost_source_currency ?? null, item.cost_native_decimal ?? null, item.cost_native_syp ?? null, item.cost_exchange_rate ?? null,
+            item.created_at, item.updated_at,
           );
           inserted += 1;
         }
@@ -545,6 +564,14 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
         (product.barcode !== null && typeof product.barcode !== 'string')) {
       throw new Error('INVALID_PRODUCT');
     }
+    const saleCurrency = product.sale_price_currency ?? 'USD';
+    const costCurrency = product.cost_currency ?? 'USD';
+    const saleSyp = product.sale_price_syp ?? null;
+    const costSyp = product.cost_syp ?? null;
+    if (!['USD', 'SYP'].includes(saleCurrency) || !['USD', 'SYP'].includes(costCurrency) ||
+        (saleSyp != null && (!Number.isSafeInteger(saleSyp) || saleSyp < 0)) ||
+        (costSyp != null && (!Number.isSafeInteger(costSyp) || costSyp < 0)) ||
+        (saleCurrency === 'SYP' && saleSyp == null) || (costCurrency === 'SYP' && costSyp == null)) throw new Error('INVALID_PRODUCT');
   }
   for (const category of payload.categories) {
     if (!category || !isRecord(category) || !isUuid(category.uuid) || typeof category.name !== 'string' ||
@@ -690,6 +717,18 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
           !finite(item.unit_cost_syp) || !finite(item.line_total_syp) || !finite(item.line_cost_syp) ||
           (item.barcode_snapshot != null && typeof item.barcode_snapshot !== 'string') ||
           !validDate(item.created_at) || !validDate(item.updated_at)) throw new Error('INVALID_SALE_ITEM');
+      if (item.sale_price_source_currency != null || item.cost_source_currency != null) {
+        const replayedCost = validatePricingSnapshot({
+          productId: item.product_id, productName: item.product_name, barcodeSnapshot: item.barcode_snapshot, quantity: item.quantity,
+          unitPriceSyp: item.unit_price_syp, unitCostSyp: item.unit_cost_syp,
+          salePriceSourceCurrency: item.sale_price_source_currency ?? undefined, salePriceNativeDecimal: item.sale_price_native_decimal ?? null,
+          salePriceNativeSyp: item.sale_price_native_syp ?? null, salePriceExchangeRate: item.sale_price_exchange_rate ?? null,
+          salePriceRoundingEnabled: item.sale_price_rounding_enabled == null ? null : item.sale_price_rounding_enabled === 1,
+          salePriceRoundingTarget: item.sale_price_rounding_target ?? null, costSourceCurrency: item.cost_source_currency ?? undefined,
+          costNativeDecimal: item.cost_native_decimal ?? null, costNativeSyp: item.cost_native_syp ?? null, costExchangeRate: item.cost_exchange_rate ?? null,
+        });
+        if (replayedCost !== item.line_cost_syp || item.unit_price_syp * item.quantity !== item.line_total_syp) throw new Error('INVALID_PRODUCT_PRICING_SNAPSHOT');
+      }
     }
   }
   const saleByUuid = new Map(payload.sales.map(sale => [sale.uuid, sale]));
@@ -719,6 +758,15 @@ export function assertImportPayload(value: unknown): asserts value is ImportPayl
           !validDate(item.created_at) || !validDate(item.updated_at)) {
         throw new Error('INVALID_SALE_DRAFT_ITEM');
       }
+      if (item.sale_price_source_currency != null || item.cost_source_currency != null) validatePricingSnapshot({
+        productId: item.product_id, productName: item.product_name, barcodeSnapshot: item.barcode_snapshot, quantity: item.quantity,
+        unitPriceSyp: item.unit_price_syp, unitCostSyp: item.unit_cost_syp,
+        salePriceSourceCurrency: item.sale_price_source_currency ?? undefined, salePriceNativeDecimal: item.sale_price_native_decimal ?? null,
+        salePriceNativeSyp: item.sale_price_native_syp ?? null, salePriceExchangeRate: item.sale_price_exchange_rate ?? null,
+        salePriceRoundingEnabled: item.sale_price_rounding_enabled == null ? null : item.sale_price_rounding_enabled === 1,
+        salePriceRoundingTarget: item.sale_price_rounding_target ?? null, costSourceCurrency: item.cost_source_currency ?? undefined,
+        costNativeDecimal: item.cost_native_decimal ?? null, costNativeSyp: item.cost_native_syp ?? null, costExchangeRate: item.cost_exchange_rate ?? null,
+      });
     }
   }
   for (const record of payload.returns ?? []) {

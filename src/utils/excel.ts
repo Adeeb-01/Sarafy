@@ -8,6 +8,7 @@ import { exchangeRateChangePercent } from '@/utils/exchangeRate';
 import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 import { assertAvailableDiskSpace } from '@/utils/storageSafety';
+import { canonicalizeLegacyUsdNumber, validateNewUsdDecimal } from '@/utils/productPricing';
 
 const PRODUCTS_SHEET = 'Products';
 const CATEGORIES_SHEET = 'Categories';
@@ -26,6 +27,10 @@ type ProductRow = {
   category?: unknown;
   price_usd?: unknown;
   cost_usd?: unknown;
+  sale_price_currency?: unknown;
+  sale_price_syp?: unknown;
+  cost_currency?: unknown;
+  cost_syp?: unknown;
   barcode?: unknown;
   image_uri?: unknown;
   created_at?: unknown;
@@ -66,6 +71,10 @@ export async function exportExcel(
     category: product.category,
     price_usd: product.price_usd,
     cost_usd: product.cost_usd,
+    sale_price_currency: product.sale_price_currency,
+    sale_price_syp: product.sale_price_syp ?? '',
+    cost_currency: product.cost_currency,
+    cost_syp: product.cost_syp ?? '',
     barcode: product.barcode ?? '',
     image_uri: product.image_uri ?? '',
     created_at: product.created_at,
@@ -73,7 +82,7 @@ export async function exportExcel(
     is_active: product.is_active,
   }));
   const productSheet = XLSX.utils.json_to_sheet(productRows, {
-    header: ['uuid', 'id', 'name', 'category', 'price_usd', 'cost_usd', 'barcode', 'image_uri', 'created_at', 'updated_at', 'is_active'],
+    header: ['uuid', 'id', 'name', 'category', 'sale_price_currency', 'price_usd', 'sale_price_syp', 'cost_currency', 'cost_usd', 'cost_syp', 'barcode', 'image_uri', 'created_at', 'updated_at', 'is_active'],
   });
   productSheet['!cols'] = [
     { wch: 10 }, { wch: 30 }, { wch: 22 }, { wch: 14 },
@@ -126,6 +135,16 @@ export async function exportExcel(
     line_total_syp: item.line_total_syp,
     unit_cost_syp: item.unit_cost_syp,
     line_cost_syp: item.line_cost_syp,
+    sale_price_source_currency: item.sale_price_source_currency ?? '',
+    sale_price_native_decimal: item.sale_price_native_decimal ?? '',
+    sale_price_native_syp: item.sale_price_native_syp ?? '',
+    sale_price_exchange_rate: item.sale_price_exchange_rate ?? '',
+    sale_price_rounding_enabled: item.sale_price_rounding_enabled ?? '',
+    sale_price_rounding_target: item.sale_price_rounding_target ?? '',
+    cost_source_currency: item.cost_source_currency ?? '',
+    cost_native_decimal: item.cost_native_decimal ?? '',
+    cost_native_syp: item.cost_native_syp ?? '',
+    cost_exchange_rate: item.cost_exchange_rate ?? '',
   }))));
   saleItemsSheet['!cols'] = [{ wch: 24 }, { wch: 30 }, { wch: 22 }, { wch: 12 }, { wch: 17 }, { wch: 17 }, { wch: 17 }, { wch: 17 }];
   XLSX.utils.book_append_sheet(workbook, saleItemsSheet, 'Sale Items');
@@ -447,7 +466,18 @@ function normalizeProducts(rows: ProductRow[]): Product[] {
       const category = String(row.category ?? '').trim();
       const price = toFiniteNumber(row.price_usd);
       const cost = toFiniteNumber(row.cost_usd) ?? 0;
-      if (!name || !category || price === null || price < 0 || cost < 0) {
+      const saleCurrency = String(row.sale_price_currency || 'USD').toUpperCase();
+      const costCurrency = String(row.cost_currency || 'USD').toUpperCase();
+      const saleSyp = row.sale_price_syp === '' || row.sale_price_syp == null ? null : toFiniteNumber(row.sale_price_syp);
+      const costSyp = row.cost_syp === '' || row.cost_syp == null ? null : toFiniteNumber(row.cost_syp);
+      if (!name || !category || price === null || price < 0 || cost < 0 || (saleCurrency !== 'USD' && saleCurrency !== 'SYP') || (costCurrency !== 'USD' && costCurrency !== 'SYP') ||
+        (saleCurrency === 'SYP' && (!Number.isSafeInteger(saleSyp) || (saleSyp ?? -1) < 0)) || (costCurrency === 'SYP' && (!Number.isSafeInteger(costSyp) || (costSyp ?? -1) < 0))) {
+        throw new Error(`INVALID_EXCEL_PRODUCT_ROW_${index + 2}`);
+      }
+      try {
+        if (saleCurrency === 'USD') validateNewUsdDecimal(canonicalizeLegacyUsdNumber(price));
+        if (costCurrency === 'USD') validateNewUsdDecimal(canonicalizeLegacyUsdNumber(cost));
+      } catch {
         throw new Error(`INVALID_EXCEL_PRODUCT_ROW_${index + 2}`);
       }
 
@@ -467,6 +497,10 @@ function normalizeProducts(rows: ProductRow[]): Product[] {
         category,
         price_usd: price,
         cost_usd: cost,
+        sale_price_currency: saleCurrency,
+        sale_price_syp: saleSyp,
+        cost_currency: costCurrency,
+        cost_syp: costSyp,
         barcode: optionalText(row.barcode),
         image_uri: safeRelativeImagePath(row.image_uri),
         created_at: validDateText(row.created_at) ?? now,

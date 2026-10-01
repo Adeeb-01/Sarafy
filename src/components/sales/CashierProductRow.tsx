@@ -7,8 +7,8 @@ import { AppButton, MonetaryValue, QuantityStepper, Skeleton } from '@/component
 import { resolveProductImageUri } from '@/media/productImageStorage';
 import { Product, Settings } from '@/types';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
-import { formatUsd } from '@/utils/formatters';
-import { calculateSypPrice } from '@/utils/priceCalculator';
+import { formatNumber, formatProductUsd } from '@/utils/formatters';
+import { activeSalePriceSyp } from '@/utils/productPricing';
 import { uiText } from '@/i18n';
 
 export const CASHIER_PRODUCT_ROW_HEIGHT = 84;
@@ -31,12 +31,8 @@ export const CashierProductRow = memo(function CashierProductRow({ product, sett
   const resolvedImage = resolveProductImageUri(product.image_uri);
   const [imageLoading, setImageLoading] = useState(Boolean(resolvedImage));
   const [imageFailed, setImageFailed] = useState(false);
-  const priceSyp = calculateSypPrice({
-    priceUsd: product.price_usd,
-    exchangeRate: settings.exchangeRate,
-    isRoundingEnabled: settings.isRoundingEnabled,
-    roundingTarget: settings.roundingTarget,
-  });
+  const priceSyp = activeSalePriceSyp(product, settings);
+  const native = product.sale_price_currency === 'SYP' ? `${formatNumber(product.sale_price_syp ?? 0, settings.language)} ${copy.common.syp}` : formatProductUsd(product.price_usd, settings.language);
 
   useEffect(() => {
     setImageLoading(Boolean(resolvedImage));
@@ -51,7 +47,7 @@ export const CashierProductRow = memo(function CashierProductRow({ product, sett
     <View style={styles.copy}>
       <Text numberOfLines={1} style={[typography.bodyMedium, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{product.name}</Text>
       <MonetaryValue value={priceSyp} language={settings.language} currencyLabel={copy.common.syp} inline style={[styles.syp, { flexDirection: rtl ? 'row-reverse' : 'row' }]} textStyle={styles.sypValue} />
-      <Text numberOfLines={1} style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left', writingDirection: 'ltr' }]}>{formatUsd(product.price_usd, settings.language)}</Text>
+      <Text numberOfLines={1} style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left', writingDirection: 'ltr' }]}>{native}</Text>
     </View>
     <Animated.View key={quantity > 0 ? 'quantity' : 'add'} entering={FadeIn.duration(150).reduceMotion(ReduceMotion.System)}>
       {quantity > 0

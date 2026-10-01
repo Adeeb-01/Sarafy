@@ -108,6 +108,11 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
     const byBarcode = new Map(localProducts.flatMap(row => { const barcode = normalizeBarcode(row.barcode); return barcode ? [[barcode, row] as const] : []; }));
     const seen = new Set<string>();
     payload.products.forEach((product, index) => {
+      const normalizedProduct = {
+        ...product,
+        sale_price_currency: product.sale_price_currency ?? 'USD', sale_price_syp: product.sale_price_syp ?? null,
+        cost_currency: product.cost_currency ?? 'USD', cost_syp: product.cost_syp ?? null,
+      };
       if (!isUuid(product.uuid)) {
         summary.invalidRecords += 1;
         issues.push({ entity: 'products', row: index + 1, field: 'uuid', code: 'INVALID_UUID', action: 'rejected' });
@@ -129,7 +134,7 @@ export async function analyzeImport(payload: ImportPayload, options: ImportOptio
       }
       const existing = existingByUuid ?? existingByBarcode;
       if (!existing) summary.newRecords += 1;
-      else if (comparable(existing) === comparable(product)) summary.unchangedRecords += 1;
+      else if (comparable(existing) === comparable(normalizedProduct)) summary.unchangedRecords += 1;
       else if (options.conflictStrategy === 'manual' ||
         (options.conflictStrategy === 'newest' &&
           (!Number.isFinite(Date.parse(product.updated_at)) || !Number.isFinite(Date.parse(existing.updated_at))))) {

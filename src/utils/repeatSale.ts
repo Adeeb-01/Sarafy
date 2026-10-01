@@ -1,5 +1,5 @@
 import { Product, Sale, SaleItemInput, Settings } from '@/types';
-import { calculateSypPrice } from '@/utils/priceCalculator';
+import { buildProductPricingSnapshot } from '@/utils/productPricing';
 import { addCartLine } from '@/utils/salesUiState';
 
 export type RepeatCartLine = SaleItemInput & { cartKey: string; isAvailable: boolean };
@@ -22,8 +22,7 @@ export function buildRepeatedSaleCart(existingCart: RepeatCartLine[], sale: Sale
       barcodeSnapshot: product.barcode,
       isAvailable: true,
       quantity: item.quantity,
-      unitPriceSyp: calculateSypPrice({ priceUsd: product.price_usd, exchangeRate: settings.exchangeRate, isRoundingEnabled: settings.isRoundingEnabled, roundingTarget: settings.roundingTarget }),
-      unitCostSyp: product.cost_usd * settings.exchangeRate,
+      ...buildProductPricingSnapshot(product, settings.exchangeRate, settings),
     });
     addedProducts += 1;
   }

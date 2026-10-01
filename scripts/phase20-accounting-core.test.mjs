@@ -222,7 +222,7 @@ test('quantity-only zero-value inventory evidence is valid and exact', () => {
 });
 
 test('migration is one v18 to v19 schema-only step and cutover honors zero policy', () => {
-  assert.match(databaseSource, /export const SCHEMA_VERSION = 19/);
+  assert.match(databaseSource, /export const SCHEMA_VERSION = 20/);
   assert.match(databaseSource, /async function migrateAccountingCoreV19/);
   assert.match(databaseSource, /await migrateCustomerAccountsV18\(\);\s*await migrateAccountingCoreV19\(\)/);
   assert.match(databaseSource, /INSERT INTO accounting_settings[\s\S]*VALUES\(1,0,NULL,'SYP',NULL,NULL/);

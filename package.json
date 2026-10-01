@@ -30,6 +30,7 @@
     "test:phase17": "node --test scripts/phase17-purchase-returns.test.mjs",
     "test:phase18": "node --test scripts/phase18-supplier-accounts.test.mjs",
     "test:phase19": "node --test scripts/phase19-customer-accounts.test.mjs",
+    "test:phase21": "node --test scripts/phase21-flexible-pricing.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

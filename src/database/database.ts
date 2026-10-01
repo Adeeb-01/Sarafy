@@ -6,6 +6,7 @@ import { normalizeBarcode } from '@/utils/barcode';
 import { deriveReturnStatus, previewReturn, returnedQuantities } from '@/utils/returns';
 import { DEFAULT_EXPENSE_CATEGORIES, OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 import { calculateSettlement } from '@/utils/multiCurrency';
+import { canonicalizeLegacyUsdNumber, parseCanonicalDecimal, validatePricingSnapshot } from '@/utils/productPricing';
 import { calculateSupplierPaymentEquivalent } from '@/utils/supplierAccounts';
 import { calculateCustomerPaymentEquivalent } from '@/utils/customerAccounts';
 import { ACCOUNTING_V19_SCHEMA_SQL, SYSTEM_ACCOUNTS } from '@/accounting/accountingSchema';
@@ -39,7 +40,7 @@ import {
 
 const dbPromise = SQLite.openDatabaseAsync('sarafy.db');
 export const getDatabase = () => dbPromise;
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 export { OTHER_EXPENSE_CATEGORY_UUID } from '@/i18n/expenseCategories';
 
@@ -771,6 +772,36 @@ async function migrateAccountingCoreV19() {
   });
 }
 
+async function migrateFlexibleProductPricingV20() {
+  const db = await dbPromise;
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > SCHEMA_VERSION) throw new Error('DATABASE_NEWER_THAN_APP');
+  if ((version?.user_version ?? 0) >= 20) return;
+  await db.withExclusiveTransactionAsync(async transaction => {
+    await addColumnsIfMissing(transaction, 'products', [
+      ['sale_price_currency', "TEXT NOT NULL DEFAULT 'USD' CHECK(sale_price_currency IN ('USD','SYP'))"],
+      ['sale_price_syp', "INTEGER CHECK(sale_price_syp IS NULL OR (typeof(sale_price_syp)='integer' AND sale_price_syp>=0))"],
+      ['cost_currency', "TEXT NOT NULL DEFAULT 'USD' CHECK(cost_currency IN ('USD','SYP'))"],
+      ['cost_syp', "INTEGER CHECK(cost_syp IS NULL OR (typeof(cost_syp)='integer' AND cost_syp>=0))"],
+    ]);
+    const snapshotColumns = [
+      ['sale_price_source_currency', "TEXT CHECK(sale_price_source_currency IS NULL OR sale_price_source_currency IN ('USD','SYP'))"],
+      ['sale_price_native_decimal', 'TEXT'],
+      ['sale_price_native_syp', "INTEGER CHECK(sale_price_native_syp IS NULL OR (typeof(sale_price_native_syp)='integer' AND sale_price_native_syp>=0))"],
+      ['sale_price_exchange_rate', "INTEGER CHECK(sale_price_exchange_rate IS NULL OR (typeof(sale_price_exchange_rate)='integer' AND sale_price_exchange_rate>0))"],
+      ['sale_price_rounding_enabled', 'INTEGER CHECK(sale_price_rounding_enabled IS NULL OR sale_price_rounding_enabled IN (0,1))'],
+      ['sale_price_rounding_target', "INTEGER CHECK(sale_price_rounding_target IS NULL OR (typeof(sale_price_rounding_target)='integer' AND sale_price_rounding_target>0))"],
+      ['cost_source_currency', "TEXT CHECK(cost_source_currency IS NULL OR cost_source_currency IN ('USD','SYP'))"],
+      ['cost_native_decimal', 'TEXT'],
+      ['cost_native_syp', "INTEGER CHECK(cost_native_syp IS NULL OR (typeof(cost_native_syp)='integer' AND cost_native_syp>=0))"],
+      ['cost_exchange_rate', "INTEGER CHECK(cost_exchange_rate IS NULL OR (typeof(cost_exchange_rate)='integer' AND cost_exchange_rate>0))"],
+    ] as const;
+    await addColumnsIfMissing(transaction, 'sale_items', snapshotColumns);
+    await addColumnsIfMissing(transaction, 'sale_draft_items', snapshotColumns);
+    await transaction.execAsync('PRAGMA user_version = 20');
+  });
+}
+
 export async function initializeDatabase() {
   const db = await dbPromise;
   await db.execAsync(`
@@ -847,6 +878,7 @@ export async function initializeDatabase() {
   await migrateSupplierAccountsV17();
   await migrateCustomerAccountsV18();
   await migrateAccountingCoreV19();
+  await migrateFlexibleProductPricingV20();
   await db.runAsync(`DELETE FROM sale_draft_items
     WHERE NOT EXISTS (SELECT 1 FROM sale_drafts WHERE sale_drafts.id=sale_draft_items.draft_id)`);
   const integrity = await db.getFirstAsync<{ integrity_check: string }>('PRAGMA integrity_check');
@@ -893,7 +925,7 @@ export interface AccountingCutoverPreview {
   currentExchangeRateSypPerUsd: number;
   customers: Array<{ customerId: number; customerUuid: string; customerName: string; balanceSyp: number }>;
   suppliers: Array<{ supplierId: number; supplierUuid: string; supplierName: string; balanceUsdCents: number }>;
-  inventory: Array<{ productId: number; productUuid: string; productName: string; quantity: number; currentCostUsd: number }>;
+  inventory: Array<{ productId: number; productUuid: string; productName: string; quantity: number; currentCostCurrency: 'USD' | 'SYP'; currentCostNative: number }>;
 }
 
 export async function getAccountingCutoverPreview(): Promise<AccountingCutoverPreview> {
@@ -903,7 +935,7 @@ export async function getAccountingCutoverPreview(): Promise<AccountingCutoverPr
     db.getFirstAsync<{ id: number }>('SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1'),
     db.getAllAsync<{ customer_id: number; uuid: string; name: string; balance_syp: number }>(`SELECT b.customer_id,c.uuid,c.name,b.balance_syp FROM customer_account_balances b JOIN customers c ON c.id=b.customer_id ORDER BY c.name COLLATE NOCASE,c.id`),
     db.getAllAsync<{ supplier_id: number; uuid: string; name: string; balance_usd_cents: number }>(`SELECT b.supplier_id,s.uuid,s.name,b.balance_usd_cents FROM supplier_account_balances b JOIN suppliers s ON s.id=b.supplier_id ORDER BY s.name COLLATE NOCASE,s.id`),
-    db.getAllAsync<{ product_id: number; uuid: string; name: string; quantity: number; cost_usd: number }>(`SELECT b.product_id,p.uuid,p.name,b.quantity,p.cost_usd FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE b.tracking_enabled=1 ORDER BY p.name COLLATE NOCASE,p.id`),
+    db.getAllAsync<{ product_id: number; uuid: string; name: string; quantity: number; cost_currency: 'USD' | 'SYP'; cost_usd: number; cost_syp: number | null }>(`SELECT b.product_id,p.uuid,p.name,b.quantity,p.cost_currency,p.cost_usd,p.cost_syp FROM inventory_balances b JOIN products p ON p.id=b.product_id WHERE b.tracking_enabled=1 ORDER BY p.name COLLATE NOCASE,p.id`),
   ]);
   const parsed: unknown = settings ? JSON.parse(settings.value) : 15000;
   if (!Number.isSafeInteger(parsed) || (parsed as number) <= 0) throw new Error('INVALID_EXCHANGE_RATE');
@@ -912,7 +944,7 @@ export async function getAccountingCutoverPreview(): Promise<AccountingCutoverPr
     currentExchangeRateSypPerUsd: parsed as number,
     customers: customers.map(row => ({ customerId: row.customer_id, customerUuid: row.uuid, customerName: row.name, balanceSyp: row.balance_syp })),
     suppliers: suppliers.map(row => ({ supplierId: row.supplier_id, supplierUuid: row.uuid, supplierName: row.name, balanceUsdCents: row.balance_usd_cents })),
-    inventory: inventory.map(row => ({ productId: row.product_id, productUuid: row.uuid, productName: row.name, quantity: row.quantity, currentCostUsd: row.cost_usd })),
+    inventory: inventory.map(row => ({ productId: row.product_id, productUuid: row.uuid, productName: row.name, quantity: row.quantity, currentCostCurrency: row.cost_currency, currentCostNative: row.cost_currency === 'SYP' ? row.cost_syp ?? 0 : row.cost_usd })),
   };
 }
 
@@ -993,7 +1025,23 @@ export async function getProductByBarcode(barcodeValue: string) {
     FROM products p LEFT JOIN inventory_balances b ON b.product_id=p.id WHERE p.barcode = ? LIMIT 1`, barcode);
 }
 
+function validateProductPricingInput(input: ProductInput, current?: Pick<Product, 'price_usd' | 'cost_usd'>) {
+  if ((input.sale_price_currency !== 'USD' && input.sale_price_currency !== 'SYP') || (input.cost_currency !== 'USD' && input.cost_currency !== 'SYP')) throw new Error('INVALID_PRODUCT_CURRENCY');
+  if (!Number.isFinite(input.price_usd) || input.price_usd < 0 || !Number.isFinite(input.cost_usd) || input.cost_usd < 0) throw new Error('INVALID_PRODUCT_USD_VALUE');
+  if (input.sale_price_currency === 'SYP' && (!Number.isSafeInteger(input.sale_price_syp) || (input.sale_price_syp ?? -1) < 0)) throw new Error('INVALID_PRODUCT_SALE_PRICE');
+  if (input.cost_currency === 'SYP' && (!Number.isSafeInteger(input.cost_syp) || (input.cost_syp ?? -1) < 0)) throw new Error('INVALID_PRODUCT_COST');
+  if (input.sale_price_syp != null && (!Number.isSafeInteger(input.sale_price_syp) || input.sale_price_syp < 0)) throw new Error('INVALID_PRODUCT_SALE_PRICE');
+  if (input.cost_syp != null && (!Number.isSafeInteger(input.cost_syp) || input.cost_syp < 0)) throw new Error('INVALID_PRODUCT_COST');
+  if (!current || input.price_usd !== current.price_usd) {
+    if (parseCanonicalDecimal(canonicalizeLegacyUsdNumber(input.price_usd)).decimalPlaces > 4) throw new Error('PRODUCT_USD_PRECISION_EXCEEDED');
+  }
+  if (!current || input.cost_usd !== current.cost_usd) {
+    if (parseCanonicalDecimal(canonicalizeLegacyUsdNumber(input.cost_usd)).decimalPlaces > 4) throw new Error('PRODUCT_USD_PRECISION_EXCEEDED');
+  }
+}
+
 export async function addProduct(input: ProductInput) {
+  validateProductPricingInput(input);
   const db = await dbPromise;
   const now = new Date().toISOString();
   const uuid = createUuid();
@@ -1009,9 +1057,10 @@ export async function addProduct(input: ProductInput) {
         if (duplicate) throw new ProductBarcodeConflictError(duplicate.name);
       }
       const result = await transaction.runAsync(
-        `INSERT INTO products (uuid,name,category,price_usd,cost_usd,image_uri,barcode,created_at,updated_at,is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        `INSERT INTO products (uuid,name,category,price_usd,cost_usd,sale_price_currency,sale_price_syp,cost_currency,cost_syp,image_uri,barcode,created_at,updated_at,is_active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         uuid, input.name.trim(), input.category.trim(), input.price_usd, input.cost_usd,
+        input.sale_price_currency, input.sale_price_syp, input.cost_currency, input.cost_syp,
         imageUri, barcode, now, now,
       );
       productId = result.lastInsertRowId;
@@ -1025,10 +1074,11 @@ export async function addProduct(input: ProductInput) {
 
 export async function updateProduct(id: number, input: ProductInput) {
   const db = await dbPromise;
-  const current = await db.getFirstAsync<{ uuid: string; image_uri: string | null }>(
-    'SELECT uuid,image_uri FROM products WHERE id=?', id,
+  const current = await db.getFirstAsync<Pick<Product, 'uuid' | 'image_uri' | 'price_usd' | 'cost_usd'>>(
+    'SELECT uuid,image_uri,price_usd,cost_usd FROM products WHERE id=?', id,
   );
   if (!current) throw new Error('PRODUCT_NOT_FOUND');
+  validateProductPricingInput(input, current);
   const imageUri = input.image_uri !== current.image_uri && input.image_uri && !isStoredProductImagePath(input.image_uri)
     ? await saveProductImage(input.image_uri, current.uuid)
     : input.image_uri;
@@ -1040,8 +1090,9 @@ export async function updateProduct(id: number, input: ProductInput) {
         if (duplicate) throw new ProductBarcodeConflictError(duplicate.name);
       }
       await transaction.runAsync(
-        `UPDATE products SET name=?, category=?, price_usd=?, cost_usd=?, image_uri=?, barcode=?, updated_at=? WHERE id=?`,
+        `UPDATE products SET name=?, category=?, price_usd=?, cost_usd=?, sale_price_currency=?, sale_price_syp=?, cost_currency=?, cost_syp=?, image_uri=?, barcode=?, updated_at=? WHERE id=?`,
         input.name.trim(), input.category.trim(), input.price_usd, input.cost_usd,
+        input.sale_price_currency, input.sale_price_syp, input.cost_currency, input.cost_syp,
         imageUri, barcode, new Date().toISOString(), id,
       );
     });
@@ -1203,7 +1254,33 @@ export async function auditInventoryHealth(): Promise<InventoryHealthReport> {
     (SELECT COUNT(*) FROM purchase_return_items ri WHERE NOT EXISTS(SELECT 1 FROM inventory_movements m WHERE m.purchase_return_item_id=ri.id AND m.movement_type='purchase_return')) AS purchase_return_missing,
     (SELECT COUNT(*) FROM purchase_receipt_items pi WHERE COALESCE((SELECT SUM(ri.quantity) FROM purchase_return_items ri WHERE ri.purchase_receipt_item_id=pi.id),0)>pi.quantity) AS purchase_over_return,
     (SELECT COUNT(*) FROM purchase_return_items ri LEFT JOIN purchase_receipt_items pi ON pi.id=ri.purchase_receipt_item_id WHERE pi.id IS NULL) AS purchase_return_orphans`);
-  return { negativeBalances: row?.negative ?? 0, arithmeticMismatches: row?.arithmetic ?? 0, latestBalanceMismatches: row?.latest ?? 0, duplicateSaleMovements: row?.sale_duplicates ?? 0, duplicateReturnMovements: row?.return_duplicates ?? 0, duplicatePurchaseMovements: row?.purchase_duplicates ?? 0, invalidPurchaseMovements: row?.purchase_invalid ?? 0, missingPurchaseMovements: row?.purchase_missing ?? 0, duplicatePurchaseReturnMovements: row?.purchase_return_duplicates ?? 0, invalidPurchaseReturnMovements: row?.purchase_return_invalid ?? 0, missingPurchaseReturnMovements: row?.purchase_return_missing ?? 0, cumulativePurchaseOverReturns: row?.purchase_over_return ?? 0, orphanPurchaseReturnItems: row?.purchase_return_orphans ?? 0 };
+  const products = await db.getAllAsync<Product>('SELECT * FROM products');
+  const saleItems = await db.getAllAsync<SaleItem>('SELECT * FROM sale_items WHERE sale_price_source_currency IS NOT NULL OR cost_source_currency IS NOT NULL');
+  const draftItems = await db.getAllAsync<SuspendedSaleItem>('SELECT * FROM sale_draft_items WHERE sale_price_source_currency IS NOT NULL OR cost_source_currency IS NOT NULL');
+  let invalidProductPricing = 0; let invalidSalePricingSnapshots = 0; let invalidDraftPricingSnapshots = 0;
+  for (const product of products) {
+    try {
+      validateProductPricingInput(product, product);
+    } catch { invalidProductPricing += 1; }
+  }
+  const replaySnapshot = (item: SaleItem | SuspendedSaleItem) => validatePricingSnapshot({
+    productId: item.product_id, productName: item.product_name, barcodeSnapshot: item.barcode_snapshot, quantity: item.quantity,
+    unitPriceSyp: item.unit_price_syp, unitCostSyp: item.unit_cost_syp,
+    salePriceSourceCurrency: item.sale_price_source_currency ?? undefined, salePriceNativeDecimal: item.sale_price_native_decimal ?? null,
+    salePriceNativeSyp: item.sale_price_native_syp ?? null, salePriceExchangeRate: item.sale_price_exchange_rate ?? null,
+    salePriceRoundingEnabled: item.sale_price_rounding_enabled == null ? null : item.sale_price_rounding_enabled === 1,
+    salePriceRoundingTarget: item.sale_price_rounding_target ?? null, costSourceCurrency: item.cost_source_currency ?? undefined,
+    costNativeDecimal: item.cost_native_decimal ?? null, costNativeSyp: item.cost_native_syp ?? null, costExchangeRate: item.cost_exchange_rate ?? null,
+  });
+  for (const item of saleItems) {
+    try { if (replaySnapshot(item) !== item.line_cost_syp || item.unit_price_syp * item.quantity !== item.line_total_syp) invalidSalePricingSnapshots += 1; }
+    catch { invalidSalePricingSnapshots += 1; }
+  }
+  for (const item of draftItems) {
+    try { replaySnapshot(item); }
+    catch { invalidDraftPricingSnapshots += 1; }
+  }
+  return { negativeBalances: row?.negative ?? 0, arithmeticMismatches: row?.arithmetic ?? 0, latestBalanceMismatches: row?.latest ?? 0, duplicateSaleMovements: row?.sale_duplicates ?? 0, duplicateReturnMovements: row?.return_duplicates ?? 0, duplicatePurchaseMovements: row?.purchase_duplicates ?? 0, invalidPurchaseMovements: row?.purchase_invalid ?? 0, missingPurchaseMovements: row?.purchase_missing ?? 0, duplicatePurchaseReturnMovements: row?.purchase_return_duplicates ?? 0, invalidPurchaseReturnMovements: row?.purchase_return_invalid ?? 0, missingPurchaseReturnMovements: row?.purchase_return_missing ?? 0, cumulativePurchaseOverReturns: row?.purchase_over_return ?? 0, orphanPurchaseReturnItems: row?.purchase_return_orphans ?? 0, invalidProductPricing, invalidSalePricingSnapshots, invalidDraftPricingSnapshots };
 }
 
 function normalizeOptionalText(value: string | null | undefined, maxLength: number) {
@@ -2124,7 +2201,7 @@ export async function createSale(
   }
   const db = await dbPromise;
   const subtotal = items.reduce((sum, item) => sum + item.unitPriceSyp * item.quantity, 0);
-  const lineCosts = items.map(item => Math.round(item.unitCostSyp * item.quantity));
+  const lineCosts = items.map(item => validatePricingSnapshot(item));
   const cost = lineCosts.reduce((sum, value) => sum + value, 0);
   if (![subtotal, cost, discountSyp].every(Number.isSafeInteger)) throw new Error('INVALID_SALE_DATA');
   const discount = Math.max(0, Math.min(discountSyp, subtotal));
@@ -2190,11 +2267,17 @@ export async function createSale(
     for (const [index, item] of items.entries()) {
       const insertedItem = await transaction.runAsync(
         `INSERT INTO sale_items
-         (uuid,sale_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,line_total_syp,line_cost_syp,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+         (uuid,sale_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,line_total_syp,line_cost_syp,
+          sale_price_source_currency,sale_price_native_decimal,sale_price_native_syp,sale_price_exchange_rate,sale_price_rounding_enabled,sale_price_rounding_target,
+          cost_source_currency,cost_native_decimal,cost_native_syp,cost_exchange_rate,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         createUuid(), saleId, item.productId, item.productName, item.barcodeSnapshot, item.quantity,
         item.unitPriceSyp, item.unitCostSyp,
-        item.unitPriceSyp * item.quantity, lineCosts[index] ?? 0, createdAt, createdAt,
+        item.unitPriceSyp * item.quantity, lineCosts[index] ?? 0,
+        item.salePriceSourceCurrency ?? null, item.salePriceNativeDecimal ?? null, item.salePriceNativeSyp ?? null,
+        item.salePriceExchangeRate ?? null, item.salePriceRoundingEnabled == null ? null : item.salePriceRoundingEnabled ? 1 : 0, item.salePriceRoundingTarget ?? null,
+        item.costSourceCurrency ?? null, item.costNativeDecimal ?? null, item.costNativeSyp ?? null, item.costExchangeRate ?? null,
+        createdAt, createdAt,
       );
       if (item.productId != null) {
         const stock = tracked.get(item.productId);
@@ -2367,9 +2450,11 @@ export async function createSaleReturn(saleId: number, selections: ReturnSelecti
 
 export async function suspendSale(items: SaleItemInput[], exchangeRate: number, discountSyp = 0, replaceDraftId?: number) {
   if (!items.length) throw new Error('EMPTY_DRAFT');
-  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) throw new Error('INVALID_EXCHANGE_RATE');
-  if (items.some(item => !Number.isFinite(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.unitPriceSyp) || item.unitPriceSyp < 0 || !Number.isFinite(item.unitCostSyp) || item.unitCostSyp < 0)) throw new Error('INVALID_DRAFT_DATA');
+  if (!Number.isSafeInteger(exchangeRate) || exchangeRate <= 0) throw new Error('INVALID_EXCHANGE_RATE');
+  if (!Number.isSafeInteger(discountSyp) || discountSyp < 0 || items.some(item => !Number.isSafeInteger(item.quantity) || item.quantity <= 0 || !Number.isSafeInteger(item.unitPriceSyp) || item.unitPriceSyp < 0 || !Number.isFinite(item.unitCostSyp) || item.unitCostSyp < 0)) throw new Error('INVALID_DRAFT_DATA');
+  items.forEach(validatePricingSnapshot);
   const subtotal = items.reduce((sum, item) => sum + item.unitPriceSyp * item.quantity, 0);
+  if (!Number.isSafeInteger(subtotal)) throw new Error('INVALID_DRAFT_DATA');
   const discount = Math.max(0, Math.min(discountSyp, subtotal));
   const db = await dbPromise;
   const now = new Date().toISOString();
@@ -2387,10 +2472,16 @@ export async function suspendSale(items: SaleItemInput[], exchangeRate: number, 
     for (const item of items) {
       await transaction.runAsync(
         `INSERT INTO sale_draft_items
-         (uuid,draft_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,created_at,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?)`,
+         (uuid,draft_id,product_id,product_name,barcode_snapshot,quantity,unit_price_syp,unit_cost_syp,
+          sale_price_source_currency,sale_price_native_decimal,sale_price_native_syp,sale_price_exchange_rate,sale_price_rounding_enabled,sale_price_rounding_target,
+          cost_source_currency,cost_native_decimal,cost_native_syp,cost_exchange_rate,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         createUuid(), draftId, item.productId, item.productName, item.barcodeSnapshot,
-        item.quantity, item.unitPriceSyp, item.unitCostSyp, now, now,
+        item.quantity, item.unitPriceSyp, item.unitCostSyp,
+        item.salePriceSourceCurrency ?? null, item.salePriceNativeDecimal ?? null, item.salePriceNativeSyp ?? null,
+        item.salePriceExchangeRate ?? null, item.salePriceRoundingEnabled == null ? null : item.salePriceRoundingEnabled ? 1 : 0, item.salePriceRoundingTarget ?? null,
+        item.costSourceCurrency ?? null, item.costNativeDecimal ?? null, item.costNativeSyp ?? null, item.costExchangeRate ?? null,
+        now, now,
       );
     }
     if (replaceDraftId != null) {

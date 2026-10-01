@@ -107,10 +107,10 @@ export async function insertFullRestorePayload(
 
   if (entities.has('products')) {
     inserted += await insertRows(transaction, 'products', [
-      'uuid', 'name', 'category', 'price_usd', 'cost_usd', 'image_uri', 'barcode',
+      'uuid', 'name', 'category', 'price_usd', 'cost_usd', 'sale_price_currency', 'sale_price_syp', 'cost_currency', 'cost_syp', 'image_uri', 'barcode',
       'created_at', 'updated_at', 'is_active',
     ], payload.products.map(item => [
-      item.uuid, item.name, item.category, item.price_usd, item.cost_usd, item.image_uri,
+      item.uuid, item.name, item.category, item.price_usd, item.cost_usd, item.sale_price_currency ?? 'USD', item.sale_price_syp ?? null, item.cost_currency ?? 'USD', item.cost_syp ?? null, item.image_uri,
       normalizeBarcode(item.barcode), item.created_at, item.updated_at, item.is_active ?? 1,
     ]));
   }
@@ -163,14 +163,20 @@ export async function insertFullRestorePayload(
           item.uuid, saleId, optionalProductId(item.product_id), item.product_name,
           item.barcode_snapshot ?? null, item.quantity, item.unit_price_syp, item.unit_cost_syp,
           item.line_total_syp, item.line_cost_syp, item.accounting_cogs_syp ?? null, item.accounting_restocked_quantity ?? 0,
-          item.accounting_restored_cogs_syp ?? 0, item.created_at, item.updated_at,
+          item.accounting_restored_cogs_syp ?? 0,
+          item.sale_price_source_currency ?? null, item.sale_price_native_decimal ?? null, item.sale_price_native_syp ?? null,
+          item.sale_price_exchange_rate ?? null, item.sale_price_rounding_enabled ?? null, item.sale_price_rounding_target ?? null,
+          item.cost_source_currency ?? null, item.cost_native_decimal ?? null, item.cost_native_syp ?? null, item.cost_exchange_rate ?? null,
+          item.created_at, item.updated_at,
         ]);
       }
     }
     inserted += await insertRows(transaction, 'sale_items', [
       'uuid', 'sale_id', 'product_id', 'product_name', 'barcode_snapshot', 'quantity',
       'unit_price_syp', 'unit_cost_syp', 'line_total_syp', 'line_cost_syp', 'accounting_cogs_syp',
-      'accounting_restocked_quantity', 'accounting_restored_cogs_syp', 'created_at', 'updated_at',
+      'accounting_restocked_quantity', 'accounting_restored_cogs_syp',
+      'sale_price_source_currency', 'sale_price_native_decimal', 'sale_price_native_syp', 'sale_price_exchange_rate', 'sale_price_rounding_enabled', 'sale_price_rounding_target',
+      'cost_source_currency', 'cost_native_decimal', 'cost_native_syp', 'cost_exchange_rate', 'created_at', 'updated_at',
     ], saleItemRows);
   }
   const saleItemIdByUuid = await loadIdByUuid(transaction, 'sale_items');
@@ -262,13 +268,18 @@ export async function insertFullRestorePayload(
         rows.push([
           item.uuid, draftId, optionalProductId(item.product_id), item.product_name,
           item.barcode_snapshot ?? null, item.quantity, item.unit_price_syp, item.unit_cost_syp,
+          item.sale_price_source_currency ?? null, item.sale_price_native_decimal ?? null, item.sale_price_native_syp ?? null,
+          item.sale_price_exchange_rate ?? null, item.sale_price_rounding_enabled ?? null, item.sale_price_rounding_target ?? null,
+          item.cost_source_currency ?? null, item.cost_native_decimal ?? null, item.cost_native_syp ?? null, item.cost_exchange_rate ?? null,
           item.created_at, item.updated_at,
         ]);
       }
     }
     inserted += await insertRows(transaction, 'sale_draft_items', [
       'uuid', 'draft_id', 'product_id', 'product_name', 'barcode_snapshot', 'quantity',
-      'unit_price_syp', 'unit_cost_syp', 'created_at', 'updated_at',
+      'unit_price_syp', 'unit_cost_syp', 'sale_price_source_currency', 'sale_price_native_decimal', 'sale_price_native_syp',
+      'sale_price_exchange_rate', 'sale_price_rounding_enabled', 'sale_price_rounding_target', 'cost_source_currency',
+      'cost_native_decimal', 'cost_native_syp', 'cost_exchange_rate', 'created_at', 'updated_at',
     ], rows);
   }
 

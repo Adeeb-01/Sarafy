@@ -11,3 +11,11 @@ export const formatUsd = (value: number, language: Language) =>
     style: 'currency',
     currency: 'USD',
   }).format(value);
+
+export const formatProductUsd = (value: number, language: Language) =>
+  new Intl.NumberFormat(language === 'ar' ? 'ar-SY' : 'en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 4,
+  }).format(value);

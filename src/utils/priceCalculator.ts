@@ -1,3 +1,5 @@
+import { canonicalizeLegacyUsdNumber, resolveUsdSalePriceSyp } from '@/utils/productPricing';
+
 export interface CalculationParams {
   priceUsd: number;
   exchangeRate: number;
@@ -11,7 +13,5 @@ export const calculateSypPrice = ({
   isRoundingEnabled,
   roundingTarget,
 }: CalculationParams): number => {
-  const rawPrice = priceUsd * exchangeRate;
-  if (!isRoundingEnabled || roundingTarget <= 0) return rawPrice;
-  return Math.round(rawPrice / roundingTarget) * roundingTarget;
+  return resolveUsdSalePriceSyp(canonicalizeLegacyUsdNumber(priceUsd), exchangeRate, isRoundingEnabled, roundingTarget);
 };

@@ -4,9 +4,9 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { KeyboardAvoidingView, LayoutChangeEvent, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { AppButton, AppInput, ConfirmSheet, IconButton, Skeleton, useSnackbar } from '@/components/ui';
+import { AppButton, AppInput, ConfirmSheet, IconButton, SegmentedControl, Skeleton, useSnackbar } from '@/components/ui';
 import { CategoryPickerSheet } from '@/components/CategoryPickerSheet';
-import { Product, ProductInput } from '@/types';
+import { Product, ProductInput, ProductPricingCurrency } from '@/types';
 import { useAppStore } from '@/store/useAppStore';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
 import { resolveProductImageUri } from '@/media/productImageStorage';
@@ -15,6 +15,7 @@ import { uiText } from '@/i18n';
 import { BarcodeScannerScreen } from '@/components/barcode/BarcodeScannerScreen';
 import { ProductBarcodeConflictError } from '@/database/database';
 import { findBarcodeConflict, normalizeBarcode } from '@/utils/barcode';
+import { validateNewUsdDecimal } from '@/utils/productPricing';
 
 type FormMode = 'create' | 'edit' | 'duplicate';
 type SectionKey = 'details' | 'pricing' | 'identity' | 'image';
@@ -40,8 +41,12 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
   const sectionOffsets = useRef<Partial<Record<SectionKey, number>>>({});
   const [name, setName] = useState('');
   const [category, setCategory] = useState('');
-  const [price, setPrice] = useState('');
-  const [cost, setCost] = useState('');
+  const [saleCurrency, setSaleCurrency] = useState<ProductPricingCurrency>('USD');
+  const [costCurrency, setCostCurrency] = useState<ProductPricingCurrency>('USD');
+  const [priceUsd, setPriceUsd] = useState('');
+  const [priceSyp, setPriceSyp] = useState('');
+  const [costUsd, setCostUsd] = useState('');
+  const [costSyp, setCostSyp] = useState('');
   const [barcode, setBarcode] = useState('');
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
@@ -57,8 +62,12 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
     const duplicate = resolvedMode === 'duplicate';
     setName(product ? `${product.name}${duplicate ? copy.productForm.copySuffix : ''}` : '');
     setCategory(product?.category ?? '');
-    setPrice(product ? String(product.price_usd) : '');
-    setCost(product ? String(product.cost_usd ?? 0) : '');
+    setSaleCurrency(product?.sale_price_currency ?? 'USD');
+    setCostCurrency(product?.cost_currency ?? 'USD');
+    setPriceUsd(product ? String(product.price_usd) : '');
+    setPriceSyp(product?.sale_price_syp == null ? '' : String(product.sale_price_syp));
+    setCostUsd(product ? String(product.cost_usd ?? 0) : '');
+    setCostSyp(product?.cost_syp == null ? '' : String(product.cost_syp));
     setBarcode(initialBarcode ?? (duplicate ? '' : (product?.barcode ?? '')));
     setImageUri(product?.image_uri ?? null);
     setImageLoading(Boolean(product?.image_uri));
@@ -98,12 +107,20 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
 
   const validate = () => {
     const next: Errors = {};
-    const numericPrice = parseNumeric(price);
-    const numericCost = cost.trim() ? parseNumeric(cost) : 0;
+    const numericPriceUsd = priceUsd.trim() ? parseNumeric(priceUsd) : 0;
+    const numericCostUsd = costUsd.trim() ? parseNumeric(costUsd) : 0;
+    const numericPriceSyp = priceSyp.trim() ? parseNumeric(priceSyp) : null;
+    const numericCostSyp = costSyp.trim() ? parseNumeric(costSyp) : null;
     if (!name.trim()) next.name = copy.productForm.nameRequired;
     if (!category.trim()) next.category = copy.productForm.categoryRequired;
-    if (!price.trim() || !Number.isFinite(numericPrice) || numericPrice < 0) next.price = copy.productForm.invalidSalePrice;
-    if (!Number.isFinite(numericCost) || numericCost < 0) next.cost = copy.productForm.invalidCost;
+    if (saleCurrency === 'USD') {
+      if (!priceUsd.trim() || !Number.isFinite(numericPriceUsd) || numericPriceUsd < 0) next.price = copy.productForm.invalidSalePrice;
+      else if (resolvedMode !== 'edit' || numericPriceUsd !== product?.price_usd) try { validateNewUsdDecimal(normalizeDecimalText(priceUsd)); } catch { next.price = copy.productForm.usdPrecision; }
+    } else if (!Number.isSafeInteger(numericPriceSyp) || (numericPriceSyp ?? -1) < 0) next.price = copy.productForm.invalidSypSalePrice;
+    if (costCurrency === 'USD') {
+      if (!Number.isFinite(numericCostUsd) || numericCostUsd < 0) next.cost = copy.productForm.invalidCost;
+      else if (resolvedMode !== 'edit' || numericCostUsd !== product?.cost_usd) try { validateNewUsdDecimal(normalizeDecimalText(costUsd || '0')); } catch { next.cost = copy.productForm.usdPrecision; }
+    } else if (!Number.isSafeInteger(numericCostSyp) || (numericCostSyp ?? -1) < 0) next.cost = copy.productForm.invalidSypCost;
     const normalizedBarcode = barcode.trim();
     const editId = resolvedMode === 'edit' ? product?.id : undefined;
     const duplicate = findBarcodeConflict(products, normalizedBarcode, editId);
@@ -116,7 +133,7 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
       scrollToSection(section);
       return null;
     }
-    return { numericPrice, numericCost };
+    return { numericPriceUsd, numericCostUsd, numericPriceSyp, numericCostSyp };
   };
 
   const save = async () => {
@@ -125,7 +142,9 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
     if (!numeric) return;
     savingRef.current = true; setSaving(true);
     const input: ProductInput = {
-      name: name.trim(), category: category.trim(), price_usd: numeric.numericPrice, cost_usd: numeric.numericCost,
+      name: name.trim(), category: category.trim(), price_usd: numeric.numericPriceUsd, cost_usd: numeric.numericCostUsd,
+      sale_price_currency: saleCurrency, sale_price_syp: numeric.numericPriceSyp,
+      cost_currency: costCurrency, cost_syp: numeric.numericCostSyp,
       barcode: barcode.trim() || null, image_uri: imageUri,
     };
     try {
@@ -179,8 +198,10 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
           </FormSection>
 
           <FormSection title={copy.productForm.pricing} icon="dollar-sign" rtl={rtl} onLayout={setSectionOffset('pricing')}>
-            <AppInput label={copy.productForm.salePrice} value={price} onChangeText={value => { setPrice(value); clearError('price'); }} error={errors.price} helper={copy.productForm.salePriceHelper} helperVisibility="focus" placeholder="0.00" keyboardType="decimal-pad" accessibilityLabel={copy.productForm.salePrice} rtl={rtl} />
-            <AppInput label={copy.productForm.costPrice} value={cost} onChangeText={value => { setCost(value); clearError('cost'); }} error={errors.cost} helper={copy.productForm.costHelper} placeholder="0.00" keyboardType="decimal-pad" accessibilityLabel={copy.productForm.costPrice} rtl={rtl} />
+            <View style={styles.currencyField}><Text style={[typography.label, { color: colors.textSecondary, textAlign: rtl ? 'right' : 'left' }]}>{copy.productForm.saleCurrency}</Text><SegmentedControl value={saleCurrency} onChange={value => { setSaleCurrency(value); clearError('price'); }} options={[{ value: 'USD', label: 'USD' }, { value: 'SYP', label: copy.common.syp }]} rtl={rtl} /></View>
+            <AppInput label={copy.productForm.salePrice} value={saleCurrency === 'USD' ? priceUsd : priceSyp} onChangeText={value => { if (saleCurrency === 'USD') setPriceUsd(value); else setPriceSyp(value); clearError('price'); }} error={errors.price} helper={saleCurrency === 'USD' ? copy.productForm.salePriceHelper : copy.productForm.sypNativeHelper} helperVisibility="focus" placeholder={saleCurrency === 'USD' ? '0.0000' : '0'} keyboardType={saleCurrency === 'USD' ? 'decimal-pad' : 'number-pad'} accessibilityLabel={copy.productForm.salePrice} rtl={rtl} />
+            <View style={styles.currencyField}><Text style={[typography.label, { color: colors.textSecondary, textAlign: rtl ? 'right' : 'left' }]}>{copy.productForm.costCurrency}</Text><SegmentedControl value={costCurrency} onChange={value => { setCostCurrency(value); clearError('cost'); }} options={[{ value: 'USD', label: 'USD' }, { value: 'SYP', label: copy.common.syp }]} rtl={rtl} /></View>
+            <AppInput label={copy.productForm.costPrice} value={costCurrency === 'USD' ? costUsd : costSyp} onChangeText={value => { if (costCurrency === 'USD') setCostUsd(value); else setCostSyp(value); clearError('cost'); }} error={errors.cost} helper={costCurrency === 'USD' ? copy.productForm.costHelper : copy.productForm.sypNativeCostHelper} placeholder={costCurrency === 'USD' ? '0.0000' : '0'} keyboardType={costCurrency === 'USD' ? 'decimal-pad' : 'number-pad'} accessibilityLabel={copy.productForm.costPrice} rtl={rtl} />
           </FormSection>
 
           <FormSection title={copy.productForm.identification} icon="hash" rtl={rtl} onLayout={setSectionOffset('identity')}>
@@ -229,11 +250,15 @@ function parseNumeric(value: string) {
   return Number(normalized);
 }
 
+function normalizeDecimalText(value: string) {
+  return value.replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit))).replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit))).replace(/[٬,\s]/g, '').replace('٫', '.');
+}
+
 const styles = StyleSheet.create({
   page: { flex: 1 }, flex: { flex: 1 }, keyboardArea: { paddingBottom: spacing.md },
   header: { minHeight: 66, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderBottomWidth: StyleSheet.hairlineWidth, alignItems: 'center', gap: spacing.sm }, headerCopy: { minWidth: 0, flex: 1 },
   scroll: { width: '100%', maxWidth: 720, alignSelf: 'center', padding: spacing.md, gap: spacing.xs },
-  section: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.lg, gap: spacing.sm }, sectionHeader: { alignItems: 'center', gap: spacing.xs }, fieldGroup: { gap: spacing.xxs },
+  section: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.lg, gap: spacing.sm }, sectionHeader: { alignItems: 'center', gap: spacing.xs }, fieldGroup: { gap: spacing.xxs }, currencyField: { gap: spacing.xxs },
   select: { minHeight: 48, paddingHorizontal: spacing.sm, borderWidth: 1, borderRadius: radius.md, alignItems: 'center', gap: spacing.xs },
   technicalInput: { writingDirection: 'ltr' },
   scanButton: { backgroundColor: 'transparent' },

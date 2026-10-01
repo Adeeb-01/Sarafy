@@ -1,9 +1,9 @@
 import { useCallback, useDeferredValue, useMemo, useRef, useState } from 'react';
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { ProductFormModal } from '@/components/ProductFormModal';
 import { CategoryPickerSheet } from '@/components/CategoryPickerSheet';
-import { PRODUCT_ROW_GAP, PRODUCT_ROW_HEIGHT, ProductListRow } from '@/components/ProductListRow';
+import { PRODUCT_COMPACT_ROW_HEIGHT, PRODUCT_ROW_GAP, PRODUCT_ROW_HEIGHT, ProductListRow } from '@/components/ProductListRow';
 import { EMPTY_PRODUCT_FILTERS, ProductFilters, ProductFiltersSheet, ProductSort, ProductSortSheet } from '@/components/ProductControlSheets';
 import { ActionSheet, AppButton, ConfirmSheet, EmptyState, FilterChip, IconButton, ListItem, ScreenContainer, SearchInput, StatusChip, useSnackbar } from '@/components/ui';
 import { useAppStore } from '@/store/useAppStore';
@@ -13,12 +13,15 @@ import { haptics } from '@/utils/haptics';
 import { uiText } from '@/i18n';
 import { BarcodeScannerScreen } from '@/components/barcode/BarcodeScannerScreen';
 import { createProductBarcodeMap, findProductByExactBarcode } from '@/utils/barcode';
+import { activeSalePriceSyp, activeUnitCostPreviewSyp } from '@/utils/productPricing';
 
 type QuickFilter = 'all' | 'active' | 'no_image' | 'custom';
 type FormState = { open: boolean; product: Product | null; mode: 'create' | 'edit' | 'duplicate'; initialSection: 'details' | 'identity' | 'image'; initialBarcode?: string };
 
 export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomNavigationInset?: number }) {
   const state = useAppStore(); const { colors } = useAppTheme(); const snackbar = useSnackbar();
+  const { width } = useWindowDimensions();
+  const compactRows = width < 360;
   const rtl = state.language === 'ar';
   const copy = uiText(state.language);
   const [query, setQuery] = useState('');
@@ -56,17 +59,19 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
       const matchesCategory = filters.category === 'all' || product.category === filters.category;
       const matchesStatus = filters.status === 'all' || (filters.status === 'active' ? product.is_active !== 0 : product.is_active === 0);
       const matchesImage = filters.image === 'all' || (filters.image === 'with' ? Boolean(product.image_uri) : !product.image_uri);
-      const matchesPrice = filters.price === 'all' || (filters.price === 'zero' ? product.price_usd === 0 : filters.price === 'under1' ? product.price_usd > 0 && product.price_usd < 1 : filters.price === 'oneToTen' ? product.price_usd >= 1 && product.price_usd <= 10 : product.price_usd > 10);
+      const resolvedSale = activeSalePriceSyp(product, state);
+      const nativeZero = product.sale_price_currency === 'SYP' ? product.sale_price_syp === 0 : product.price_usd === 0;
+      const matchesPrice = filters.price === 'all' || (filters.price === 'zero' ? nativeZero : filters.price === 'under1' ? resolvedSale > 0 && resolvedSale < state.exchangeRate : filters.price === 'oneToTen' ? resolvedSale >= state.exchangeRate && resolvedSale <= state.exchangeRate * 10 : resolvedSale > state.exchangeRate * 10);
       return matchesSearch && matchesCategory && matchesStatus && matchesImage && matchesPrice;
     });
     return [...filtered].sort((a, b) => {
       if (sort === 'name') return a.name.localeCompare(b.name, state.language);
-      if (sort === 'sale') return b.price_usd - a.price_usd;
-      if (sort === 'cost') return b.cost_usd - a.cost_usd;
+      if (sort === 'sale') return activeSalePriceSyp(b, state) - activeSalePriceSyp(a, state);
+      if (sort === 'cost') return activeUnitCostPreviewSyp(b, state.exchangeRate) - activeUnitCostPreviewSyp(a, state.exchangeRate);
       if (sort === 'category') return a.category.localeCompare(b.category, state.language) || a.name.localeCompare(b.name, state.language);
       return b.created_at.localeCompare(a.created_at);
     });
-  }, [deferredQuery, exactScanBarcode, filters, sort, state.language, state.products]);
+  }, [deferredQuery, exactScanBarcode, filters, sort, state.exchangeRate, state.isRoundingEnabled, state.language, state.products, state.roundingTarget]);
 
   const openCreate = useCallback(() => setForm({ open: true, product: null, mode: 'create', initialSection: 'details' }), []);
   const openEdit = useCallback((product: Product) => setForm({ open: true, product, mode: 'edit', initialSection: 'details' }), []);
@@ -95,7 +100,8 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
   };
 
   const settings = useMemo(() => ({ exchangeRate: state.exchangeRate, isRoundingEnabled: state.isRoundingEnabled, roundingTarget: state.roundingTarget, language: state.language }), [state.exchangeRate, state.isRoundingEnabled, state.language, state.roundingTarget]);
-  const renderItem = useCallback(({ item }: { item: Product }) => <ProductListRow product={item} settings={settings} onEdit={openEdit} onActions={openActions} />, [openActions, openEdit, settings]);
+  const renderItem = useCallback(({ item }: { item: Product }) => <ProductListRow product={item} settings={settings} onEdit={openEdit} onActions={openActions} compact={compactRows} />, [compactRows, openActions, openEdit, settings]);
+  const productRowHeight = compactRows ? PRODUCT_COMPACT_ROW_HEIGHT : PRODUCT_ROW_HEIGHT;
   const hasCriteria = query.trim().length > 0 || activeFilterCount > 0;
   const resultContext = hasCriteria ? copy.products.filteredResults : copy.products.allProducts;
   const listContentStyle = useMemo(() => [styles.list, { paddingBottom: bottomNavigationInset + spacing.md }, visibleProducts.length === 0 && styles.emptyList], [bottomNavigationInset, visibleProducts.length]);
@@ -105,10 +111,12 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
 
   return <ScreenContainer>
     <View style={[styles.header, { backgroundColor: colors.surfaceSecondary }]}> 
-      <View style={[styles.titleRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}>
-        <View style={styles.titleCopy}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.products.title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.products.storedLocally(String(state.products.length))}</Text></View>
-        <Pressable accessibilityRole="button" accessibilityLabel={copy.products.manageCategories} accessibilityHint={copy.products.manageCategoriesHint} onPress={() => { haptics.tap(); setCategoryManagerOpen(true); }} style={({ pressed }) => [styles.categoryButton, { backgroundColor: colors.surface, borderColor: colors.border, flexDirection: rtl ? 'row-reverse' : 'row' }, pressed && styles.pressed]}><Feather name="tag" size={18} color={colors.textSecondary} /><Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8} maxFontSizeMultiplier={1.2} style={[typography.label, { color: colors.textSecondary }]}>{copy.products.categories}</Text></Pressable>
-        <AppButton label={copy.common.add} icon="plus" onPress={openCreate} style={styles.addButton} />
+      <View style={[styles.titleRow, compactRows && styles.compactTitleRow, { flexDirection: compactRows ? 'column' : rtl ? 'row-reverse' : 'row' }]}>
+        <View style={[styles.titleCopy, compactRows && styles.compactTitleCopy]}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.products.title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.products.storedLocally(String(state.products.length))}</Text></View>
+        <View style={[styles.titleActions, compactRows && styles.compactTitleActions, { flexDirection: rtl ? 'row-reverse' : 'row' }]}>
+          <Pressable accessibilityRole="button" accessibilityLabel={copy.products.manageCategories} accessibilityHint={copy.products.manageCategoriesHint} onPress={() => { haptics.tap(); setCategoryManagerOpen(true); }} style={({ pressed }) => [styles.categoryButton, compactRows && styles.compactCategoryButton, { backgroundColor: colors.surface, borderColor: colors.border, flexDirection: rtl ? 'row-reverse' : 'row' }, pressed && styles.pressed]}><Feather name="tag" size={18} color={colors.textSecondary} /><Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8} maxFontSizeMultiplier={1.2} style={[typography.label, { color: colors.textSecondary }]}>{copy.products.categories}</Text></Pressable>
+          <AppButton label={copy.common.add} icon="plus" onPress={openCreate} style={[styles.addButton, compactRows && styles.compactAddButton]} />
+        </View>
       </View>
       <View style={[styles.searchRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={styles.searchInput}><SearchInput value={query} onChangeText={value => { setQuery(value); setExactScanBarcode(null); }} placeholder={copy.products.search} clearLabel={copy.common.clearSearch} rtl={rtl} /></View><IconButton icon="camera" label={copy.scanner.scanBarcode} tone="primary" onPress={() => setScannerOpen(true)} /></View>
       <View style={[styles.toolRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}>
@@ -123,7 +131,7 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
 
     <FlatList data={visibleProducts} keyExtractor={item => String(item.id)} renderItem={renderItem} ItemSeparatorComponent={() => <View style={styles.separator} />} contentContainerStyle={listContentStyle} scrollIndicatorInsets={{ bottom: bottomNavigationInset }} keyboardShouldPersistTaps="handled"
       initialNumToRender={14} maxToRenderPerBatch={14} updateCellsBatchingPeriod={40} windowSize={7} removeClippedSubviews
-      getItemLayout={(_, index) => ({ length: PRODUCT_ROW_HEIGHT + PRODUCT_ROW_GAP, offset: (PRODUCT_ROW_HEIGHT + PRODUCT_ROW_GAP) * index, index })}
+      getItemLayout={(_, index) => ({ length: productRowHeight + PRODUCT_ROW_GAP, offset: (productRowHeight + PRODUCT_ROW_GAP) * index, index })}
       ListEmptyComponent={<EmptyState icon={hasCriteria ? 'search' : 'package'} title={hasCriteria ? copy.products.noMatch : copy.catalog.emptyTitle} description={hasCriteria ? copy.products.noMatchDescription : copy.products.emptyDescription} actionLabel={hasCriteria ? copy.common.reset : copy.products.addProduct} onAction={hasCriteria ? clearCriteria : openCreate} />}
     />
 
@@ -158,8 +166,8 @@ export function ProductManagementScreen({ bottomNavigationInset = 0 }: { bottomN
 const styles = StyleSheet.create({
   header: { paddingHorizontal: spacing.md, paddingTop: spacing.xs, paddingBottom: spacing.sm, gap: spacing.xs },
   searchRow: { alignItems: 'flex-end', gap: spacing.xs }, searchInput: { minWidth: 0, flex: 1 },
-  titleRow: { minHeight: 48, alignItems: 'center', gap: spacing.xs }, titleCopy: { minWidth: 0, flex: 1 },
-  categoryButton: { minWidth: 44, minHeight: 44, paddingHorizontal: spacing.sm, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', gap: spacing.xxs }, addButton: { minWidth: 88 },
+  titleRow: { minHeight: 48, alignItems: 'center', gap: spacing.xs }, compactTitleRow: { alignItems: 'stretch' }, titleCopy: { minWidth: 0, flex: 1 }, compactTitleCopy: { flex: 0 }, titleActions: { alignItems: 'center', gap: spacing.xs }, compactTitleActions: { width: '100%' },
+  categoryButton: { minWidth: 44, minHeight: 44, paddingHorizontal: spacing.sm, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', gap: spacing.xxs }, compactCategoryButton: { flex: 1 }, addButton: { minWidth: 88 }, compactAddButton: { flex: 1 },
   toolRow: { minHeight: 44, alignItems: 'center', gap: spacing.xs }, toolButton: { minHeight: 44, paddingHorizontal: spacing.sm, borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center', gap: spacing.xxs }, resultCount: { minWidth: 0, flex: 1, alignItems: 'center', gap: spacing.xxs }, resultContext: { minWidth: 0, flexShrink: 1 },
   quickFilters: { gap: spacing.xs, paddingEnd: spacing.xs },
   list: { padding: spacing.md }, emptyList: { flexGrow: 1, justifyContent: 'center' }, separator: { height: PRODUCT_ROW_GAP }, pressed: { opacity: 0.76, transform: [{ scale: 0.98 }] },

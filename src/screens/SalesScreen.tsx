@@ -9,7 +9,7 @@ import { AppButton, ConfirmSheet, MonetaryValue, ScreenContainer, SegmentedContr
 import { useAppStore } from '@/store/useAppStore';
 import { Customer, PaymentMode, Product, Sale, SuspendedSaleSummary } from '@/types';
 import { spacing, typography, useAppTheme } from '@/theme';
-import { calculateSypPrice } from '@/utils/priceCalculator';
+import { buildProductPricingSnapshot } from '@/utils/productPricing';
 import { formatNumber } from '@/utils/formatters';
 import { shareInvoicePdf } from '@/utils/invoice';
 import { haptics } from '@/utils/haptics';
@@ -102,6 +102,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
     setCompletedSale(null);
     const rate = cartExchangeRate ?? state.exchangeRate;
     if (cartExchangeRate == null) setCartExchangeRate(rate);
+    const pricing = buildProductPricingSnapshot(product, rate, settings);
     setCart(current => addCartLine(current, {
         productId: product.id,
         cartKey: `product:${product.id}`,
@@ -110,8 +111,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
         isAvailable: product.is_active !== 0,
         availableQuantity: product.inventory_tracking_enabled ? product.inventory_quantity ?? 0 : undefined,
         quantity: 1,
-        unitPriceSyp: calculateSypPrice({ priceUsd: product.price_usd, exchangeRate: rate, isRoundingEnabled: settings.isRoundingEnabled, roundingTarget: settings.roundingTarget }),
-        unitCostSyp: product.cost_usd * rate,
+        ...pricing,
       }));
   }, [cart, cartExchangeRate, copy.inventory.insufficient, settings.isRoundingEnabled, settings.roundingTarget, snackbar, state.exchangeRate]);
 
@@ -184,7 +184,12 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       const products = new Map(state.products.map(product => [product.id, product]));
       const restored: CartLine[] = full.items.map(item => {
         const product = item.product_id == null ? undefined : products.get(item.product_id);
-        return { productId: item.product_id, cartKey: item.product_id == null ? `draft:${item.uuid}` : `product:${item.product_id}`, productName: item.product_name, barcodeSnapshot: item.barcode_snapshot, quantity: item.quantity, unitPriceSyp: item.unit_price_syp, unitCostSyp: item.unit_cost_syp, isAvailable: Boolean(product && product.is_active !== 0), availableQuantity: product?.inventory_tracking_enabled ? product.inventory_quantity ?? 0 : undefined };
+        return { productId: item.product_id, cartKey: item.product_id == null ? `draft:${item.uuid}` : `product:${item.product_id}`, productName: item.product_name, barcodeSnapshot: item.barcode_snapshot, quantity: item.quantity, unitPriceSyp: item.unit_price_syp, unitCostSyp: item.unit_cost_syp,
+          salePriceSourceCurrency: item.sale_price_source_currency, salePriceNativeDecimal: item.sale_price_native_decimal, salePriceNativeSyp: item.sale_price_native_syp,
+          salePriceExchangeRate: item.sale_price_exchange_rate, salePriceRoundingEnabled: item.sale_price_rounding_enabled == null ? null : item.sale_price_rounding_enabled === 1,
+          salePriceRoundingTarget: item.sale_price_rounding_target, costSourceCurrency: item.cost_source_currency, costNativeDecimal: item.cost_native_decimal,
+          costNativeSyp: item.cost_native_syp, costExchangeRate: item.cost_exchange_rate,
+          isAvailable: Boolean(product && product.is_active !== 0), availableQuantity: product?.inventory_tracking_enabled ? product.inventory_quantity ?? 0 : undefined };
       });
       setCart(restored); setDiscount(full.discount_syp ? String(full.discount_syp) : ''); setAmountPaid(''); setUsdAmount(''); setPaymentMode('SYP'); setExactPayment(true); setSelectedCustomerId(null); setOnAccountAmount('0');
       setCartExchangeRate(full.exchange_rate); setActiveDraftId(full.id); setCompletedSale(null); setSection('sale'); setReviewOpen(true); setDraftToResume(null);
@@ -281,7 +286,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
       if (product.inventory_tracking_enabled && currentQuantity >= (product.inventory_quantity ?? 0)) return { kind: 'inactive', title: copy.inventory.outOfStock };
       const nextQuantity = Math.min(999, currentQuantity + 1);
       const rate = cartExchangeRate ?? settings.exchangeRate;
-      const amount = calculateSypPrice({ priceUsd: product.price_usd, exchangeRate: rate, isRoundingEnabled: settings.isRoundingEnabled, roundingTarget: settings.roundingTarget });
+      const amount = buildProductPricingSnapshot(product, rate, settings).unitPriceSyp;
       addProduct(product);
       return { kind: 'success', title: product.name, quantity: formatNumber(nextQuantity, state.language), amount };
     }} />

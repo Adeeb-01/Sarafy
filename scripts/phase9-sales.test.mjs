@@ -117,7 +117,7 @@ test('invoice SQL searches/sorts/filters 5k invoices and 25k items with bound pa
 
 test('repeat sale architecture uses current product pricing/rate, retains quantities, and skips unavailable products', async () => {
   const [repeat, screen] = await Promise.all([read('src/utils/repeatSale.ts'), read('src/screens/SalesScreen.tsx')]);
-  assert.match(repeat, /product\.price_usd/); assert.match(repeat, /settings\.exchangeRate/); assert.match(repeat, /product\.is_active === 0/); assert.match(repeat, /quantity: item\.quantity/);
+  assert.match(repeat, /buildProductPricingSnapshot\(product, settings\.exchangeRate, settings\)/); assert.match(repeat, /product\.is_active === 0/); assert.match(repeat, /quantity: item\.quantity/);
   assert.doesNotMatch(repeat, /item\.unit_price_syp/); assert.match(screen, /setDiscount\(''\)/);
   const merged = addCartLine([{ productId: 1, cartKey: 'product:1', quantity: 3, unitPriceSyp: 10 }], { productId: 1, cartKey: 'product:1', quantity: 2, unitPriceSyp: 20 });
   assert.equal(merged[0].quantity, 5);
@@ -125,7 +125,7 @@ test('repeat sale architecture uses current product pricing/rate, retains quanti
 
 test('backup v10 retains phase 9 drafts semantics while accepting v8 payload fields', async () => {
   const [backup, importer, types] = await Promise.all([read('src/backup/backupManager.ts'), read('src/import/jsonImporter.ts'), read('src/import/importTypes.ts')]);
-assert.match(backup, /const SCHEMA_VERSION = 19/); assert.match(backup, /drafts: draftRows\.map/); assert.match(backup, /counts\.drafts != null/);
+assert.match(backup, /const SCHEMA_VERSION = 20/); assert.match(backup, /drafts: draftRows\.map/); assert.match(backup, /counts\.drafts != null/);
   assert.match(importer, /options\.mode === 'full_restore' && options\.entities\.includes\('sale_drafts'\)/);
   assert.match(importer, /sale\.amount_paid_syp \?\? null/); assert.match(importer, /item\.barcode_snapshot \?\? null/);
   assert.match(types, /drafts\?: SuspendedSale\[\]/);
