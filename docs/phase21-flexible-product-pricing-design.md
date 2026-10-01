@@ -2,9 +2,9 @@
 
 ## Status
 
-**DESIGN BLOCKED — PRICING POLICY DECISION REQUIRED**
+**DESIGN APPROVED — READY FOR SCHEMA v20**
 
-The repository audit is complete enough to identify a material pricing-policy conflict, but schema v20 must not start until the owner selects the integer conversion policy described under **Blocking policy gap**. No migration or Phase 21 runtime implementation is included in this design gate.
+The repository audit and pricing-policy review are complete. The owner-approved exact decimal, rounding, precision, snapshot, and legacy policies below close the prior fractional USD-to-SYP gap. No migration or Phase 21 runtime implementation is included in this design approval commit.
 
 ## Audited baseline
 
@@ -95,52 +95,65 @@ One transactional v19 to v20 migration should minimally add to `products`:
 
 Existing `cost_usd` and `price_usd` remain compatible `REAL` dollar fields and retain inactive values.
 
-Post-v20 sale items need immutable evidence for both sale and operational cost resolution. At minimum this includes source currency, native value, conversion rate when USD, resolved SYP unit/line values, and enough sale-rounding metadata to reproduce a USD sale price. Existing resolved SYP columns remain financially authoritative. Exact column types and constraints depend on the blocking integer policy.
+Post-v20 `sale_items` and `sale_draft_items` add nullable source metadata for legacy compatibility: Sale source currency, either canonical native USD decimal text or native integer SYP, USD pricing rate when applicable, rounding-enabled/target evidence, Cost source currency, either canonical native USD decimal text or native integer SYP, and USD cost rate when applicable. Existing `unit_price_syp` and `line_cost_syp` remain the resolved financial authorities. `unit_cost_syp REAL` remains compatibility/display evidence only for post-v20 USD-cost rows.
 
 No Product edit creates a journal. No Product column is used to derive GL COGS.
 
-## Blocking policy gap
+## Approved exact arithmetic policy
 
-The requirements simultaneously mandate:
+All committed Phase 21 SYP sale-price and operational-cost values are nonnegative safe integers. Binary floating-point multiplication and `Math.round` over USD-derived products are prohibited. A centralized pure pricing module parses a canonical decimal string into an integer numerator and power-of-ten denominator, performs multiplication and rounding with `BigInt`, and rejects a final result outside the safe integer range.
 
-1. backward-compatible existing USD behavior;
-2. no previously legal USD value should be blocked;
-3. deterministic resolution according to existing rules;
-4. SYP values must be safe integers; and
-5. floating-point SYP arithmetic must never be used.
+The approved rounding mode is **HALF-UP**. Exact half-quantum ties round upward.
 
-The current model cannot satisfy all five without a new owner-approved rule:
+### USD Sale Price
 
-- USD Product values are unrestricted SQLite `REAL` dollars and the form accepts arbitrary decimal precision.
-- The exchange rate is an integer.
-- With rounding disabled, the existing resolver returns the raw floating result.
-- Example: USD 1.23 at 15,001 SYP/USD resolves to 18,451.23 SYP.
-- The cart can display that fractional result, but `createSale` rejects it because unit sale price must be a safe integer.
-- Cost has a second ambiguity: the current unit operational cost may be fractional and only `line_cost_syp` is rounded after multiplication by quantity. Phase 21 asks for integer SYP evidence but does not say whether to round the unit or only the line, nor which rule to use.
-- Restricting USD Product values to cents would newly reject previously legal values and would not resolve fractional SYP when the rate is not divisible by 100.
-- Retaining raw floating values violates the explicit integer/no-floating requirements and prevents exact health-audit reproduction.
+The resolver rounds the exact rational USD value multiplied by the integer transaction rate directly to the final quantum:
 
-### Required owner decision
+- rounding disabled: quantum is 1 SYP;
+- rounding enabled: quantum is the stored rounding target (currently 5, 10, 500, or 1000 SYP).
 
-Choose an exact deterministic policy for USD Product Sale and USD Product Cost whenever the mathematical SYP result is fractional. The decision must state:
+There is no intermediate round-to-1 step. For example, exact 4.60 SYP with target 10 resolves directly to 0, not 10. Exact 18,450.5 with quantum 1 resolves to 18,451; 15 with quantum 10 resolves to 20.
 
-- rounding mode: half-up, floor, ceiling, or another explicit rule;
-- rounding stage for operational cost: unit first or immutable line total after quantity;
-- whether the existing optional sale-price rounding target is applied before or after the base integer conversion;
-- maximum accepted USD decimal precision for newly edited Products while preserving legacy stored values; and
-- how post-v20 health audit reproduces legacy/high-precision USD values.
+Native SYP Sale Price is already authoritative integer SYP. Neither the current exchange rate nor the optional USD rounding setting modifies it.
 
-### Recommended policy
+### USD operational Product Cost
 
-Use decimal-to-rational parsing with `BigInt`, never binary floating arithmetic:
+USD operational cost rounds exactly once at immutable line-total level:
 
-- preserve legacy USD `REAL` values but canonicalize their finite decimal string when resolving;
-- for USD Sale Price, convert the exact decimal×rate fraction to integer SYP using half-up, then apply the existing optional target rounding using integer arithmetic;
-- for USD operational Cost, compute the exact native decimal×rate×quantity fraction and half-up once at immutable line-total level; store the resolved line total as authoritative and retain the exact native/rate evidence;
-- permit up to the existing practical precision for imported legacy data, but define a deliberate precision limit for new UI/Excel edits;
-- store sale rounding-enabled/target metadata for exact replay.
+```text
+exact line cost = canonical native USD cost × transaction rate × quantity
+line_cost_syp = HALF_UP(exact line cost to 1 SYP)
+```
 
-This recommendation is not implemented because it changes the current rounding-disabled sale behavior and formalizes a cost rule that the owner has not approved.
+The system must not round the converted unit cost and then multiply. For USD 1.23, rate 15,001, and quantity 3, the authoritative line cost is HALF-UP(55,353.69) = 55,354 SYP.
+
+For a native SYP Cost, `line_cost_syp = cost_syp × quantity` with safe `BigInt` arithmetic and no conversion or rounding.
+
+The legacy `unit_cost_syp REAL` column remains compatibility/display evidence for a post-v20 USD-cost line. It is never authoritative for returns, analytics, Health Audit, or recomputation. The immutable integer `line_cost_syp`, exact native decimal snapshot, rate, and quantity are authoritative.
+
+### USD master precision
+
+New or explicitly modified Product USD Sale/Cost values accept zero through four decimal places. More than four is rejected with no silent rounding. The rule also applies to Product rows newly imported or updated through Excel.
+
+Pre-v20 SQLite `REAL` values with greater precision remain valid, migrate unchanged as USD/USD, and can be used for new transactions after stable canonicalization. An unrelated Product edit may preserve such an unchanged legacy value. If that USD field is explicitly changed, the replacement must satisfy the four-decimal rule. Backup/Restore fidelity does not apply the new-edit limit to stored historical Product values.
+
+### Canonical decimal snapshots
+
+One centralized implementation canonicalizes a finite legacy JS number into a stable decimal string before exact arithmetic. New UI/Excel text is parsed as exact decimal input before conversion. The immutable canonical string is captured on every post-v20 Draft/Sale line so later audit never reconstructs native value from the mutable Product row.
+
+For post-v20 USD Sale Price, snapshot source currency, canonical native decimal, transaction rate, rounding-enabled flag, rounding target, and resolved integer unit price. For SYP Sale Price, snapshot source currency, native integer SYP, null pricing rate/rounding conversion metadata, and identical resolved unit price.
+
+For post-v20 USD Cost, snapshot source currency, canonical native decimal, transaction rate, quantity, and authoritative integer line cost. For SYP Cost, snapshot source currency, native integer SYP, null cost conversion rate, quantity, and exact multiplied line cost.
+
+### Health Audit replay
+
+- USD Sale source: parse immutable canonical decimal, multiply by stored rate, round directly HALF-UP to stored final quantum, and require exact equality with `unit_price_syp`.
+- SYP Sale source: require safe nonnegative native SYP, null pricing conversion metadata, and exact equality with `unit_price_syp`.
+- USD Cost source: multiply immutable canonical decimal by stored rate and original quantity, round once HALF-UP to 1 SYP, and require exact equality with `line_cost_syp`.
+- SYP Cost source: require exact safe multiplication of native SYP by quantity to equal `line_cost_syp`.
+- Pre-v20 sale/draft rows with null source metadata remain valid and authoritative through their existing SYP snapshots; they are not replayed through Phase 21 formulas.
+
+Changing Product values, the current rate, or rounding settings after sale/draft creation cannot affect this replay.
 
 ## Other decisions that are not blockers
 
@@ -148,11 +161,31 @@ This recommendation is not implemented because it changes the current rounding-d
 - Product Safe Merge remains master-data merge only.
 - Product Excel import already exists and must be extended, not invented.
 - For a SYP-cost Product added to a USD purchase receipt, inactive USD cost cannot be used. The purchase cost remains an explicit USD receipt input; any conversion shown is only an uncommitted suggestion.
-- Existing Product price filters with USD-named thresholds should be redesigned to compare resolved SYP values or removed in favor of currency-neutral thresholds; raw cross-currency comparison is prohibited.
+- Existing zero-price filtering remains exact on the active native value. The old under-1/1-to-10/over-10 USD buckets retain their familiar thresholds as current-rate USD-equivalent bands: compare each active Sale Price after current SYP resolution with the exact current SYP equivalents of USD 1 and USD 10. Sale and Cost sorting likewise compare current resolved SYP values. Raw cross-currency native values are never compared.
 - Sale-line source metadata needs rounding evidence for USD Sale Price because native value plus rate alone cannot reproduce target rounding.
+
+## Consistency reread result
+
+The approved policy makes every audited path deterministic:
+
+- Product create/edit distinguishes unchanged high-precision legacy values from new four-decimal input.
+- Product display and comparable filters resolve from the active native field without row queries.
+- Cart, barcode, Repeat Sale, and mixed carts use the centralized resolver.
+- Drafts preserve exact source evidence and never reprice on resume.
+- Sale completion persists one coherent immutable Product pricing snapshot and exact integer SYP totals.
+- Returns and operational analytics continue using immutable integer SYP line snapshots.
+- Inventory suggestions may use the centralized current-rate resolver but remain uncommitted suggestions.
+- Purchases remain USD and never use an inactive Product USD cost as authoritative.
+- Backup/Restore preserves exact v20 fields while pre-v20 Products default to USD/USD.
+- Safe Merge updates the coherent Product master only and never historical snapshots.
+- Excel Product import validates new values to four places; historical finance remains export-only.
+- Health Audit replays post-v20 evidence and exempts pre-v20 rows from nonexistent source metadata.
+- GL inventory valuation, accounting COGS, journals, supplier layers, and realized FX are unchanged.
+
+No other pricing-policy gap remains after the complete reread.
 
 ## Implementation gate
 
-Schema remains v19. No migration, runtime pricing resolver, UI change, backup format change, or sale metadata write may begin until the owner approves the fractional USD-to-SYP policy.
+Schema remains v19 in this document-only approval commit. Implementation may now begin with one transactional v19 to v20 migration and the approved centralized arithmetic/snapshot model.
 
-**DESIGN BLOCKED — PRICING POLICY DECISION REQUIRED**
+**DESIGN APPROVED — READY FOR SCHEMA v20**
