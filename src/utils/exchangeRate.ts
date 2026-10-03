@@ -8,5 +8,6 @@ export function formatExchangeRateChange(oldRate: number, newRate: number, local
   const percent = exchangeRateChangePercent(oldRate, newRate);
   if (percent == null) return null;
   const rounded = Math.abs(percent) < 0.005 ? 0 : percent;
-  return `${rounded > 0 ? '+' : ''}${rounded.toLocaleString(locale, { maximumFractionDigits: 2 })}%`;
+  return formatPercent(rounded, locale.startsWith('ar') ? 'ar' : 'en', 2, true);
 }
+import { formatPercent } from './formatters.ts';

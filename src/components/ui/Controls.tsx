@@ -4,6 +4,7 @@ import { Feather } from '@expo/vector-icons';
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { haptics } from '@/utils/haptics';
 import { motion, radius, spacing, typography, useAppTheme } from '@/theme';
+import { formatNumber } from '@/utils/formatters';
 
 export function FilterChip({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
   const { colors } = useAppTheme();
@@ -43,7 +44,7 @@ export function AppSwitch({ value, onValueChange, label, disabled = false }: { v
 export function QuantityStepper({ value, onChange, onIncrement, onDecrement, min = 0, max = 999, label, increaseLabel, decreaseLabel, compact = false }: { value: number; onChange: (value: number) => void; onIncrement?: () => void; onDecrement?: () => void; min?: number; max?: number; label: string; increaseLabel: string; decreaseLabel: string; compact?: boolean }) {
   const { colors } = useAppTheme();
   const control = (icon: 'minus' | 'plus', disabled: boolean, accessibilityLabel: string, onPress: () => void) => <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={styles.stepButton}><View style={[compact ? styles.stepVisualCompact : styles.stepVisual, compact && { backgroundColor: colors.surfaceSecondary, borderColor: colors.border }]}><Feather name={icon} size={compact ? 17 : 18} color={disabled ? colors.disabled : colors.textPrimary} /></View></Pressable>;
-  return <View accessibilityRole="adjustable" accessibilityLabel={label} accessibilityValue={{ min, max, now: value }} style={[styles.stepper, compact && styles.stepperCompact, { borderColor: colors.border }]}>{control('minus', value <= min, decreaseLabel, () => { haptics.selection(); if (onDecrement) onDecrement(); else onChange(Math.max(min, value - 1)); })}<Text maxFontSizeMultiplier={1.2} style={[typography.numericMedium, styles.stepValue, compact && styles.stepValueCompact, { color: colors.textPrimary }]}>{value}</Text>{control('plus', value >= max, increaseLabel, () => { haptics.selection(); if (onIncrement) onIncrement(); else onChange(Math.min(max, value + 1)); })}</View>;
+  return <View accessibilityRole="adjustable" accessibilityLabel={label} accessibilityValue={{ min, max, now: value }} style={[styles.stepper, compact && styles.stepperCompact, { borderColor: colors.border }]}>{control('minus', value <= min, decreaseLabel, () => { haptics.selection(); if (onDecrement) onDecrement(); else onChange(Math.max(min, value - 1)); })}<Text maxFontSizeMultiplier={1.2} style={[typography.numericMedium, styles.stepValue, compact && styles.stepValueCompact, { color: colors.textPrimary }]}>{formatNumber(value, 'en')}</Text>{control('plus', value >= max, increaseLabel, () => { haptics.selection(); if (onIncrement) onIncrement(); else onChange(Math.min(max, value + 1)); })}</View>;
 }
 
 const styles = StyleSheet.create({

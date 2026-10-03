@@ -1,15 +1,10 @@
-import type { Language, PaymentInput, PaymentMode, PaymentSettlement } from '@/types';
+import type { PaymentInput, PaymentMode, PaymentSettlement } from '@/types';
+import { normalizeNumericInput } from './numerals.ts';
 
-function normalizeDigits(value: string) {
-  return value.trim()
-    .replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
-    .replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)))
-    .replace(/٫/g, '.')
-    .replace(/,/g, '.');
-}
+export { formatUsdCents } from './formatters.ts';
 
 export function parseUsdToCents(value: string): number | null {
-  const normalized = normalizeDigits(value);
+  const normalized = normalizeNumericInput(value, { allowDecimal: true });
   if (!/^(?:\d+)(?:\.\d{0,2})?$/.test(normalized)) return null;
   const [whole = '0', fraction = ''] = normalized.split('.');
   try {
@@ -17,14 +12,6 @@ export function parseUsdToCents(value: string): number | null {
     const result = Number(cents);
     return Number.isSafeInteger(result) ? result : null;
   } catch { return null; }
-}
-
-export function formatUsdCents(cents: number, language: Language = 'en') {
-  if (!Number.isSafeInteger(cents)) throw new Error('INVALID_USD_CENTS');
-  const sign = cents < 0 ? '-' : '';
-  const absolute = Math.abs(cents);
-  const value = `${sign}${Math.floor(absolute / 100)}.${String(absolute % 100).padStart(2, '0')} USD`;
-  return language === 'ar' ? value : value;
 }
 
 export function usdCentsToSyp(cents: number, rateSypPerUsd: number) {

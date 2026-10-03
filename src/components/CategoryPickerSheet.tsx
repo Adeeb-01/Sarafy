@@ -6,6 +6,7 @@ import { useAppStore } from '@/store/useAppStore';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
 import { haptics } from '@/utils/haptics';
 import { uiText } from '@/i18n';
+import { formatNumber } from '@/utils/formatters';
 
 type Props = {
   visible: boolean;
@@ -77,7 +78,8 @@ export function CategoryPickerSheet({ visible, onClose, value, onSelect, managem
       <View style={styles.list}>
         {filtered.map(category => {
           const selected = category === value;
-          return <ListItem key={category} title={category} description={copy.categories.count(String(counts[category] ?? 0))} icon="tag" rtl={rtl} haptic="selection" onPress={onSelect ? () => { onSelect(category); onClose(); } : undefined} trailing={selected ? <Feather name="check-circle" size={20} color={colors.primary} /> : <StatusChip label={String(counts[category] ?? 0)} tone="info" />} />;
+          const count = formatNumber(counts[category] ?? 0, language);
+          return <ListItem key={category} title={category} description={copy.categories.count(count)} icon="tag" rtl={rtl} haptic="selection" onPress={onSelect ? () => { onSelect(category); onClose(); } : undefined} trailing={selected ? <Feather name="check-circle" size={20} color={colors.primary} /> : <StatusChip label={count} tone="info" />} />;
         })}
       </View>
       {filtered.length === 0 && <EmptyState icon="search" title={copy.categories.noResults} description={copy.categories.noResultsDescription} />}

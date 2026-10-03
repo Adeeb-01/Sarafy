@@ -88,10 +88,10 @@ export function BottomSheet({ visible, onClose, title, children, rtl = false, sc
   </Modal>;
 }
 
-export function ConfirmSheet({ visible, onClose, onConfirm, title, description, icon, confirmLabel, cancelLabel, tone = 'info', isDestructive = false, loading = false, rtl = false, children }: { visible: boolean; onClose: () => void; onConfirm: () => void; title: string; description: string; icon?: keyof typeof Feather.glyphMap; confirmLabel: string; cancelLabel: string; tone?: 'info' | 'warning' | 'danger' | 'success'; isDestructive?: boolean; loading?: boolean; rtl?: boolean; children?: ReactNode }) {
+export function ConfirmSheet({ visible, onClose, onConfirm, title, description, icon, confirmLabel, cancelLabel, tone = 'info', isDestructive = false, loading = false, rtl = false, scrollable = false, children }: { visible: boolean; onClose: () => void; onConfirm: () => void; title: string; description: string; icon?: keyof typeof Feather.glyphMap; confirmLabel: string; cancelLabel: string; tone?: 'info' | 'warning' | 'danger' | 'success'; isDestructive?: boolean; loading?: boolean; rtl?: boolean; scrollable?: boolean; children?: ReactNode }) {
   const resolvedTone = isDestructive ? 'danger' : tone;
   const { colors } = useAppTheme(); const color = resolvedTone === 'info' ? colors.primary : colors[resolvedTone]; const soft = resolvedTone === 'info' ? colors.primarySoft : colors[`${resolvedTone}Soft` as const];
-  return <BottomSheet visible={visible} onClose={loading ? () => undefined : onClose} rtl={rtl}><View style={styles.confirm}>
+  return <BottomSheet visible={visible} onClose={loading ? () => undefined : onClose} rtl={rtl} scrollable={scrollable}><View style={styles.confirm}>
     <View style={[styles.confirmIcon, { backgroundColor: soft }]}><Feather name={icon ?? (resolvedTone === 'danger' ? 'trash-2' : resolvedTone === 'warning' ? 'alert-triangle' : resolvedTone === 'success' ? 'check' : 'info')} size={25} color={color} /></View>
     <Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: 'center' }]}>{title}</Text><Text style={[typography.body, { color: colors.textSecondary, textAlign: 'center' }]}>{description}</Text>{children}
     <View style={[styles.actions, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><AppButton label={cancelLabel} onPress={onClose} variant="secondary" disabled={loading} style={styles.action} /><AppButton label={confirmLabel} onPress={onConfirm} variant={resolvedTone === 'danger' ? 'danger' : 'primary'} loading={loading} style={styles.action} /></View>

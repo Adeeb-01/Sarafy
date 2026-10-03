@@ -4,7 +4,7 @@ import { Feather } from '@expo/vector-icons';
 import type { ExchangeRateHistoryEntry, Language } from '@/types';
 import { EmptyState } from '@/components/ui';
 import { uiText } from '@/i18n';
-import { formatNumber } from '@/utils/formatters';
+import { formatDateTime, formatNumber } from '@/utils/formatters';
 import { exchangeRateChangePercent, formatExchangeRateChange } from '@/utils/exchangeRate';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
 
@@ -24,7 +24,7 @@ const RateHistoryRow = memo(function RateHistoryRow({ item, language }: { item: 
   const formattedPercent = formatExchangeRateChange(item.old_rate, item.new_rate, language === 'ar' ? 'ar-SY' : 'en-US') ?? '0%';
   return <View accessibilityRole="text" accessibilityLabel={`${copy.rate.oldRate} ${item.old_rate}, ${copy.rate.newRate} ${item.new_rate}, ${formattedPercent}`} style={[styles.row, { backgroundColor: colors.surface, borderColor: colors.border }]}>
     <View style={styles.rateLine}><View style={styles.rateTransition}><Text style={[typography.numericSmall, { color: colors.textSecondary, writingDirection: 'ltr' }]}>{formatNumber(item.old_rate, language)}</Text><Feather name="arrow-right" size={17} color={colors.textMuted} /><Text style={[typography.numericEmphasis, { color: colors.textPrimary, writingDirection: 'ltr' }]}>{formatNumber(item.new_rate, language)}</Text></View><View style={styles.spacer} /><Text style={[typography.label, { color: rising ? colors.warning : colors.primary, writingDirection: 'ltr' }]}>{formattedPercent}</Text></View>
-    <Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{new Date(item.created_at).toLocaleString(language === 'ar' ? 'ar-SY' : 'en-US', { dateStyle: 'medium', timeStyle: 'short' })}</Text>
+    <Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left', writingDirection: 'ltr' }]}>{formatDateTime(item.created_at, language)}</Text>
   </View>;
 });
 

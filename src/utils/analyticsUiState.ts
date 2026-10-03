@@ -1,6 +1,6 @@
 import type { Language } from '../types/index.ts';
 import type { AnalyticsPeriod, MetricComparison } from './salesAnalytics.ts';
-import { formatNumber } from './formatters.ts';
+import { formatDate, formatNumber, formatPercent, formatTime } from './formatters.ts';
 import { uiText } from '../i18n/ui.ts';
 
 export const analyticsPeriodLabel = (period: AnalyticsPeriod, language: Language) => {
@@ -16,8 +16,7 @@ export const comparisonPeriodLabel = (period: AnalyticsPeriod, language: Languag
 export const formatAnalyticsPercent = (value: number | null, language: Language) => {
   if (value == null || !Number.isFinite(value)) return null;
   const normalized = Math.abs(value) < 0.05 ? 0 : value;
-  const capped = Math.abs(normalized) > 999 ? `${normalized < 0 ? '<-' : '>'}999` : `${normalized > 0 ? '+' : ''}${normalized.toLocaleString(language === 'ar' ? 'ar-SY' : 'en-US', { maximumFractionDigits: 1 })}`;
-  return `${capped}%`;
+  return Math.abs(normalized) > 999 ? `${normalized < 0 ? '<-' : '>'}999%` : formatPercent(normalized, language, 1, true);
 };
 
 export const formatComparison = (comparison: MetricComparison, language: Language) => {
@@ -27,12 +26,10 @@ export const formatComparison = (comparison: MetricComparison, language: Languag
 
 export const weekdayLabel = (day: number, language: Language, width: 'short' | 'long' = 'short') => {
   const sunday = new Date(2026, 7, 23 + day, 12);
-  return new Intl.DateTimeFormat(language === 'ar' ? 'ar-SY' : 'en-US', { weekday: width }).format(sunday);
+  return formatDate(sunday, language, { weekday: width });
 };
 
-export const hourLabel = (hour: number, language: Language) => new Intl.DateTimeFormat(
-  language === 'ar' ? 'ar-SY' : 'en-US', { hour: 'numeric', hour12: true },
-).format(new Date(2026, 0, 1, hour));
+export const hourLabel = (hour: number, language: Language) => formatTime(new Date(2026, 0, 1, hour), language, { hour: 'numeric', hour12: true });
 
 export const formatCompactAxisValue = (value: number, language: Language) => {
   if (!Number.isFinite(value)) return formatNumber(0, language);
@@ -47,15 +44,11 @@ export const formatCompactAxisValue = (value: number, language: Language) => {
 };
 
 export const formatTrendAxisDate = (date: Date, period: AnalyticsPeriod, language: Language) => {
-  const locale = language === 'ar' ? 'ar-SY' : 'en-US';
-  if (period === 'month') return new Intl.DateTimeFormat(locale, { day: 'numeric' }).format(date);
-  return new Intl.DateTimeFormat(locale, { weekday: 'short' }).format(date);
+  if (period === 'month') return formatDate(date, language, { day: 'numeric' });
+  return formatDate(date, language, { weekday: 'short' });
 };
 
-export const formatTrendTooltipDate = (date: Date, language: Language) => new Intl.DateTimeFormat(
-  language === 'ar' ? 'ar-SY' : 'en-US',
-  { weekday: 'short', month: 'short', day: 'numeric' },
-).format(date);
+export const formatTrendTooltipDate = (date: Date, language: Language) => formatDate(date, language, { weekday: 'short', month: 'short', day: 'numeric' });
 
 export const trendAccessibilitySummary = (
   points: { value: number }[],

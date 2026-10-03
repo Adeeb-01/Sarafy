@@ -9,6 +9,7 @@ import { createDeterministicUuid, isUuid } from '@/utils/uuid';
 import { isStoredProductImagePath } from '@/media/productImageStorage';
 import { assertAvailableDiskSpace } from '@/utils/storageSafety';
 import { canonicalizeLegacyUsdNumber, validateNewUsdDecimal } from '@/utils/productPricing';
+import { formatNumber, formatUsdCents } from '@/utils/formatters';
 
 const PRODUCTS_SHEET = 'Products';
 const CATEGORIES_SHEET = 'Categories';
@@ -148,7 +149,7 @@ export async function exportExcel(
   }))));
   saleItemsSheet['!cols'] = [{ wch: 24 }, { wch: 30 }, { wch: 22 }, { wch: 12 }, { wch: 17 }, { wch: 17 }, { wch: 17 }, { wch: 17 }];
   XLSX.utils.book_append_sheet(workbook, saleItemsSheet, 'Sale Items');
-  const salePaymentsSheet = XLSX.utils.json_to_sheet(salePayments.map(payment => ({ payment_uuid: payment.uuid, sale_uuid: payment.sale_uuid, currency: payment.currency, amount_minor: payment.amount_minor, display_amount: payment.currency === 'USD' ? `${Math.floor(payment.amount_minor / 100)}.${String(payment.amount_minor % 100).padStart(2, '0')} USD` : `${payment.amount_minor} SYP`, syp_equivalent: payment.syp_equivalent, exchange_rate: payment.exchange_rate_syp_per_usd ?? '' })));
+  const salePaymentsSheet = XLSX.utils.json_to_sheet(salePayments.map(payment => ({ payment_uuid: payment.uuid, sale_uuid: payment.sale_uuid, currency: payment.currency, amount_minor: payment.amount_minor, display_amount: payment.currency === 'USD' ? formatUsdCents(payment.amount_minor, 'en') : `${formatNumber(payment.amount_minor, 'en')} SYP`, syp_equivalent: payment.syp_equivalent, exchange_rate: payment.exchange_rate_syp_per_usd ?? '' })));
   salePaymentsSheet['!cols'] = [{ wch: 38 }, { wch: 38 }, { wch: 12 }, { wch: 18 }, { wch: 22 }, { wch: 18 }, { wch: 18 }];
   XLSX.utils.book_append_sheet(workbook, salePaymentsSheet, 'Sale Payments');
   const returns = sales.flatMap(sale => (sale.returns ?? []).map(record => ({ sale, record })));

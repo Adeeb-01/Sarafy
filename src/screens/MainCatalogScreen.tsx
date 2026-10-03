@@ -6,6 +6,7 @@ import { EmptyState, FilterChip, ScreenContainer, SearchInput, SectionHeader, St
 import { useAppStore } from '@/store/useAppStore';
 import { spacing, useAppTheme } from '@/theme';
 import { t, uiText } from '@/i18n';
+import { formatNumber } from '@/utils/formatters';
 
 export function MainCatalogScreen({ onManageProducts }: { onManageProducts?: () => void }) {
   const state = useAppStore(); const { colors } = useAppTheme(); const { width } = useWindowDimensions();
@@ -18,7 +19,7 @@ export function MainCatalogScreen({ onManageProducts }: { onManageProducts?: () 
 
   return <ScreenContainer><FlatList data={products} keyExtractor={item => String(item.id)} key={columns} numColumns={columns} columnWrapperStyle={styles.columns} contentContainerStyle={styles.list} keyboardShouldPersistTaps="handled" initialNumToRender={12} maxToRenderPerBatch={12} windowSize={7} removeClippedSubviews
     renderItem={({ item }) => <View style={{ width: cellWidth }}><ProductCard product={item} settings={state} /></View>}
-    ListHeaderComponent={<View><RateControl /><View style={styles.tools}><View style={[styles.headingRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><SectionHeader title={t(state.language, 'catalogTitle')} subtitle={t(state.language, 'catalogSubtitle')} rtl={rtl} /><StatusChip label={`${products.length} ${t(state.language, 'itemCount')}`} tone="info" /></View><SearchInput value={query} onChangeText={setQuery} placeholder={t(state.language, 'search')} clearLabel={copy.common.clearSearch} rtl={rtl} />
+    ListHeaderComponent={<View><RateControl /><View style={styles.tools}><View style={[styles.headingRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><SectionHeader title={t(state.language, 'catalogTitle')} subtitle={t(state.language, 'catalogSubtitle')} rtl={rtl} /><StatusChip label={`${formatNumber(products.length, state.language)} ${t(state.language, 'itemCount')}`} tone="info" /></View><SearchInput value={query} onChangeText={setQuery} placeholder={t(state.language, 'search')} clearLabel={copy.common.clearSearch} rtl={rtl} />
       <FlatList horizontal inverted={rtl} showsHorizontalScrollIndicator={false} data={['all', ...categories]} keyExtractor={item => item} contentContainerStyle={styles.filters} renderItem={({ item }) => <FilterChip label={item === 'all' ? t(state.language, 'all') : item} selected={category === item} onPress={() => setCategory(item)} />} />
     </View></View>}
     ListEmptyComponent={<View style={[styles.empty, { backgroundColor: colors.surface }]}><EmptyState icon={hasFilters ? 'search' : 'package'} title={hasFilters ? t(state.language, 'noProducts') : copy.catalog.emptyTitle} description={hasFilters ? copy.catalog.searchEmptyDescription : copy.catalog.emptyDescription} actionLabel={!hasFilters && onManageProducts ? t(state.language, 'addProduct') : undefined} onAction={!hasFilters ? onManageProducts : undefined} /></View>}

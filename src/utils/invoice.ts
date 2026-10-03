@@ -2,6 +2,8 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { Language, Sale } from '@/types';
 import { derivePaymentMode, formatUsdCents } from '@/utils/multiCurrency';
+import { formatNumber } from '@/utils/formatters';
+import { formatReportDateTime, formatReportSyp, REPORT_NUMERIC_CSS } from '@/utils/reportFormatting';
 
 const escapeHtml = (value: string) => value
   .replace(/&/g, '&amp;')
@@ -11,14 +13,13 @@ const escapeHtml = (value: string) => value
 
 export async function shareInvoicePdf(sale: Sale, language: Language) {
   const rtl = language === 'ar';
-  const locale = rtl ? 'ar-SY' : 'en-US';
-  const money = (value: number) => `${Math.round(value).toLocaleString(locale)} ${rtl ? 'ل.س' : 'SYP'}`;
+  const money = (value: number) => formatReportSyp(value, language, rtl ? 'ل.س' : 'SYP');
   const rows = sale.items.map(item => `
     <tr>
       <td>${escapeHtml(item.product_name)}</td>
-      <td>${item.quantity.toLocaleString(locale)}</td>
-      <td>${money(item.unit_price_syp)}</td>
-      <td>${money(item.line_total_syp)}</td>
+      <td class="num">${formatNumber(item.quantity, language)}</td>
+      <td class="money">${money(item.unit_price_syp)}</td>
+      <td class="money">${money(item.line_total_syp)}</td>
     </tr>`).join('');
   const payments = sale.payments ?? [];
   const syp = payments.find(payment => payment.currency === 'SYP');
@@ -36,7 +37,7 @@ export async function shareInvoicePdf(sale: Sale, language: Language) {
     <div class="line"><span>${rtl ? 'الباقي' : 'Change'}</span><b>${money(sale.change_syp ?? 0)}</b></div></div>`;
   const html = `<!doctype html><html dir="${rtl ? 'rtl' : 'ltr'}"><head><meta charset="utf-8">
     <style>
-      body{font-family:Arial,sans-serif;color:#151b2b;padding:32px}
+      ${REPORT_NUMERIC_CSS} body{font-family:Arial,sans-serif;color:#151b2b;padding:32px}
       header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #b52d67;padding-bottom:18px}
       h1{margin:0;color:#542250} .muted{color:#697386;font-size:12px}
       table{width:100%;border-collapse:collapse;margin-top:24px} th{background:#151b2b;color:#fff}
@@ -44,8 +45,8 @@ export async function shareInvoicePdf(sale: Sale, language: Language) {
       .totals{margin-top:24px;margin-${rtl ? 'right' : 'left'}:auto;width:280px}
       .line{display:flex;justify-content:space-between;padding:7px 0}.net{font-size:20px;font-weight:bold;color:#08796d;border-top:2px solid #08796d}.payment{margin-top:12px;padding-top:8px;border-top:1px solid #dce4ee}
     </style></head><body>
-    <header><div><h1>${rtl ? 'فاتورة مبيعات' : 'Sales invoice'}</h1><div class="muted">Sarafy · ${escapeHtml(sale.invoice_number)}</div></div>
-    <div class="muted">${new Date(sale.created_at).toLocaleString(locale)}</div></header>
+    <header><div><h1>${rtl ? 'فاتورة مبيعات' : 'Sales invoice'}</h1><div class="muted id">Sarafy · ${escapeHtml(sale.invoice_number)}</div></div>
+    <div class="muted num">${formatReportDateTime(sale.created_at, language)}</div></header>
     <table><thead><tr><th>${rtl ? 'المنتج' : 'Product'}</th><th>${rtl ? 'الكمية' : 'Qty'}</th><th>${rtl ? 'السعر' : 'Price'}</th><th>${rtl ? 'الإجمالي' : 'Total'}</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="totals"><div class="line"><span>${rtl ? 'المجموع' : 'Subtotal'}</span><b>${money(sale.subtotal_syp)}</b></div>
     <div class="line"><span>${rtl ? 'الحسم' : 'Discount'}</span><b>${money(sale.discount_syp)}</b></div>

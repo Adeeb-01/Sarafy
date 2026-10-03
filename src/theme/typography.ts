@@ -22,6 +22,11 @@ export const typography = {
   numericSmall: { fontFamily: fonts.bold, fontSize: 14, lineHeight: 20, fontVariant: ['tabular-nums'] } satisfies TextStyle,
 } as const;
 
+export const technicalText = {
+  writingDirection: 'ltr',
+  fontVariant: ['tabular-nums'],
+} satisfies TextStyle;
+
 type WithDefaults = {
   defaultProps?: { style?: unknown };
 };

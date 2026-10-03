@@ -1,3 +1,5 @@
+import { normalizeNumericInput } from './numerals.ts';
+
 export type QuantityLine = { productId: number | null; quantity: number; unitPriceSyp: number; cartKey?: string };
 
 const lineKey = (line: QuantityLine) => line.cartKey ?? `product:${line.productId}`;
@@ -31,8 +33,8 @@ export function clampCartDiscount(discount: number, subtotal: number) {
 }
 
 export function parseLocalizedNumber(value: string) {
-  const normalized = value.replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit))).replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit))).replace(/[٬,\s]/g, '').replace('٫', '.');
-  return Number(normalized);
+  const normalized = normalizeNumericInput(value, { allowDecimal: true, allowNegative: true });
+  return /^-?\d+(?:\.\d+)?$/.test(normalized) ? Number(normalized) : Number.NaN;
 }
 
 export type PaymentCalculation =

@@ -6,7 +6,7 @@ import { uiText } from '@/i18n';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
 import { useAppStore } from '@/store/useAppStore';
 import type { Expense, ExpenseCategory, ExpensePeriod, ExpenseQuery, ExpenseSort, Language } from '@/types';
-import { formatNumber } from '@/utils/formatters';
+import { formatDateTime, formatNumber } from '@/utils/formatters';
 import { parseLocalizedNumber } from '@/utils/salesUiState';
 import { haptics } from '@/utils/haptics';
 
@@ -36,7 +36,7 @@ export function ExpensesView({ language, bottomNavigationInset, hasActiveCashSes
 const ExpenseRow = memo(function ExpenseRow({ expense, language }: { expense: Expense; language: Language }) {
   const { colors } = useAppTheme(); const copy = uiText(language); const rtl = language === 'ar'; const note = expense.note?.trim() || expense.description.trim();
   const category = language === 'en' && expense.category_name_en ? expense.category_name_en : expense.category_name_ar || copy.expense.allCategories;
-  return <View style={[styles.row, { backgroundColor: colors.surface, borderColor: colors.border, flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={[styles.icon, { backgroundColor: colors.surfaceSecondary }]}><Feather name="minus" size={18} color={colors.textSecondary} /></View><View style={styles.rowCopy}><Text numberOfLines={1} style={[typography.bodyMedium, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{category}</Text>{note ? <Text numberOfLines={1} style={[typography.caption, { color: colors.textSecondary, textAlign: rtl ? 'right' : 'left' }]}>{note}</Text> : null}<Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{new Date(expense.created_at).toLocaleString(language === 'ar' ? 'ar-SY' : 'en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</Text></View><MonetaryValue value={expense.amount_syp} language={language} currencyLabel={copy.common.syp} inline style={[styles.money, { flexDirection: rtl ? 'row-reverse' : 'row' }]} textStyle={styles.moneyText} /></View>;
+  return <View style={[styles.row, { backgroundColor: colors.surface, borderColor: colors.border, flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={[styles.icon, { backgroundColor: colors.surfaceSecondary }]}><Feather name="minus" size={18} color={colors.textSecondary} /></View><View style={styles.rowCopy}><Text numberOfLines={1} style={[typography.bodyMedium, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{category}</Text>{note ? <Text numberOfLines={1} style={[typography.caption, { color: colors.textSecondary, textAlign: rtl ? 'right' : 'left' }]}>{note}</Text> : null}<Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left', writingDirection: 'ltr' }]}>{formatDateTime(expense.created_at, language, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</Text></View><MonetaryValue value={expense.amount_syp} language={language} currencyLabel={copy.common.syp} inline style={[styles.money, { flexDirection: rtl ? 'row-reverse' : 'row' }]} textStyle={styles.moneyText} /></View>;
 });
 
 function ExpenseFormSheet({ visible, language, categories, onClose, onManage, onSave }: { visible: boolean; language: Language; categories: ExpenseCategory[]; onClose: () => void; onManage: () => void; onSave: (categoryId: number, amount: number, note?: string | null) => Promise<void> }) {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
+import { InteractionManager, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { Feather } from '@expo/vector-icons';
@@ -62,6 +62,7 @@ export default function App() {
 
 function AppContent({ retainStartupError, retrying, onStartupFailure, onStartupReady, onRetry }: { retainStartupError: boolean; retrying: boolean; onStartupFailure: () => void; onStartupReady: () => void; onRetry: () => void }) {
   const { colors, isDark } = useAppTheme();
+  const { width } = useWindowDimensions();
   const { initialize, isReady, language } = useAppStore();
   const [tab, setTab] = useState<Tab>('catalog');
   const [bottomNavigationHeight, setBottomNavigationHeight] = useState(0);
@@ -94,6 +95,7 @@ function AppContent({ retainStartupError, retrying, onStartupFailure, onStartupR
   }
 
   const rtl = language === 'ar';
+  const compactNavigation = width < 360;
   const tabs: { key: Tab; icon: keyof typeof Feather.glyphMap }[] = [
     { key: 'catalog', icon: 'grid' }, { key: 'sales', icon: 'trending-up' }, { key: 'manage', icon: 'package' }, { key: 'inventory', icon: 'archive' }, { key: 'settings', icon: 'settings' },
   ];
@@ -107,7 +109,7 @@ function AppContent({ retainStartupError, retrying, onStartupFailure, onStartupR
         {tabs.map(item => { const active = tab === item.key; return <Pressable key={item.key} accessibilityRole="tab" accessibilityLabel={t(language, item.key)} accessibilityState={{ selected: active }} onPress={() => { if (!active) haptics.selection(); setTab(item.key); }} style={({ pressed }) => [styles.navItem, pressed && styles.pressed]}>
           <View style={[styles.activeMark, { backgroundColor: active ? colors.primary : 'transparent' }]} />
           <View style={styles.navIcon}><Feather name={item.icon} size={20} color={active ? colors.primary : colors.textMuted} /></View>
-          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78} maxFontSizeMultiplier={1.2} style={[typography.caption, styles.navLabel, { color: active ? colors.primary : colors.textMuted }]}>{t(language, item.key)}</Text>
+          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={compactNavigation ? 0.65 : 0.78} maxFontSizeMultiplier={compactNavigation ? 1 : 1.2} style={[typography.caption, styles.navLabel, compactNavigation && styles.compactNavLabel, { color: active ? colors.primary : colors.textMuted }]}>{t(language, item.key)}</Text>
         </Pressable>; })}
       </View>
     </SafeAreaView>
@@ -118,6 +120,6 @@ const styles = StyleSheet.create({
   app: { flex: 1 }, screen: { flex: 1 }, startupError: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   navSafe: { position: 'absolute', left: 0, right: 0, bottom: 0, borderTopWidth: StyleSheet.hairlineWidth }, nav: { minHeight: layout.bottomNavigationHeight, paddingHorizontal: spacing.xs, alignItems: 'center', justifyContent: 'space-around' },
   navItem: { flex: 1, minHeight: 54, alignItems: 'center', justifyContent: 'center', gap: 0 }, activeMark: { width: 18, height: 2, borderRadius: 1, marginBottom: 2 }, navIcon: { width: 38, height: 25, alignItems: 'center', justifyContent: 'center' },
-  navLabel: { width: '100%', textAlign: 'center' },
+  navLabel: { width: '100%', textAlign: 'center' }, compactNavLabel: { fontSize: 11, paddingHorizontal: 1 },
   pressed: { opacity: 0.72, transform: [{ scale: 0.96 }] },
 });

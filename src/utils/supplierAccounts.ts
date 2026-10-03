@@ -1,7 +1,8 @@
 import type { PaymentMode, SupplierPaymentInput } from '@/types';
+import { normalizeNumericInput } from './numerals.ts';
 
 export function parseSignedUsdToCents(value: string): number | null {
-  const normalized = value.trim().replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit))).replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit))).replace(/٫/g, '.').replace(/,/g, '.');
+  const normalized = normalizeNumericInput(value, { allowDecimal: true, allowNegative: true });
   if (!/^-?\d+(?:\.\d{0,2})?$/.test(normalized)) return null;
   const negative = normalized.startsWith('-'); const [whole = '0', fraction = ''] = normalized.replace('-', '').split('.');
   try { const result = Number(BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0') || '0')) * (negative ? -1 : 1); return Number.isSafeInteger(result) ? result : null; } catch { return null; }

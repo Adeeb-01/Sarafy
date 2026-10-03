@@ -16,6 +16,7 @@ import { BarcodeScannerScreen } from '@/components/barcode/BarcodeScannerScreen'
 import { ProductBarcodeConflictError } from '@/database/database';
 import { findBarcodeConflict, normalizeBarcode } from '@/utils/barcode';
 import { validateNewUsdDecimal } from '@/utils/productPricing';
+import { normalizeIdentifierDigits, normalizeNumericInput, sanitizeNumericInput } from '@/utils/numerals';
 
 type FormMode = 'create' | 'edit' | 'duplicate';
 type SectionKey = 'details' | 'pricing' | 'identity' | 'image';
@@ -84,8 +85,9 @@ export function ProductFormModal({ visible, product, mode, initialSection = 'det
   const scrollToSection = (section: SectionKey) => scrollRef.current?.scrollTo({ y: Math.max(0, (sectionOffsets.current[section] ?? 0) - spacing.sm), animated: true });
   const clearError = (key: keyof Errors) => setErrors(current => current[key] ? { ...current, [key]: undefined } : current);
   const updateBarcode = (value: string) => {
-    setBarcode(value);
-    const normalized = normalizeBarcode(value);
+    const canonical = normalizeIdentifierDigits(value);
+    setBarcode(canonical);
+    const normalized = normalizeBarcode(canonical);
     const editId = resolvedMode === 'edit' ? product?.id : undefined;
     const duplicate = findBarcodeConflict(products, normalized, editId);
     setErrors(current => ({ ...current, barcode: duplicate ? copy.productForm.duplicateBarcodeNamed(duplicate.name) : undefined }));
@@ -242,16 +244,12 @@ function FormSection({ title, icon, rtl, onLayout, children }: { title: string; 
 }
 
 function parseNumeric(value: string) {
-  const normalized = value
-    .replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
-    .replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)))
-    .replace(/[٬,\s]/g, '')
-    .replace('٫', '.');
-  return Number(normalized);
+  const normalized = normalizeNumericInput(value, { allowDecimal: true });
+  return /^\d+(?:\.\d+)?$/.test(normalized) ? Number(normalized) : Number.NaN;
 }
 
 function normalizeDecimalText(value: string) {
-  return value.replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit))).replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit))).replace(/[٬,\s]/g, '').replace('٫', '.');
+  return sanitizeNumericInput(value, { allowDecimal: true });
 }
 
 const styles = StyleSheet.create({

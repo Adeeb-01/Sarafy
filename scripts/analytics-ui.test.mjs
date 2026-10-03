@@ -40,13 +40,17 @@ test('view formatting is finite and localized for zero, loss, and huge values', 
     assert.ok(english && !/NaN|Infinity|undefined/.test(english));
     assert.ok(arabic && !/NaN|Infinity|undefined/.test(arabic));
   }
-  const [source, copy] = await Promise.all([
+  const [source, formatters, copy] = await Promise.all([
     readFile(new URL('../src/utils/analyticsUiState.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/utils/formatters.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/i18n/ui.ts', import.meta.url), 'utf8'),
   ]);
   assert.match(source, /Number\.isFinite/);
-  assert.match(source, /Intl\.DateTimeFormat/);
-  assert.match(source, /ar-SY/);
+  assert.match(source, /formatDate/);
+  assert.match(source, /formatTime/);
+  assert.match(formatters, /Intl\.DateTimeFormat/);
+  assert.match(formatters, /ar-SY-u-ca-gregory-nu-latn/);
+  assert.match(formatters, /numberingSystem: 'latn'/);
   assert.match(source, /trendAccessibilitySummary/);
   assert.match(source, /uiText\(language\)/);
   assert.match(copy, /thousand: 'ألف'/);

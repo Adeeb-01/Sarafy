@@ -5,7 +5,7 @@ import { AppButton, EmptyState, MonetaryValue } from '@/components/ui';
 import { uiText } from '@/i18n';
 import { Language, SuspendedSaleSummary } from '@/types';
 import { radius, spacing, typography, useAppTheme } from '@/theme';
-import { formatNumber } from '@/utils/formatters';
+import { formatDateTime, formatNumber } from '@/utils/formatters';
 
 export const SUSPENDED_ROW_HEIGHT = 150;
 
@@ -23,7 +23,7 @@ const SuspendedRow = memo(function SuspendedRow({ draft, language, busy, onResum
   { draft: SuspendedSaleSummary; language: Language; busy: boolean; onResume: (draft: SuspendedSaleSummary) => void; onDelete: (draft: SuspendedSaleSummary) => void }) {
   const { colors } = useAppTheme(); const copy = uiText(language); const rtl = language === 'ar';
   return <View style={[styles.row, { backgroundColor: colors.surface }]}>
-    <View style={[styles.header, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={[styles.pause, { backgroundColor: colors.warningSoft }]}><Feather name="pause" size={17} color={colors.warning} /></View><View style={styles.copy}><Text numberOfLines={1} style={[typography.bodyMedium, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{new Date(draft.updated_at).toLocaleString(language === 'ar' ? 'ar-SY' : 'en-US', { dateStyle: 'short', timeStyle: 'short' })}</Text><Text numberOfLines={1} style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.cartCount(formatNumber(draft.item_count, language))} · {draft.item_preview}</Text></View><MonetaryValue value={draft.net_total_syp} language={language} currencyLabel={copy.common.syp} inline style={{ flexDirection: rtl ? 'row-reverse' : 'row' }} textStyle={styles.money} /></View>
+    <View style={[styles.header, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={[styles.pause, { backgroundColor: colors.warningSoft }]}><Feather name="pause" size={17} color={colors.warning} /></View><View style={styles.copy}><Text numberOfLines={1} style={[typography.bodyMedium, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left', writingDirection: 'ltr' }]}>{formatDateTime(draft.updated_at, language, { dateStyle: 'short', timeStyle: 'short' })}</Text><Text numberOfLines={1} style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.cartCount(formatNumber(draft.item_count, language))} · {draft.item_preview}</Text></View><MonetaryValue value={draft.net_total_syp} language={language} currencyLabel={copy.common.syp} inline style={{ flexDirection: rtl ? 'row-reverse' : 'row' }} textStyle={styles.money} /></View>
     <View style={[styles.actions, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><AppButton label={copy.sales.resumeSale} icon="play" onPress={() => onResume(draft)} loading={busy} style={styles.resume} /><Pressable accessibilityRole="button" accessibilityLabel={copy.sales.deleteDraft} disabled={busy} onPress={() => onDelete(draft)} style={({ pressed }) => [styles.delete, { backgroundColor: colors.dangerSoft }, pressed && styles.pressed]}><Feather name="trash-2" size={18} color={colors.danger} /></Pressable></View>
   </View>;
 });

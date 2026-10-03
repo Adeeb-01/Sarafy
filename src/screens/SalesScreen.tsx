@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
 import { CartReviewModal, CartLine, InvoiceHistory, NewSaleView } from '@/components/sales/SalesViews';
 import { ExpensesView } from '@/components/expenses/ExpensesView';
@@ -30,8 +30,10 @@ type SalesSection = 'sale' | 'suspended' | 'invoices' | 'customers' | 'expenses'
 export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationInset?: number }) {
   const state = useAppStore();
   const { colors } = useAppTheme();
+  const { width } = useWindowDimensions();
   const snackbar = useSnackbar();
   const rtl = state.language === 'ar';
+  const compactHeader = width < 360;
   const copy = uiText(state.language);
   const [section, setSection] = useState<SalesSection>('sale');
   const [cart, setCart] = useState<CartLine[]>([]);
@@ -261,7 +263,7 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
 
   return <ScreenContainer>
     <View style={styles.page}>
-      <View style={[styles.header, { backgroundColor: colors.surfaceSecondary }]}><View style={[styles.titleRow, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={styles.titleCopy}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.subtitle}</Text></View><View style={[styles.headerActions, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><AppButton label={copy.cashSession.title} icon="briefcase" variant={section === 'cash' ? 'primary' : 'secondary'} onPress={() => setSection('cash')} style={styles.cashButton} /><AppButton label={`${copy.sales.suspendedSales}${visibleSuspendedSales.length ? ` (${formatNumber(visibleSuspendedSales.length, state.language)})` : ''}`} icon="pause" variant={section === 'suspended' ? 'primary' : 'secondary'} onPress={() => setSection('suspended')} style={styles.suspendedButton} /></View></View><SegmentedControl value={section} onChange={setSection} options={sectionOptions} rtl={rtl} subtle compactLabels accessibilityLabel={copy.sales.sections} /></View>
+      <View style={[styles.header, { backgroundColor: colors.surfaceSecondary }]}><View style={[styles.titleRow, compactHeader ? styles.compactTitleRow : { flexDirection: rtl ? 'row-reverse' : 'row' }]}><View style={[styles.titleCopy, compactHeader && styles.compactTitleCopy]}><Text style={[typography.titleLarge, { color: colors.textPrimary, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.title}</Text><Text style={[typography.caption, { color: colors.textMuted, textAlign: rtl ? 'right' : 'left' }]}>{copy.sales.subtitle}</Text></View><View style={[styles.headerActions, { flexDirection: rtl ? 'row-reverse' : 'row' }]}><AppButton label={copy.cashSession.title} icon="briefcase" variant={section === 'cash' ? 'primary' : 'secondary'} onPress={() => setSection('cash')} style={[styles.cashButton, compactHeader && styles.compactHeaderAction]} /><AppButton label={`${copy.sales.suspendedSales}${visibleSuspendedSales.length ? ` (${formatNumber(visibleSuspendedSales.length, state.language)})` : ''}`} icon="pause" variant={section === 'suspended' ? 'primary' : 'secondary'} onPress={() => setSection('suspended')} style={[styles.suspendedButton, compactHeader && styles.compactHeaderAction]} /></View></View><SegmentedControl value={section} onChange={setSection} options={sectionOptions} rtl={rtl} subtle compactLabels accessibilityLabel={copy.sales.sections} /></View>
       <Animated.View key={section} entering={FadeIn.duration(170).reduceMotion(ReduceMotion.System)} style={styles.content}>
         {section === 'sale' && <NewSaleView products={state.products} settings={settings} cart={cart} completedSale={completedSale} bottomNavigationInset={bottomNavigationInset} sharing={completedSale?.id === sharingSaleId} onAdd={addProduct} onQuantityChange={(id, quantity) => setQuantity(id, quantity)} onQuantityDelta={(id, delta) => changeQuantity(id, delta)} onReviewCart={() => setReviewOpen(true)} onNewSale={() => setCompletedSale(null)} onShare={sale => void shareSale(sale)} onViewDetails={sale => { setSelectedSale(sale); setSection('invoices'); }} onOpenScanner={() => setScannerOpen(true)} />}
         {section === 'suspended' && <SuspendedSalesView drafts={visibleSuspendedSales} language={state.language} bottomNavigationInset={bottomNavigationInset} busyId={draftBusyId} onResume={draft => { if (cart.length) setDraftToResume(draft); else void loadDraftIntoCart(draft, false); }} onDelete={setDraftToDelete} />}
@@ -295,4 +297,4 @@ export function SalesScreen({ bottomNavigationInset = 0 }: { bottomNavigationIns
   </ScreenContainer>;
 }
 
-const styles = StyleSheet.create({ page: { flex: 1 }, header: { paddingHorizontal: spacing.md, paddingTop: spacing.xs, paddingBottom: spacing.sm, gap: spacing.xs }, titleRow: { alignItems: 'center', gap: spacing.xs }, titleCopy: { minWidth: 0, flex: 1 }, headerActions: { gap: spacing.xxs }, cashButton: { minWidth: 90 }, suspendedButton: { minWidth: 106 }, content: { flex: 1 } });
+const styles = StyleSheet.create({ page: { flex: 1 }, header: { paddingHorizontal: spacing.md, paddingTop: spacing.xs, paddingBottom: spacing.sm, gap: spacing.xs }, titleRow: { alignItems: 'center', gap: spacing.xs }, compactTitleRow: { alignItems: 'stretch', gap: spacing.xs }, titleCopy: { minWidth: 0, flex: 1 }, compactTitleCopy: { flex: 0, width: '100%' }, headerActions: { gap: spacing.xxs }, compactHeaderAction: { flex: 1, minWidth: 0 }, cashButton: { minWidth: 90 }, suspendedButton: { minWidth: 106 }, content: { flex: 1 } });
